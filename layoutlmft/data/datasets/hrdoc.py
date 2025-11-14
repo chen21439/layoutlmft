@@ -24,24 +24,25 @@ _DESCRIPTION = """\
 HRDoc dataset for hierarchical document structure analysis
 """
 
-# HRDoc 的 14 个类别（来自 trans_class 映射后的类别）
+# HRDoc 的类别（从实际数据中提取，共16个类别）
 _LABELS = [
-    "O",  # 默认类别
-    "B-TITLE", "I-TITLE",
-    "B-AUTHOR", "I-AUTHOR",
+    "O",
     "B-AFFILI", "I-AFFILI",
-    "B-MAIL", "I-MAIL",
-    "B-SECTION", "I-SECTION",
-    "B-FSTLINE", "I-FSTLINE",
-    "B-PARALINE", "I-PARALINE",
-    "B-TABLE", "I-TABLE",
-    "B-FIGURE", "I-FIGURE",
+    "B-ALG", "I-ALG",
+    "B-AUTHOR", "I-AUTHOR",
     "B-CAPTION", "I-CAPTION",
     "B-EQUATION", "I-EQUATION",
+    "B-FIGURE", "I-FIGURE",
     "B-FOOTER", "I-FOOTER",
-    "B-HEADER", "I-HEADER",
     "B-FOOTNOTE", "I-FOOTNOTE",
+    "B-FSTLINE", "I-FSTLINE",
+    "B-MAIL", "I-MAIL",
     "B-OPARA", "I-OPARA",
+    "B-PARALINE", "I-PARALINE",
+    "B-SECTION", "I-SECTION",
+    "B-SECX", "I-SECX",
+    "B-TABLE", "I-TABLE",
+    "B-TITLE", "I-TITLE",
 ]
 
 
@@ -92,7 +93,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
         import socket
         hostname = socket.gethostname()
 
-        # 本机路径
+        # 本机路径 TODO: 更完善的环境处理
         if hostname == "mi" or os.path.exists("/root/code/layoutlmft"):
             data_dir = "/root/code/layoutlmft/data/hrdoc_funsd_format"
         # 云服务器路径

@@ -192,8 +192,9 @@ class SimpleRelationClassifier(nn.Module):
 
 class MultiClassRelationClassifier(nn.Module):
     """
-    多类别关系分类器（方案C第二版）
-    在二分类成功后，细化为多类：Connect/Contain/Equality/None
+    多类别关系分类器（论文对齐版本）
+    严格按照 HRDoc 论文实现：单层线性投影
+    公式：P_rel_(i,j) = softmax(LinearProj(Concat(h_i, h_j)))
     """
 
     def __init__(
@@ -212,15 +213,8 @@ class MultiClassRelationClassifier(nn.Module):
         if use_geometry:
             input_dim += 4
 
-        self.classifier = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, num_relations)
-        )
+        # 论文版本：单层线性投影（严格对齐）
+        self.classifier = nn.Linear(input_dim, num_relations)
 
     def forward(
         self,
@@ -295,3 +289,61 @@ RELATION_LABELS = {
 }
 
 RELATION_NAMES = ["none", "connect", "contain", "equality"]
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for handling class imbalance
+    论文公式：FL(p_t) = -α_t(1 - p_t)^γ * log(p_t)
+
+    Reference: Lin et al. "Focal Loss for Dense Object Detection" (ICCV 2017)
+    HRDoc paper: https://ar5iv.labs.arxiv.org/html/2303.13839
+
+    Args:
+        alpha: 类别权重，shape: [num_classes] 或 None
+        gamma: focusing parameter，论文中常用 2.0
+        reduction: 'mean', 'sum' 或 'none'
+    """
+
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha      # 类别权重 [num_classes]
+        self.gamma = gamma      # focusing parameter (论文中常用2)
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: [batch_size, num_classes] - 模型输出 logits
+            targets: [batch_size] - 真实标签（整数）
+
+        Returns:
+            loss: scalar (如果 reduction='mean' 或 'sum')
+        """
+        # 计算交叉熵（不进行归约）
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+
+        # 计算预测概率 p_t
+        p = torch.exp(-ce_loss)  # p_t
+
+        # 计算 focal weight: (1 - p_t)^γ
+        focal_weight = (1 - p) ** self.gamma
+
+        # Focal Loss = focal_weight * ce_loss
+        loss = focal_weight * ce_loss
+
+        # 应用类别权重 α_t
+        if self.alpha is not None:
+            if isinstance(self.alpha, torch.Tensor):
+                alpha_t = self.alpha[targets]
+            else:
+                alpha_t = torch.tensor(self.alpha, device=inputs.device)[targets]
+            loss = alpha_t * loss
+
+        # 归约
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
