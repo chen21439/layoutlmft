@@ -93,15 +93,20 @@ class HRDoc(datasets.GeneratorBasedBuilder):
         import socket
         hostname = socket.gethostname()
 
-        # 本机路径 TODO: 更完善的环境处理
-        if hostname == "mi" or os.path.exists("/root/code/layoutlmft"):
-            data_dir = "/root/code/layoutlmft/data/hrdoc_funsd_format"
-        # 云服务器路径
-        elif os.path.exists("/home/linux/code/layoutlmft"):
-            data_dir = "/home/linux/code/layoutlmft/data/hrdoc_funsd_format"
-        # 默认路径（使用环境变量）
-        else:
-            data_dir = os.getenv("HRDOC_DATA_DIR", "/root/code/layoutlmft/data/hrdoc_funsd_format")
+        # 优先使用环境变量
+        data_dir = os.getenv("HRDOC_DATA_DIR", None)
+
+        # 如果没有设置环境变量，根据 hostname 自动检测
+        if data_dir is None:
+            # 本机路径（默认使用 E 盘的 HRDS 数据）
+            if hostname == "mi" or os.path.exists("/root/code/layoutlmft"):
+                data_dir = "/mnt/e/models/data/Section/HRDS"
+            # 云服务器路径
+            elif os.path.exists("/home/linux/code/layoutlmft"):
+                data_dir = "/home/linux/code/layoutlmft/data/hrdoc_funsd_format"
+            # 默认路径
+            else:
+                data_dir = "/root/code/layoutlmft/data/hrdoc_funsd_format"
 
         splits = []
         # 训练集
@@ -163,8 +168,32 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
             image, size = load_image(image_path)
 
-            for line_idx, item in enumerate(data["form"]):
-                words, label = item["words"], item["label"]
+            # 支持两种数据格式：
+            # 1. FUNSD格式：{"form": [...]}
+            # 2. HRDS格式：直接的数组 [...]
+            if isinstance(data, dict) and "form" in data:
+                form_data = data["form"]
+            elif isinstance(data, list):
+                form_data = data
+            else:
+                logger.warning(f"Unknown data format in {file_path}")
+                continue
+
+            for line_idx, item in enumerate(form_data):
+                # 支持两种字段名：label（FUNSD）或 class（HRDS）
+                label = item.get("label") or item.get("class", "O")
+
+                # 支持两种格式：
+                # FUNSD格式：{"words": [{...}]}
+                # HRDS格式：{"text": "...", "box": [...]}
+                if "words" in item:
+                    words = item["words"]
+                else:
+                    # HRDS格式：单行文本
+                    words = [{
+                        "text": item["text"],
+                        "box": item["box"]
+                    }]
                 words = [w for w in words if w["text"].strip() != ""]
                 if len(words) == 0:
                     continue
