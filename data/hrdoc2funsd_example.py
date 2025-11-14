@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-将 HRDoc 完整数据集格式转换为 FUNSD 格式，用于 layoutlmft 训练
-支持 train/test 子目录结构和统一的 images 目录
+将 HRDoc 格式转换为 FUNSD 格式，用于 layoutlmft 训练
 """
 
 import json
@@ -73,26 +72,14 @@ def convert_hrdoc_to_funsd(hrdoc_dir, output_dir, split_name="train"):
     ann_out.mkdir(parents=True, exist_ok=True)
 
     # 查找所有 JSON 标注文件
-    # 支持两种结构：1) split_name子目录下的JSON 2) 根目录下的JSON
+    # 支持两种结构：1) 根目录下的JSON 2) split_name子目录下的JSON
     json_dir = hrdoc_path / split_name
     if json_dir.exists():
         json_files = sorted(json_dir.glob("*.json"))
-        print(f"从 {json_dir} 加载数据")
     else:
         json_files = sorted(hrdoc_path.glob("*.json"))
-        print(f"从 {hrdoc_path} 加载数据")
 
     print(f"找到 {len(json_files)} 个标注文件")
-
-    if len(json_files) == 0:
-        print(f"\n⚠️  警告: 未找到任何 JSON 文件！")
-        print(f"   请检查输入目录: {hrdoc_dir}")
-        print(f"   期望的目录结构:")
-        print(f"   HRDS/")
-        print(f"   ├── train/          (JSON标注)")
-        print(f"   ├── test/           (JSON标注)")
-        print(f"   └── images/         (统一图片目录)")
-        return
 
     for json_file in json_files:
         paper_name = json_file.stem  # 例如 ACL_2020.acl-main.1
@@ -165,7 +152,7 @@ def convert_hrdoc_to_funsd(hrdoc_dir, output_dir, split_name="train"):
             # 复制对应的图片 - 支持两种目录结构
             img_found = False
 
-            # 方式1: 独立论文图片目录 (示例数据结构: HRDS/paper_name/)
+            # 方式1: 独立论文图片目录 (本地示例数据: HRDS/paper_name/)
             img_dir = hrdoc_path / paper_name
             if img_dir.exists() and img_dir.is_dir():
                 for ext in ['.jpg', '.png', '.jpeg']:
@@ -176,7 +163,7 @@ def convert_hrdoc_to_funsd(hrdoc_dir, output_dir, split_name="train"):
                         img_found = True
                         break
 
-            # 方式2: 公共images目录 (完整数据集结构: HRDS/images/paper_id/)
+            # 方式2: 公共images目录 (云服务器完整数据: HRDS/images/paper_id/)
             if not img_found:
                 common_img_dir = hrdoc_path / "images"
                 if common_img_dir.exists():
@@ -210,7 +197,7 @@ def collect_labels(hrdoc_dir, split_name="train"):
     hrdoc_path = Path(hrdoc_dir)
     labels = set()
 
-    # 支持两种结构：split_name子目录下的JSON 或 根目录下的JSON
+    # 支持两种结构：根目录下的JSON 或 split_name子目录下的JSON
     json_dir = hrdoc_path / split_name
     if json_dir.exists():
         json_files = json_dir.glob("*.json")
@@ -238,38 +225,28 @@ if __name__ == "__main__":
 
     # 命令行参数解析
     parser = argparse.ArgumentParser(
-        description="将 HRDoc 完整数据集格式转换为 FUNSD 格式（支持 train/test 子目录）",
+        description="将 HRDoc 格式转换为 FUNSD 格式",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例用法:
-  # 使用默认参数（本机完整数据集）
+  # 使用默认参数
   python hrdoc2funsd.py
 
-  # 指定输入输出路径（云服务器）
-  python hrdoc2funsd.py --input /home/linux/code/data/HRDS --output /home/linux/code/layoutlmft/data/hrdoc_funsd_format
+  # 指定输入输出路径
+  python hrdoc2funsd.py --input /path/to/HRDS --output /path/to/output
 
-  # 只转换训练集
+  # 只指定输入路径（使用默认输出）
+  python hrdoc2funsd.py --input /path/to/HRDS
+
+  # 指定数据集划分
   python hrdoc2funsd.py --input /path/to/HRDS --split train
-
-  # 转换测试集
-  python hrdoc2funsd.py --input /path/to/HRDS --split test
-
-数据集结构:
-  本脚本支持完整 HRDS 数据集结构:
-  HRDS/
-  ├── train/          # 训练集JSON标注
-  ├── test/           # 测试集JSON标注
-  └── images/         # 统一的图片目录
-      ├── paper_id_1/
-      ├── paper_id_2/
-      └── ...
         """
     )
     parser.add_argument(
         "--input", "-i",
         type=str,
-        default="/mnt/e/models/data/Section/HRDS",
-        help="HRDoc 完整数据集目录 (默认: /mnt/e/models/data/Section/HRDS)"
+        default="/mnt/e/programFile/AIProgram/modelTrain/HRDoc/examples/HRDS",
+        help="HRDoc 原始数据目录 (默认: /mnt/e/programFile/AIProgram/modelTrain/HRDoc/examples/HRDS)"
     )
     parser.add_argument(
         "--output", "-o",
@@ -287,33 +264,30 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    HRDOC_FULL = args.input
+    HRDOC_EXAMPLES = args.input
     OUTPUT_DIR = args.output
     SPLIT_NAME = args.split
 
     print("=" * 60)
-    print("HRDoc 完整数据集 → FUNSD 格式转换")
+    print("HRDoc → FUNSD 格式转换")
     print("=" * 60)
     print(f"\n配置:")
-    print(f"  输入目录: {HRDOC_FULL}")
+    print(f"  输入目录: {HRDOC_EXAMPLES}")
     print(f"  输出目录: {OUTPUT_DIR}")
     print(f"  数据划分: {SPLIT_NAME}")
 
     # 检查输入目录
-    if not os.path.exists(HRDOC_FULL):
-        print(f"\n❌ 错误: 输入目录不存在: {HRDOC_FULL}")
-        print(f"\n提示:")
-        print(f"  本机路径: /mnt/e/models/data/Section/HRDS")
-        print(f"  云服务器路径: /home/linux/code/data/HRDS")
+    if not os.path.exists(HRDOC_EXAMPLES):
+        print(f"\n❌ 错误: 输入目录不存在: {HRDOC_EXAMPLES}")
         exit(1)
 
     # 转换数据
     print(f"\n[1/2] 转换 {SPLIT_NAME} 数据...")
-    convert_hrdoc_to_funsd(HRDOC_FULL, OUTPUT_DIR, split_name=SPLIT_NAME)
+    convert_hrdoc_to_funsd(HRDOC_EXAMPLES, OUTPUT_DIR, split_name=SPLIT_NAME)
 
     # 收集所有标签
     print("\n[2/2] 收集标签...")
-    labels = collect_labels(HRDOC_FULL, split_name=SPLIT_NAME)
+    labels = collect_labels(HRDOC_EXAMPLES, split_name=SPLIT_NAME)
     print(f"找到 {len(labels)} 个标签:")
     for label in labels:
         print(f"  - {label}")
