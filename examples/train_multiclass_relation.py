@@ -24,6 +24,7 @@ from sklearn.metrics import (
 
 from layoutlmft.models.relation_classifier import (
     MultiClassRelationClassifier,
+    FocalLoss,
     RELATION_LABELS,
     RELATION_NAMES,
     compute_geometry_features
@@ -346,7 +347,10 @@ def main():
     class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
     logger.info(f"类别权重: {class_weights.cpu().numpy()}")
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # 使用 FocalLoss（论文对齐）
+    # 论文公式：L_rel = Σ FocalLoss(R_i, P_rel_(i,j)) / L
+    # gamma=2.0 是论文标准参数
+    criterion = FocalLoss(alpha=class_weights, gamma=2.0)
 
     # 训练循环
     logger.info(f"\n开始训练（最多 {max_steps} 步）...")

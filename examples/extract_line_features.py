@@ -34,10 +34,12 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    # 模型路径（优先从环境变量读取）
-    model_path = os.getenv("LAYOUTLMFT_MODEL_PATH", os.path.join(project_root, "output/hrdoc_test"))
+    # 模型路径（优先从环境变量读取，默认使用 E 盘训练的模型）
+    model_path = os.getenv("LAYOUTLMFT_MODEL_PATH", "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000")
     # 特征输出到 E 盘节省系统盘空间
     output_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features")
+    # 数据集路径（优先从环境变量读取）
+    data_dir = os.getenv("HRDOC_DATA_DIR", "/mnt/e/models/data/Section/HRDS")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -52,11 +54,32 @@ def main():
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用设备: {device}")
+    logger.info(f"数据集路径: {data_dir}")
+    logger.info(f"模型路径: {model_path}")
+
+    # 设置数据集路径环境变量（传递给 hrdoc.py）
+    os.environ["HRDOC_DATA_DIR"] = data_dir
 
     # 加载数据集
-    logger.info("加载训练数据集...")
+    logger.info("加载数据集...")
     datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
-    train_dataset = datasets["train"]
+
+    # 检查是否有 test 集（将其作为 validation 集使用）
+    has_validation = "test" in datasets
+    logger.info(f"数据集包含: {list(datasets.keys())}")
+
+    # 是否限制数据量（默认-1表示不限制，提取所有数据）
+    num_samples = int(os.getenv("LAYOUTLMFT_NUM_SAMPLES", "-1"))
+    if num_samples > 0:
+        logger.info(f"限制样本数: {num_samples}")
+        if len(datasets["train"]) > num_samples:
+            datasets["train"] = datasets["train"].select(range(num_samples))
+        if has_validation and len(datasets["test"]) > num_samples:
+            datasets["test"] = datasets["test"].select(range(num_samples))
+    else:
+        logger.info("提取所有数据（不限制样本数）")
+
+    logger.info(f"实际样本数 - train: {len(datasets['train'])}, validation: {len(datasets.get('test', []))}")
 
     # 加载模型和tokenizer
     logger.info("加载模型...")
@@ -66,77 +89,6 @@ def main():
     model = model.to(device)
     model.eval()
 
-    # Tokenize数据
-    logger.info("Tokenizing数据...")
-    def tokenize_and_align_labels(examples):
-        tokenized_inputs = tokenizer(
-            examples["tokens"],
-            padding="max_length",
-            truncation=True,
-            max_length=512,
-            return_overflowing_tokens=True,
-            is_split_into_words=True,
-        )
-
-        labels = []
-        bboxes = []
-        images = []
-        line_ids_list = []
-        line_parent_ids_list = []
-        line_relations_list = []
-
-        for batch_index in range(len(tokenized_inputs["input_ids"])):
-            word_ids = tokenized_inputs.word_ids(batch_index=batch_index)
-            org_batch_index = tokenized_inputs["overflow_to_sample_mapping"][batch_index]
-
-            label = examples["ner_tags"][org_batch_index]
-            bbox = examples["bboxes"][org_batch_index]
-            image = examples["image"][org_batch_index]
-            line_ids = examples["line_ids"][org_batch_index]
-
-            previous_word_idx = None
-            label_ids = []
-            bbox_inputs = []
-            token_line_ids = []
-
-            for word_idx in word_ids:
-                if word_idx is None:
-                    label_ids.append(-100)
-                    bbox_inputs.append([0, 0, 0, 0])
-                    token_line_ids.append(-1)
-                elif word_idx != previous_word_idx:
-                    label_ids.append(label[word_idx])
-                    bbox_inputs.append(bbox[word_idx])
-                    token_line_ids.append(line_ids[word_idx])
-                else:
-                    label_ids.append(-100)
-                    bbox_inputs.append(bbox[word_idx])
-                    token_line_ids.append(line_ids[word_idx])
-                previous_word_idx = word_idx
-
-            labels.append(label_ids)
-            bboxes.append(bbox_inputs)
-            images.append(image)
-            line_ids_list.append(token_line_ids)
-            line_parent_ids_list.append(examples["line_parent_ids"][org_batch_index])
-            line_relations_list.append(examples["line_relations"][org_batch_index])
-
-        tokenized_inputs["labels"] = labels
-        tokenized_inputs["bbox"] = bboxes
-        tokenized_inputs["image"] = images
-        tokenized_inputs["line_ids"] = line_ids_list
-        tokenized_inputs["line_parent_ids"] = line_parent_ids_list
-        tokenized_inputs["line_relations"] = line_relations_list
-
-        return tokenized_inputs
-
-    train_dataset = train_dataset.map(
-        tokenize_and_align_labels,
-        batched=True,
-        remove_columns=train_dataset.column_names,
-        num_proc=1,
-    )
-
     # Data collator
     data_collator = DataCollatorForKeyValueExtraction(
         tokenizer,
@@ -145,107 +97,170 @@ def main():
         max_length=512,
     )
 
-    # 提取特征
-    logger.info("开始提取行级特征...")
-    feature_extractor = LineFeatureExtractor()
+    # 分批次提取特征的函数
+    def extract_features_in_batches(raw_dataset, split_name, batch_size=50):
+        """分批次提取特征，避免一次性加载所有数据"""
+        import numpy as np
 
-    all_page_features = []
+        logger.info(f"开始分批次提取 {split_name} 集的行级特征...")
+        logger.info(f"总样本数: {len(raw_dataset)}, 批次大小: {batch_size}")
 
-    with torch.no_grad():
-        for idx in tqdm(range(len(train_dataset)), desc="提取特征"):
-            # 获取单个样本
-            sample = train_dataset[idx]
+        feature_extractor = LineFeatureExtractor()
+        all_page_features = []
 
-            # 保存元数据（不传给模型）
-            line_parent_ids = sample.pop("line_parent_ids")
-            line_relations = sample.pop("line_relations")
-            line_ids = sample["line_ids"]  # 保留line_ids用于特征提取
+        num_batches = (len(raw_dataset) + batch_size - 1) // batch_size
 
-            # 计算行级 bbox（在 collator 之前，因为需要原始 bbox 数据）
-            import numpy as np
-            token_bboxes = sample["bbox"]  # List[List[int, int, int, int]]
-            token_line_ids = line_ids      # List[int]
+        with torch.no_grad():
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(raw_dataset))
 
-            # 找到最大行 id
-            valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
-            if len(valid_line_ids) > 0:
-                max_line_id = max(valid_line_ids)
-                num_lines = max_line_id + 1
+                logger.info(f"处理批次 {batch_idx+1}/{num_batches} (样本 {start_idx}-{end_idx-1})")
 
-                # 初始化行级 bbox
-                line_bboxes = np.zeros((num_lines, 4), dtype=np.float32)
-                line_bboxes[:, 0] = 1e9   # x1 初始化为极大值
-                line_bboxes[:, 1] = 1e9   # y1
-                line_bboxes[:, 2] = -1e9  # x2 初始化为极小值
-                line_bboxes[:, 3] = -1e9  # y2
+                # 处理当前批次的每个样本
+                for idx in tqdm(range(start_idx, end_idx), desc=f"批次{batch_idx+1}"):
+                    # 获取原始样本
+                    raw_sample = raw_dataset[idx]
 
-                # 对每个 token，更新其所属行的 bbox
-                for bbox, lid in zip(token_bboxes, token_line_ids):
-                    if lid < 0:
-                        continue
-                    x1, y1, x2, y2 = bbox
-                    line_bboxes[lid, 0] = min(line_bboxes[lid, 0], x1)
-                    line_bboxes[lid, 1] = min(line_bboxes[lid, 1], y1)
-                    line_bboxes[lid, 2] = max(line_bboxes[lid, 2], x2)
-                    line_bboxes[lid, 3] = max(line_bboxes[lid, 3], y2)
-            else:
-                # 如果没有有效的行，创建空数组
-                line_bboxes = np.zeros((0, 4), dtype=np.float32)
+                    # Tokenize单个样本
+                    tokenized = tokenizer(
+                        raw_sample["tokens"],
+                        padding="max_length",
+                        truncation=True,
+                        max_length=512,
+                        is_split_into_words=True,
+                    )
 
-            # 准备输入（不包含元数据）
-            batch = data_collator([sample])
+                    # 对齐标签和bbox
+                    word_ids = tokenized.word_ids()
 
-            # 将所有张量转移到device
-            for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k] = v.to(device)
-                elif k == "image" and hasattr(v, "to"):
-                    batch[k] = v.to(device)
+                    labels = []
+                    bboxes = []
+                    token_line_ids = []
 
-            # 前向传播获取hidden states
-            outputs = model(
-                input_ids=batch["input_ids"],
-                bbox=batch["bbox"],
-                attention_mask=batch["attention_mask"],
-                image=batch["image"],
-                output_hidden_states=True,
-            )
+                    previous_word_idx = None
+                    for word_idx in word_ids:
+                        if word_idx is None:
+                            labels.append(-100)
+                            bboxes.append([0, 0, 0, 0])
+                            token_line_ids.append(-1)
+                        elif word_idx != previous_word_idx:
+                            labels.append(raw_sample["ner_tags"][word_idx])
+                            bboxes.append(raw_sample["bboxes"][word_idx])
+                            token_line_ids.append(raw_sample["line_ids"][word_idx])
+                        else:
+                            labels.append(-100)
+                            bboxes.append(raw_sample["bboxes"][word_idx])
+                            token_line_ids.append(raw_sample["line_ids"][word_idx])
+                        previous_word_idx = word_idx
 
-            # 获取最后一层hidden states
-            hidden_states = outputs.hidden_states[-1]  # [1, seq_len, hidden_size]
+                    # 计算行级 bbox
+                    valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
+                    if len(valid_line_ids) > 0:
+                        max_line_id = max(valid_line_ids)
+                        num_lines = max_line_id + 1
 
-            # 注意：LayoutLMv2的输出序列长度可能比输入长（因为视觉embedding）
-            # 我们只取前面对应文本token的部分
-            text_seq_len = batch["input_ids"].shape[1]
-            hidden_states = hidden_states[:, :text_seq_len, :]  # [1, 512, hidden_size]
+                        line_bboxes = np.zeros((num_lines, 4), dtype=np.float32)
+                        line_bboxes[:, 0] = 1e9
+                        line_bboxes[:, 1] = 1e9
+                        line_bboxes[:, 2] = -1e9
+                        line_bboxes[:, 3] = -1e9
 
-            # 提取行级特征
-            line_ids_tensor = torch.tensor(line_ids, device=device).unsqueeze(0)
-            line_features, line_mask = feature_extractor.extract_line_features(
-                hidden_states, line_ids_tensor, pooling="mean"
-            )
+                        for bbox, lid in zip(bboxes, token_line_ids):
+                            if lid < 0:
+                                continue
+                            x1, y1, x2, y2 = bbox
+                            line_bboxes[lid, 0] = min(line_bboxes[lid, 0], x1)
+                            line_bboxes[lid, 1] = min(line_bboxes[lid, 1], y1)
+                            line_bboxes[lid, 2] = max(line_bboxes[lid, 2], x2)
+                            line_bboxes[lid, 3] = max(line_bboxes[lid, 3], y2)
+                    else:
+                        line_bboxes = np.zeros((0, 4), dtype=np.float32)
 
-            # 保存特征和元数据
-            page_data = {
-                "line_features": line_features.cpu(),  # [1, max_lines, hidden_size]
-                "line_mask": line_mask.cpu(),          # [1, max_lines]
-                "line_parent_ids": line_parent_ids,    # List[int]
-                "line_relations": line_relations,      # List[str]
-                "line_bboxes": line_bboxes,            # numpy array [num_lines, 4]
-                "page_idx": idx,
-            }
+                    # 准备模型输入
+                    sample_dict = {
+                        "input_ids": tokenized["input_ids"],
+                        "attention_mask": tokenized["attention_mask"],
+                        "bbox": bboxes,
+                        "labels": labels,
+                        "image": raw_sample["image"],
+                    }
 
-            all_page_features.append(page_data)
+                    batch = data_collator([sample_dict])
 
-    # 保存到磁盘
-    output_file = os.path.join(output_dir, "train_line_features.pkl")
-    logger.info(f"保存特征到 {output_file}")
-    with open(output_file, "wb") as f:
-        pickle.dump(all_page_features, f)
+                    # 转移到GPU
+                    for k, v in batch.items():
+                        if isinstance(v, torch.Tensor):
+                            batch[k] = v.to(device)
+                        elif k == "image" and hasattr(v, "to"):
+                            batch[k] = v.to(device)
 
-    logger.info(f"✓ 完成！共提取 {len(all_page_features)} 页的特征")
-    logger.info(f"  特征维度: {all_page_features[0]['line_features'].shape}")
-    logger.info(f"  保存路径: {output_file}")
+                    # 前向传播
+                    outputs = model(
+                        input_ids=batch["input_ids"],
+                        bbox=batch["bbox"],
+                        attention_mask=batch["attention_mask"],
+                        image=batch["image"],
+                        output_hidden_states=True,
+                    )
+
+                    # 提取hidden states
+                    hidden_states = outputs.hidden_states[-1]
+                    text_seq_len = batch["input_ids"].shape[1]
+                    hidden_states = hidden_states[:, :text_seq_len, :]
+
+                    # 提取行级特征
+                    line_ids_tensor = torch.tensor(token_line_ids, device=device).unsqueeze(0)
+                    line_features, line_mask = feature_extractor.extract_line_features(
+                        hidden_states, line_ids_tensor, pooling="mean"
+                    )
+
+                    # 保存
+                    page_data = {
+                        "line_features": line_features.cpu(),
+                        "line_mask": line_mask.cpu(),
+                        "line_parent_ids": raw_sample["line_parent_ids"],
+                        "line_relations": raw_sample["line_relations"],
+                        "line_bboxes": line_bboxes,
+                        "page_idx": idx,
+                    }
+
+                    all_page_features.append(page_data)
+
+                logger.info(f"批次 {batch_idx+1} 完成，已提取 {len(all_page_features)} 页特征")
+
+        return all_page_features
+
+    # 提取训练集特征（分批次）
+    batch_size = int(os.getenv("LAYOUTLMFT_BATCH_SIZE", "50"))
+    train_features = extract_features_in_batches(datasets["train"], "train", batch_size=batch_size)
+
+    # 保存训练集特征
+    train_output_file = os.path.join(output_dir, "train_line_features.pkl")
+    logger.info(f"保存训练集特征到 {train_output_file}")
+    with open(train_output_file, "wb") as f:
+        pickle.dump(train_features, f)
+    logger.info(f"✓ 训练集完成！共提取 {len(train_features)} 页的特征")
+
+    # 如果有validation集（test集），也提取validation特征（分批次）
+    if has_validation:
+        valid_features = extract_features_in_batches(datasets["test"], "validation", batch_size=batch_size)
+
+        # 保存validation集特征
+        valid_output_file = os.path.join(output_dir, "valid_line_features.pkl")
+        logger.info(f"保存validation集特征到 {valid_output_file}")
+        with open(valid_output_file, "wb") as f:
+            pickle.dump(valid_features, f)
+        logger.info(f"✓ Validation集完成！共提取 {len(valid_features)} 页的特征")
+
+    logger.info(f"\n" + "="*50)
+    logger.info(f"✓ 全部完成！")
+    logger.info(f"  训练集: {len(train_features)} 页")
+    if has_validation:
+        logger.info(f"  验证集: {len(valid_features)} 页")
+    logger.info(f"  特征维度: {train_features[0]['line_features'].shape}")
+    logger.info(f"  保存目录: {output_dir}")
+    logger.info(f"="*50)
 
 
 if __name__ == "__main__":

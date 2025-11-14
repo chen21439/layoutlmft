@@ -24,24 +24,28 @@ _DESCRIPTION = """\
 HRDoc dataset for hierarchical document structure analysis
 """
 
-# HRDoc 的类别（从实际数据中提取，共16个类别）
+# HRDS 数据集的类别（18个类别，支持多级章节）
 _LABELS = [
     "O",
     "B-AFFILI", "I-AFFILI",
     "B-ALG", "I-ALG",
     "B-AUTHOR", "I-AUTHOR",
-    "B-CAPTION", "I-CAPTION",
-    "B-EQUATION", "I-EQUATION",
-    "B-FIGURE", "I-FIGURE",
-    "B-FOOTER", "I-FOOTER",
-    "B-FOOTNOTE", "I-FOOTNOTE",
-    "B-FSTLINE", "I-FSTLINE",
+    "B-EQU", "I-EQU",                # equation
+    "B-FIG", "I-FIG",                # figure
+    "B-FIGCAP", "I-FIGCAP",          # figure caption
+    "B-FNOTE", "I-FNOTE",            # footnote
+    "B-FOOT", "I-FOOT",              # footer
+    "B-FSTLINE", "I-FSTLINE",        # first line
     "B-MAIL", "I-MAIL",
-    "B-OPARA", "I-OPARA",
-    "B-PARALINE", "I-PARALINE",
-    "B-SECTION", "I-SECTION",
-    "B-SECX", "I-SECX",
-    "B-TABLE", "I-TABLE",
+    "B-OPARA", "I-OPARA",            # other paragraph
+    "B-PARA", "I-PARA",              # paragraph
+    "B-SEC1", "I-SEC1",              # section level 1
+    "B-SEC2", "I-SEC2",              # section level 2
+    "B-SEC3", "I-SEC3",              # section level 3
+    "B-SEC4", "I-SEC4",              # section level 4
+    "B-SECX", "I-SECX",              # section level X (additional)
+    "B-TAB", "I-TAB",                # table
+    "B-TABCAP", "I-TABCAP",          # table caption
     "B-TITLE", "I-TITLE",
 ]
 
@@ -143,93 +147,137 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
     def _generate_examples(self, filepath):
         logger.info("⏳ Generating examples from = %s", filepath)
-        ann_dir = os.path.join(filepath, "annotations")
-        img_dir = os.path.join(filepath, "images")
 
-        for guid, file in enumerate(sorted(os.listdir(ann_dir))):
-            tokens = []
-            bboxes = []
-            ner_tags = []
-            line_ids = []  # 新增：记录每个token属于哪个line
-            line_parent_ids = []  # 新增：每个line的parent_id
-            line_relations = []  # 新增：每个line的relation
+        # 支持两种目录结构：
+        # 1. FUNSD格式: train/annotations/, train/images/
+        # 2. HRDS格式: train/*.json, images/*.png (所有图片在根目录的images下)
+        if os.path.exists(os.path.join(filepath, "annotations")):
+            ann_dir = os.path.join(filepath, "annotations")
+            img_dir = os.path.join(filepath, "images")
+        else:
+            # HRDS格式：JSON 直接在 train/ 下，images 在上层
+            ann_dir = filepath
+            img_dir = os.path.join(os.path.dirname(filepath), "images")
+
+        guid = 0
+        for file in sorted(os.listdir(ann_dir)):
+            if not file.endswith('.json'):
+                continue
 
             file_path = os.path.join(ann_dir, file)
             with open(file_path, "r", encoding="utf8") as f:
                 data = json.load(f)
 
-            # 支持 jpg 和 png
-            image_path = os.path.join(img_dir, file)
-            for ext in ['.jpg', '.png', '.jpeg']:
-                temp_path = image_path.replace('.json', ext)
-                if os.path.exists(temp_path):
-                    image_path = temp_path
-                    break
-
-            image, size = load_image(image_path)
-
             # 支持两种数据格式：
-            # 1. FUNSD格式：{"form": [...]}
-            # 2. HRDS格式：直接的数组 [...]
+            # 1. FUNSD格式：{"form": [...]} - 每个文件是一页
+            # 2. HRDS格式：[...] 带 page 字段 - 一个文件多页
             if isinstance(data, dict) and "form" in data:
-                form_data = data["form"]
+                # FUNSD格式：单页
+                pages_data = {0: data["form"]}
             elif isinstance(data, list):
-                form_data = data
+                # HRDS格式：多页，按 page 字段分组
+                pages_data = {}
+                for item in data:
+                    page_num = item.get("page", 0)
+                    if page_num not in pages_data:
+                        pages_data[page_num] = []
+                    pages_data[page_num].append(item)
             else:
                 logger.warning(f"Unknown data format in {file_path}")
                 continue
 
-            for line_idx, item in enumerate(form_data):
-                # 支持两种字段名：label（FUNSD）或 class（HRDS）
-                label = item.get("label") or item.get("class", "O")
+            # 处理每一页
+            for page_num in sorted(pages_data.keys()):
+                tokens = []
+                bboxes = []
+                ner_tags = []
+                line_ids = []
+                line_parent_ids = []
+                line_relations = []
 
-                # 支持两种格式：
-                # FUNSD格式：{"words": [{...}]}
-                # HRDS格式：{"text": "...", "box": [...]}
-                if "words" in item:
-                    words = item["words"]
-                else:
-                    # HRDS格式：单行文本
-                    words = [{
-                        "text": item["text"],
-                        "box": item["box"]
-                    }]
-                words = [w for w in words if w["text"].strip() != ""]
-                if len(words) == 0:
+                form_data = pages_data[page_num]
+
+                # 确定图片路径
+                # FUNSD格式：train/images/xxx_0.png
+                # HRDS格式：images/xxx/xxx_0.jpg
+                base_name = file.replace('.json', '')
+
+                # 先尝试 FUNSD 格式
+                image_path = os.path.join(img_dir, f"{base_name}.png")
+                if not os.path.exists(image_path):
+                    image_path = os.path.join(img_dir, f"{base_name}.jpg")
+
+                # 再尝试 HRDS 格式
+                if not os.path.exists(image_path):
+                    # HRDS: images/{doc_name}/{doc_name}_{page}.jpg
+                    hrds_img_path = os.path.join(img_dir, base_name, f"{base_name}_{page_num}.jpg")
+                    if os.path.exists(hrds_img_path):
+                        image_path = hrds_img_path
+                    else:
+                        # 尝试 png
+                        hrds_img_path = os.path.join(img_dir, base_name, f"{base_name}_{page_num}.png")
+                        if os.path.exists(hrds_img_path):
+                            image_path = hrds_img_path
+
+                if not os.path.exists(image_path):
+                    logger.warning(f"Image not found for {file} page {page_num}, skipping...")
                     continue
 
-                # 统一标签格式为大写
-                label = label.upper()
+                image, size = load_image(image_path)
 
-                # 获取层级关系信息
-                item_id = item.get("id", line_idx)
-                parent_id = item.get("parent_id", -1)
-                relation = item.get("relation", "none")
+                for line_idx, item in enumerate(form_data):
+                    # 支持两种字段名：label（FUNSD）或 class（HRDS）
+                    label = item.get("label") or item.get("class", "O")
 
-                # 记录当前line的元数据
-                line_parent_ids.append(parent_id)
-                line_relations.append(relation)
+                    # 支持两种格式：
+                    # FUNSD格式：{"words": [{...}]}
+                    # HRDS格式：{"text": "...", "box": [...]}
+                    if "words" in item:
+                        words = item["words"]
+                    else:
+                        # HRDS格式：单行文本
+                        words = [{
+                            "text": item["text"],
+                            "box": item["box"]
+                        }]
+                    words = [w for w in words if w["text"].strip() != ""]
+                    if len(words) == 0:
+                        continue
 
-                # 处理第一个词（B-）
-                tokens.append(words[0]["text"])
-                ner_tags.append("B-" + label)
-                bboxes.append(normalize_bbox(words[0]["box"], size))
-                line_ids.append(line_idx)  # 记录token所属的line
+                    # 统一标签格式为大写
+                    label = label.upper()
 
-                # 处理后续词（I-）
-                for w in words[1:]:
-                    tokens.append(w["text"])
-                    ner_tags.append("I-" + label)
-                    bboxes.append(normalize_bbox(w["box"], size))
-                    line_ids.append(line_idx)  # 记录token所属的line
+                    # 获取层级关系信息
+                    # HRDS格式有 line_id 字段，FUNSD格式用 id 字段
+                    item_line_id = item.get("line_id", item.get("id", line_idx))
+                    parent_id = item.get("parent_id", -1)
+                    relation = item.get("relation", "none")
 
-            yield guid, {
-                "id": str(guid),
-                "tokens": tokens,
-                "bboxes": bboxes,
-                "ner_tags": ner_tags,
-                "image": image,
-                "line_ids": line_ids,
-                "line_parent_ids": line_parent_ids,
-                "line_relations": line_relations,
-            }
+                    # 记录当前line的元数据
+                    line_parent_ids.append(parent_id)
+                    line_relations.append(relation)
+
+                    # 处理第一个词（B-）
+                    tokens.append(words[0]["text"])
+                    ner_tags.append("B-" + label)
+                    bboxes.append(normalize_bbox(words[0]["box"], size))
+                    line_ids.append(item_line_id)  # 使用实际的line_id
+
+                    # 处理后续词（I-）
+                    for w in words[1:]:
+                        tokens.append(w["text"])
+                        ner_tags.append("I-" + label)
+                        bboxes.append(normalize_bbox(w["box"], size))
+                        line_ids.append(item_line_id)  # 使用实际的line_id
+
+                yield guid, {
+                    "id": str(guid),
+                    "tokens": tokens,
+                    "bboxes": bboxes,
+                    "ner_tags": ner_tags,
+                    "image": image,
+                    "line_ids": line_ids,
+                    "line_parent_ids": line_parent_ids,
+                    "line_relations": line_relations,
+                }
+                guid += 1
