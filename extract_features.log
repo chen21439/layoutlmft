@@ -1,0 +1,23 @@
+11/13/2025 22:45:42 - INFO - __main__ - 使用设备: cuda
+11/13/2025 22:45:42 - INFO - __main__ - 加载训练数据集...
+11/13/2025 22:45:42 - WARNING - datasets.builder - Reusing dataset hr_doc (/mnt/e/models/HuggingFace/datasets/hr_doc/hrdoc/1.0.0/4c62f5fd2f5b7fad274a87898b36e7b64e8aa65887c5fa3032f1095fe6e989c7)
+11/13/2025 22:45:42 - INFO - __main__ - 加载模型...
+11/13/2025 22:46:01 - INFO - __main__ - Tokenizing数据...
+11/13/2025 22:46:01 - WARNING - datasets.fingerprint - Parameter 'function'=<function main.<locals>.tokenize_and_align_labels at 0x762d836ade50> of the transform datasets.arrow_dataset.Dataset._map_single couldn't be hashed properly, a random hash was used instead. Make sure your transforms and parameters are serializable with pickle or dill for the dataset fingerprinting and caching to work. If you reuse this transform, the caching mechanism will consider it to be different from the previous calls and recompute everything. This warning is only showed once. Subsequent hashing failures won't be showed.
+  0%|          | 0/1 [00:00<?, ?ba/s]100%|██████████| 1/1 [00:01<00:00,  1.02s/ba]100%|██████████| 1/1 [00:01<00:00,  1.02s/ba]11/13/2025 22:46:02 - INFO - __main__ - 开始提取行级特征...
+
+提取特征:   0%|          | 0/132 [00:00<?, ?it/s]/root/miniforge3/envs/layoutlmv2/lib/python3.8/site-packages/detectron2/structures/image_list.py:88: UserWarning: __floordiv__ is deprecated, and its behavior will change in a future version of pytorch. It currently rounds toward 0 (like the 'trunc' function NOT 'floor'). This results in incorrect rounding for negative values. To keep the current behavior, use torch.div(a, b, rounding_mode='trunc'), or for actual floor division, use torch.div(a, b, rounding_mode='floor').
+  max_size = (max_size + (stride - 1)) // stride * stride
+/root/code/layoutlmft/layoutlmft/models/layoutlmv2/modeling_layoutlmv2.py:718: UserWarning: __floordiv__ is deprecated, and its behavior will change in a future version of pytorch. It currently rounds toward 0 (like the 'trunc' function NOT 'floor'). This results in incorrect rounding for negative values. To keep the current behavior, use torch.div(a, b, rounding_mode='trunc'), or for actual floor division, use torch.div(a, b, rounding_mode='floor').
+  torch.arange(
+/root/code/layoutlmft/layoutlmft/models/layoutlmv2/modeling_layoutlmv2.py:728: UserWarning: __floordiv__ is deprecated, and its behavior will change in a future version of pytorch. It currently rounds toward 0 (like the 'trunc' function NOT 'floor'). This results in incorrect rounding for negative values. To keep the current behavior, use torch.div(a, b, rounding_mode='trunc'), or for actual floor division, use torch.div(a, b, rounding_mode='floor').
+  torch.arange(
+提取特征:   0%|          | 0/132 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "examples/extract_line_features.py", line 209, in <module>
+    main()
+  File "examples/extract_line_features.py", line 182, in main
+    line_features, line_mask = feature_extractor.extract_line_features(
+  File "/root/code/layoutlmft/layoutlmft/models/relation_classifier.py", line 54, in extract_line_features
+    line_tokens = hidden_states[b][token_mask]  # [num_tokens, H]
+IndexError: The shape of the mask [512] at index 0 does not match the shape of the indexed tensor [561, 768] at index 0

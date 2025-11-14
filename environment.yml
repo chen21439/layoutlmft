@@ -1,0 +1,7 @@
+name: layoutlmv2
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.8
+prefix: /root/miniforge3/envs/layoutlmv2
