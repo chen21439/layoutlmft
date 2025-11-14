@@ -1,13 +1,0 @@
-11/13/2025 22:53:44 - INFO - __main__ - 使用设备: cuda
-11/13/2025 22:53:44 - INFO - __main__ - 加载特征文件: ./data/line_features/train_line_features.pkl
-11/13/2025 22:53:45 - INFO - __main__ - 加载了 132 页的特征
-11/13/2025 22:53:45 - INFO - __main__ - 构造训练样本对...
-构造样本:   0%|          | 0/132 [00:00<?, ?it/s]构造样本:   0%|          | 0/132 [00:00<?, ?it/s]
-Traceback (most recent call last):
-  File "examples/train_relation_classifier.py", line 297, in <module>
-    main()
-  File "examples/train_relation_classifier.py", line 208, in main
-    dataset = RelationDataset(
-  File "examples/train_relation_classifier.py", line 71, in __init__
-    if not line_mask[parent_idx] or not line_mask[child_idx]:
-IndexError: index 61 is out of bounds for dimension 0 with size 61

@@ -5,6 +5,11 @@
 
 set -e
 
+# 获取脚本所在目录，然后找到项目根目录（脚本在 scripts/ 下）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
 # 选择数据集版本
 DATASET=${1:-simple}  # simple 或 hard
 
@@ -18,7 +23,7 @@ elif [ "$DATASET" == "hard" ]; then
     EXPECTED_TIME="~6小时"
 else
     echo "错误: 未知数据集版本 '$DATASET'"
-    echo "用法: ./train_hrdoc_official.sh [simple|hard]"
+    echo "用法: ./scripts/train_hrdoc_official.sh [simple|hard]"
     exit 1
 fi
 
@@ -34,11 +39,10 @@ echo "=========================================="
 echo ""
 
 # 环境变量
-export HF_HOME=${HF_HOME:-/mnt/e/models/HuggingFace}
-export PYTHONPATH=/root/code/layoutlmft:$PYTHONPATH
+export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
-# Python解释器
-PYTHON=${PYTHON:-/root/miniforge3/envs/layoutlmv2/bin/python}
+# Python解释器（优先使用环境变量，否则使用 python 命令）
+PYTHON=${PYTHON:-python}
 
 # 确认是否继续
 read -p "⚠️  训练将耗时 $EXPECTED_TIME，是否继续？(y/n) " -n 1 -r
@@ -54,7 +58,7 @@ echo "开始训练..."
 echo "=========================================="
 
 # 训练命令（严格对齐论文）
-$PYTHON examples/run_hrdoc.py \
+$PYTHON "$PROJECT_ROOT/examples/run_hrdoc.py" \
   --model_name_or_path microsoft/layoutlmv2-base-uncased \
   --output_dir $OUTPUT_DIR \
   --do_train \

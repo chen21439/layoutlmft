@@ -1,6 +1,6 @@
 #!/bin/bash
 # HRDoc 版面识别训练脚本（支持多环境）
-# 用法: ./train_hrdoc.sh [local|cloud|quick|auto]
+# 用法: ./scripts/train_hrdoc.sh [local|cloud|quick|auto]
 
 set -e  # 遇到错误立即退出
 
@@ -13,23 +13,28 @@ echo "=========================================="
 echo "环境: $ENV"
 echo ""
 
+# 获取脚本所在目录，然后找到项目根目录（脚本在 scripts/ 下）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+echo "项目根目录: $PROJECT_ROOT"
+
 # 设置环境变量
-export PYTHONPATH=/root/code/layoutlmft:$PYTHONPATH
+export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
 
-cd /root/code/layoutlmft
-
-# Python环境
-PYTHON=/root/miniforge3/envs/layoutlmv2/bin/python
+# Python环境（优先使用环境变量，否则使用 python 命令）
+PYTHON=${PYTHON:-python}
 
 # 加载对应环境的配置
-CONFIG_FILE="./configs/${ENV}_config.json"
+CONFIG_FILE="$PROJECT_ROOT/configs/${ENV}_config.json"
 
 if [ "$ENV" == "auto" ]; then
     echo "自动检测环境..."
     # 运行Python脚本自动检测并获取环境
-    DETECTED_ENV=$($PYTHON -c "import sys; sys.path.insert(0, '.'); from configs.env_config import EnvironmentDetector; print(EnvironmentDetector.detect_environment())")
+    DETECTED_ENV=$($PYTHON -c "import sys; sys.path.insert(0, '$PROJECT_ROOT'); from configs.env_config import EnvironmentDetector; print(EnvironmentDetector.detect_environment())")
     ENV=$DETECTED_ENV
-    CONFIG_FILE="./configs/${ENV}_config.json"
+    CONFIG_FILE="$PROJECT_ROOT/configs/${ENV}_config.json"
     echo "✓ 检测到环境: $ENV"
 fi
 
@@ -72,7 +77,7 @@ echo "=========================================="
 echo "开始训练..."
 echo "=========================================="
 
-$PYTHON examples/run_hrdoc.py \
+$PYTHON "$PROJECT_ROOT/examples/run_hrdoc.py" \
   --model_name_or_path $LOCAL_MODEL \
   --output_dir $OUTPUT_DIR \
   --do_train \
