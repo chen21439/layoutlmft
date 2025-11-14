@@ -87,8 +87,20 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
     def _split_generators(self, dl_manager):
         """Returns SplitGenerators."""
-        # 使用本地路径，不下载
-        data_dir = "/root/code/layoutlmft/data/hrdoc_funsd_format"
+        # 根据环境选择数据路径
+        # 优先使用环境变量，否则使用默认路径
+        import socket
+        hostname = socket.gethostname()
+
+        # 本机路径
+        if hostname == "mi" or os.path.exists("/root/code/layoutlmft"):
+            data_dir = "/root/code/layoutlmft/data/hrdoc_funsd_format"
+        # 云服务器路径
+        elif os.path.exists("/home/linux/code/layoutlmft"):
+            data_dir = "/home/linux/code/layoutlmft/data/hrdoc_funsd_format"
+        # 默认路径（使用环境变量）
+        else:
+            data_dir = os.getenv("HRDOC_DATA_DIR", "/root/code/layoutlmft/data/hrdoc_funsd_format")
 
         splits = []
         # 训练集

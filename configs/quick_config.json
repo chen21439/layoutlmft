@@ -1,7 +1,5 @@
 {
   "model_name_or_path": "microsoft/layoutlmv2-base-uncased",
-  "output_dir": "/mnt/e/models/train_data/layoutlmft/hrdoc_quick",
-  "local_model_path": "/mnt/e/models/HuggingFace/hub/models--microsoft--layoutlmv2-base-uncased/snapshots/ae6f4350c668f88ec580046e35c670df6ec616c1",
   "max_steps": 50,
   "num_train_epochs": 1,
   "per_device_train_batch_size": 2,
@@ -17,5 +15,6 @@
   "evaluation_strategy": "steps",
   "fp16": true,
   "dataloader_num_workers": 0,
-  "seed": 42
+  "seed": 42,
+  "comment": "快速验证配置 - 50步，适用于本机和云服务器"
 }

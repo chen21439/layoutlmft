@@ -199,3 +199,7 @@ python /root/code/layoutlmft/examples/run_funsd.py \
 - [ ] 是否有完整 HRDS/HRDH 数据集的访问权限？
 - [ ] 本地是否有 LayoutLMv2 模型？（需要检查 /mnt/e/models/HuggingFace/）
 - [ ] 训练资源：GPU 显存、预计训练时间
+
+# 云服务器信息
+
+ssh -p 22116 linux@120.87.154.55    密码为Nk#lo
