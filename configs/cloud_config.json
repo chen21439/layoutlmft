@@ -1,0 +1,21 @@
+{
+  "model_name_or_path": "microsoft/layoutlmv2-base-uncased",
+  "output_dir": "./output/hrdoc_simple_full",
+  "local_model_path": "/models/HuggingFace/hub/models--microsoft--layoutlmv2-base-uncased/snapshots/ae6f4350c668f88ec580046e35c670df6ec616c1",
+  "max_steps": 30000,
+  "num_train_epochs": 1,
+  "per_device_train_batch_size": 3,
+  "per_device_eval_batch_size": 8,
+  "gradient_accumulation_steps": 1,
+  "learning_rate": 5e-05,
+  "warmup_ratio": 0.1,
+  "weight_decay": 0.01,
+  "logging_steps": 100,
+  "eval_steps": 1000,
+  "save_steps": 1000,
+  "save_total_limit": 3,
+  "evaluation_strategy": "steps",
+  "fp16": true,
+  "dataloader_num_workers": 4,
+  "seed": 42
+}
