@@ -98,15 +98,28 @@ def main():
     )
 
     # 分批次提取特征的函数
-    def extract_features_in_batches(raw_dataset, split_name, batch_size=50):
-        """分批次提取特征，避免一次性加载所有数据"""
+    def extract_features_in_batches(raw_dataset, split_name, batch_size=50, samples_per_chunk=1000):
+        """分批次提取特征，并分块保存避免一次性加载所有数据
+
+        Args:
+            raw_dataset: 原始数据集
+            split_name: 数据集名称（train/validation）
+            batch_size: 每批次处理的样本数
+            samples_per_chunk: 每个chunk文件保存的样本数
+
+        Returns:
+            chunk_files: 保存的chunk文件路径列表
+        """
         import numpy as np
 
         logger.info(f"开始分批次提取 {split_name} 集的行级特征...")
         logger.info(f"总样本数: {len(raw_dataset)}, 批次大小: {batch_size}")
+        logger.info(f"每 {samples_per_chunk} 个样本保存一个chunk文件")
 
         feature_extractor = LineFeatureExtractor()
-        all_page_features = []
+        chunk_features = []  # 当前chunk的特征
+        chunk_files = []  # 已保存的chunk文件列表
+        chunk_idx = 0  # chunk编号
 
         num_batches = (len(raw_dataset) + batch_size - 1) // batch_size
 
@@ -215,7 +228,7 @@ def main():
                         hidden_states, line_ids_tensor, pooling="mean"
                     )
 
-                    # 保存
+                    # 保存到当前chunk
                     page_data = {
                         "line_features": line_features.cpu(),
                         "line_mask": line_mask.cpu(),
@@ -225,41 +238,65 @@ def main():
                         "page_idx": idx,
                     }
 
-                    all_page_features.append(page_data)
+                    chunk_features.append(page_data)
 
-                logger.info(f"批次 {batch_idx+1} 完成，已提取 {len(all_page_features)} 页特征")
+                    # 检查是否需要保存当前chunk
+                    if len(chunk_features) >= samples_per_chunk:
+                        chunk_file = os.path.join(output_dir, f"{split_name}_line_features_chunk_{chunk_idx:04d}.pkl")
+                        logger.info(f"保存chunk {chunk_idx} 到 {chunk_file} ({len(chunk_features)} 页)")
+                        with open(chunk_file, "wb") as f:
+                            pickle.dump(chunk_features, f)
+                        chunk_files.append(chunk_file)
+                        chunk_features = []  # 清空当前chunk
+                        chunk_idx += 1
 
-        return all_page_features
+                logger.info(f"批次 {batch_idx+1} 完成，已提取 {chunk_idx * samples_per_chunk + len(chunk_features)} 页特征")
 
-    # 提取训练集特征（分批次）
+        # 保存剩余的特征（最后一个不完整的chunk）
+        if len(chunk_features) > 0:
+            chunk_file = os.path.join(output_dir, f"{split_name}_line_features_chunk_{chunk_idx:04d}.pkl")
+            logger.info(f"保存最后的chunk {chunk_idx} 到 {chunk_file} ({len(chunk_features)} 页)")
+            with open(chunk_file, "wb") as f:
+                pickle.dump(chunk_features, f)
+            chunk_files.append(chunk_file)
+
+        return chunk_files
+
+    # 提取训练集特征（分批次 + 分块保存）
     batch_size = int(os.getenv("LAYOUTLMFT_BATCH_SIZE", "50"))
-    train_features = extract_features_in_batches(datasets["train"], "train", batch_size=batch_size)
+    samples_per_chunk = int(os.getenv("LAYOUTLMFT_SAMPLES_PER_CHUNK", "1000"))
 
-    # 保存训练集特征
-    train_output_file = os.path.join(output_dir, "train_line_features.pkl")
-    logger.info(f"保存训练集特征到 {train_output_file}")
-    with open(train_output_file, "wb") as f:
-        pickle.dump(train_features, f)
-    logger.info(f"✓ 训练集完成！共提取 {len(train_features)} 页的特征")
+    train_chunk_files = extract_features_in_batches(
+        datasets["train"], "train",
+        batch_size=batch_size,
+        samples_per_chunk=samples_per_chunk
+    )
+    logger.info(f"✓ 训练集完成！共保存 {len(train_chunk_files)} 个chunk文件")
 
-    # 如果有validation集（test集），也提取validation特征（分批次）
+    # 如果有validation集（test集），也提取validation特征（分批次 + 分块保存）
+    valid_chunk_files = []
     if has_validation:
-        valid_features = extract_features_in_batches(datasets["test"], "validation", batch_size=batch_size)
-
-        # 保存validation集特征
-        valid_output_file = os.path.join(output_dir, "valid_line_features.pkl")
-        logger.info(f"保存validation集特征到 {valid_output_file}")
-        with open(valid_output_file, "wb") as f:
-            pickle.dump(valid_features, f)
-        logger.info(f"✓ Validation集完成！共提取 {len(valid_features)} 页的特征")
+        valid_chunk_files = extract_features_in_batches(
+            datasets["test"], "validation",
+            batch_size=batch_size,
+            samples_per_chunk=samples_per_chunk
+        )
+        logger.info(f"✓ Validation集完成！共保存 {len(valid_chunk_files)} 个chunk文件")
 
     logger.info(f"\n" + "="*50)
     logger.info(f"✓ 全部完成！")
-    logger.info(f"  训练集: {len(train_features)} 页")
+    logger.info(f"  训练集: {len(train_chunk_files)} 个chunk文件")
     if has_validation:
-        logger.info(f"  验证集: {len(valid_features)} 页")
-    logger.info(f"  特征维度: {train_features[0]['line_features'].shape}")
+        logger.info(f"  验证集: {len(valid_chunk_files)} 个chunk文件")
+    logger.info(f"  每个chunk最多 {samples_per_chunk} 页")
     logger.info(f"  保存目录: {output_dir}")
+    logger.info(f"\n  训练集chunk文件:")
+    for i, f in enumerate(train_chunk_files):
+        logger.info(f"    {i}: {os.path.basename(f)}")
+    if valid_chunk_files:
+        logger.info(f"\n  验证集chunk文件:")
+        for i, f in enumerate(valid_chunk_files):
+            logger.info(f"    {i}: {os.path.basename(f)}")
     logger.info(f"="*50)
 
 

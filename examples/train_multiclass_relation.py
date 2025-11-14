@@ -35,23 +35,50 @@ logger = logging.getLogger(__name__)
 
 class MultiClassRelationDataset(torch.utils.data.Dataset):
     """
-    多分类关系数据集
+    多分类关系数据集（支持chunk文件加载）
     标签：0=none, 1=connect, 2=contain, 3=equality
     """
 
     def __init__(
         self,
-        features_file: str,
-        neg_ratio: float = 1.0  # 负样本比例（相对于正样本）
+        features_dir: str,
+        split: str = "train",
+        neg_ratio: float = 1.0,  # 负样本比例（相对于正样本）
+        max_chunks: int = None  # 最多加载多少个chunk（用于测试）
     ):
         self.neg_ratio = neg_ratio
 
-        # 加载缓存的特征
-        logger.info(f"加载特征文件: {features_file}")
-        with open(features_file, "rb") as f:
-            self.page_features = pickle.load(f)
+        # 加载缓存的特征（支持单个文件或chunk文件）
+        import glob
 
-        logger.info(f"加载了 {len(self.page_features)} 页的特征")
+        # 先尝试加载单个pkl文件（兼容旧格式）
+        single_file = os.path.join(features_dir, f"{split}_line_features.pkl")
+        if os.path.exists(single_file):
+            logger.info(f"加载单个特征文件: {single_file}")
+            with open(single_file, "rb") as f:
+                self.page_features = pickle.load(f)
+        else:
+            # 加载chunk文件
+            pattern = os.path.join(features_dir, f"{split}_line_features_chunk_*.pkl")
+            chunk_files = sorted(glob.glob(pattern))
+
+            if max_chunks is not None:
+                chunk_files = chunk_files[:max_chunks]
+                logger.info(f"限制加载前 {max_chunks} 个chunk文件")
+
+            if len(chunk_files) == 0:
+                raise ValueError(f"没有找到特征文件: {single_file} 或 {pattern}")
+
+            logger.info(f"找到 {len(chunk_files)} 个chunk文件，开始加载...")
+            self.page_features = []
+            for chunk_file in chunk_files:
+                logger.info(f"  加载 {os.path.basename(chunk_file)}...")
+                with open(chunk_file, "rb") as f:
+                    chunk_data = pickle.load(f)
+                self.page_features.extend(chunk_data)
+                logger.info(f"    已加载 {len(chunk_data)} 页，累计 {len(self.page_features)} 页")
+
+        logger.info(f"总共加载了 {len(self.page_features)} 页的特征")
 
         # 构造样本对
         logger.info("构造多分类训练样本...")
@@ -168,14 +195,18 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
         }
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device):
+def train_epoch(model, dataloader, optimizer, criterion, device, log_interval=100):
     """训练一个epoch"""
     model.train()
     total_loss = 0
     all_preds = []
     all_labels = []
 
-    for batch in tqdm(dataloader, desc="训练"):
+    # 用于打印中间loss
+    running_loss = 0
+    batch_count = 0
+
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="训练")):
         parent_feat = batch["parent_feat"].to(device)
         child_feat = batch["child_feat"].to(device)
         geom_feat = batch["geom_feat"].to(device)
@@ -192,11 +223,20 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         optimizer.step()
 
         total_loss += loss.item()
+        running_loss += loss.item()
+        batch_count += 1
 
         # 收集预测结果
         preds = torch.argmax(logits, dim=1).cpu().numpy()
         all_preds.extend(preds)
         all_labels.extend(labels.cpu().numpy())
+
+        # 每log_interval步打印一次loss
+        if (batch_idx + 1) % log_interval == 0:
+            avg_running_loss = running_loss / batch_count
+            logger.info(f"  Step [{batch_idx + 1}/{len(dataloader)}] - Loss: {avg_running_loss:.4f}")
+            running_loss = 0
+            batch_count = 0
 
     avg_loss = total_loss / len(dataloader)
 
@@ -259,13 +299,16 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    # 从 E 盘读取特征文件，输出也到 E 盘
-    features_file = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features") + "/train_line_features.pkl"
+    # 从 E 盘读取特征文件（支持chunk加载），输出也到 E 盘
+    features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features")
     output_dir = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft") + "/multiclass_relation"
     max_steps = 300  # 训练步数
     batch_size = 32
     learning_rate = 5e-4
     neg_ratio = 1.5  # 负样本比例
+    max_chunks = int(os.getenv("MAX_CHUNKS", "-1"))  # 限制chunk数量（-1表示加载全部）
+    if max_chunks == -1:
+        max_chunks = None
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -285,17 +328,20 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用设备: {device}")
 
-    # 创建数据集
-    dataset = MultiClassRelationDataset(
-        features_file=features_file,
-        neg_ratio=neg_ratio
+    # 创建训练集（使用train chunk）
+    train_dataset = MultiClassRelationDataset(
+        features_dir=features_dir,
+        split="train",
+        neg_ratio=neg_ratio,
+        max_chunks=max_chunks
     )
 
-    # 划分训练集和验证集（80/20）
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
+    # 创建验证集（使用validation chunk，独立数据）
+    val_dataset = MultiClassRelationDataset(
+        features_dir=features_dir,
+        split="validation",
+        neg_ratio=neg_ratio,
+        max_chunks=max_chunks
     )
 
     logger.info(f"训练集大小: {len(train_dataset)}")
@@ -329,13 +375,13 @@ def main():
     # 优化器和损失函数
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    # 计算类别权重（处理类别不平衡）
+    # 计算类别权重（处理类别不平衡，只基于训练集）
     label_counts = {}
-    for sample in dataset.samples:
+    for sample in train_dataset.samples:
         label = sample["label"]
         label_counts[label] = label_counts.get(label, 0) + 1
 
-    total_samples = len(dataset.samples)
+    total_samples = len(train_dataset.samples)
     class_weights = []
     for i in range(4):
         if i in label_counts:
@@ -362,9 +408,9 @@ def main():
     for epoch in range(num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{num_epochs} =====")
 
-        # 训练
+        # 训练（每100步打印一次loss）
         train_loss, train_acc, train_prec, train_rec, train_f1 = train_epoch(
-            model, train_loader, optimizer, criterion, device
+            model, train_loader, optimizer, criterion, device, log_interval=100
         )
 
         logger.info(f"训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, "

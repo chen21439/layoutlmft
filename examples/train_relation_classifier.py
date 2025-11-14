@@ -29,23 +29,50 @@ logger = logging.getLogger(__name__)
 
 class RelationDataset(torch.utils.data.Dataset):
     """
-    关系分类数据集
+    关系分类数据集（支持chunk文件加载）
     """
 
     def __init__(
         self,
-        features_file: str,
-        neg_sampler: NegativeSampler,
-        binary_only: bool = True  # 是否只做二分类
+        features_dir: str,
+        split: str = "train",
+        neg_sampler: NegativeSampler = None,
+        binary_only: bool = True,  # 是否只做二分类
+        max_chunks: int = None  # 最多加载多少个chunk（用于测试）
     ):
         self.binary_only = binary_only
 
-        # 加载缓存的特征
-        logger.info(f"加载特征文件: {features_file}")
-        with open(features_file, "rb") as f:
-            self.page_features = pickle.load(f)
+        # 加载缓存的特征（支持单个文件或chunk文件）
+        import glob
 
-        logger.info(f"加载了 {len(self.page_features)} 页的特征")
+        # 先尝试加载单个pkl文件（兼容旧格式）
+        single_file = os.path.join(features_dir, f"{split}_line_features.pkl")
+        if os.path.exists(single_file):
+            logger.info(f"加载单个特征文件: {single_file}")
+            with open(single_file, "rb") as f:
+                self.page_features = pickle.load(f)
+        else:
+            # 加载chunk文件
+            pattern = os.path.join(features_dir, f"{split}_line_features_chunk_*.pkl")
+            chunk_files = sorted(glob.glob(pattern))
+
+            if max_chunks is not None:
+                chunk_files = chunk_files[:max_chunks]
+                logger.info(f"限制加载前 {max_chunks} 个chunk文件")
+
+            if len(chunk_files) == 0:
+                raise ValueError(f"没有找到特征文件: {single_file} 或 {pattern}")
+
+            logger.info(f"找到 {len(chunk_files)} 个chunk文件，开始加载...")
+            self.page_features = []
+            for chunk_file in chunk_files:
+                logger.info(f"  加载 {os.path.basename(chunk_file)}...")
+                with open(chunk_file, "rb") as f:
+                    chunk_data = pickle.load(f)
+                self.page_features.extend(chunk_data)
+                logger.info(f"    已加载 {len(chunk_data)} 页，累计 {len(self.page_features)} 页")
+
+        logger.info(f"总共加载了 {len(self.page_features)} 页的特征")
 
         # 构造样本对
         logger.info("构造训练样本对...")
@@ -113,14 +140,18 @@ class RelationDataset(torch.utils.data.Dataset):
         }
 
 
-def train_epoch(model, dataloader, optimizer, criterion, device):
+def train_epoch(model, dataloader, optimizer, criterion, device, log_interval=100):
     """训练一个epoch"""
     model.train()
     total_loss = 0
     all_preds = []
     all_labels = []
 
-    for batch in tqdm(dataloader, desc="训练"):
+    # 用于打印中间loss
+    running_loss = 0
+    batch_count = 0
+
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc="训练")):
         parent_feat = batch["parent_feat"].to(device)
         child_feat = batch["child_feat"].to(device)
         geom_feat = batch["geom_feat"].to(device)  # 新增几何特征
@@ -137,11 +168,20 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         optimizer.step()
 
         total_loss += loss.item()
+        running_loss += loss.item()
+        batch_count += 1
 
         # 收集预测结果
         preds = torch.argmax(logits, dim=1).cpu().numpy()
         all_preds.extend(preds)
         all_labels.extend(labels.cpu().numpy())
+
+        # 每log_interval步打印一次loss
+        if (batch_idx + 1) % log_interval == 0:
+            avg_running_loss = running_loss / batch_count
+            logger.info(f"  Step [{batch_idx + 1}/{len(dataloader)}] - Loss: {avg_running_loss:.4f}")
+            running_loss = 0
+            batch_count = 0
 
     avg_loss = total_loss / len(dataloader)
 
@@ -196,13 +236,16 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    # 从 E 盘读取特征文件，输出也到 E 盘
-    features_file = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features") + "/train_line_features.pkl"
+    # 从 E 盘读取特征文件（支持chunk加载），输出也到 E 盘
+    features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features")
     output_dir = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft") + "/relation_classifier"
     max_steps = 200  # 增加训练步数
     batch_size = 32
     learning_rate = 5e-4  # 降低学习率
     neg_ratio = 2  # 减少负样本比例：每个正样本2个负样本
+    max_chunks = int(os.getenv("MAX_CHUNKS", "-1"))  # 限制chunk数量（-1表示加载全部）
+    if max_chunks == -1:
+        max_chunks = None
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -229,17 +272,22 @@ def main():
         before_child_only=True
     )
 
-    dataset = RelationDataset(
-        features_file=features_file,
+    # 创建训练集（使用train chunk）
+    train_dataset = RelationDataset(
+        features_dir=features_dir,
+        split="train",
         neg_sampler=neg_sampler,
-        binary_only=True
+        binary_only=True,
+        max_chunks=max_chunks
     )
 
-    # 划分训练集和验证集（80/20）
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
+    # 创建验证集（使用validation chunk，独立数据）
+    val_dataset = RelationDataset(
+        features_dir=features_dir,
+        split="validation",
+        neg_sampler=neg_sampler,
+        binary_only=True,
+        max_chunks=max_chunks
     )
 
     logger.info(f"训练集大小: {len(train_dataset)}")
@@ -272,10 +320,10 @@ def main():
     # 优化器和损失函数
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    # 使用加权损失处理类别不平衡
+    # 使用加权损失处理类别不平衡（只基于训练集）
     # 计算样本比例并反向加权
-    neg_count = sum(1 for s in dataset.samples if s["label"] == 0)
-    pos_count = sum(1 for s in dataset.samples if s["label"] == 1)
+    neg_count = sum(1 for s in train_dataset.samples if s["label"] == 0)
+    pos_count = sum(1 for s in train_dataset.samples if s["label"] == 1)
     pos_weight = torch.tensor([1.0, neg_count / pos_count]).to(device)
     logger.info(f"类别权重: [1.0, {neg_count / pos_count:.2f}]")
     criterion = nn.CrossEntropyLoss(weight=pos_weight)
