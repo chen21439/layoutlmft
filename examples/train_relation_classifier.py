@@ -338,9 +338,9 @@ def main():
     for epoch in range(num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{num_epochs} =====")
 
-        # 训练
+        # 训练（每100步打印一次loss）
         train_loss, train_acc, train_prec, train_rec, train_f1 = train_epoch(
-            model, train_loader, optimizer, criterion, device
+            model, train_loader, optimizer, criterion, device, log_interval=100
         )
 
         logger.info(f"训练 - Loss: {train_loss:.4f}, Acc: {train_acc:.4f}, "
