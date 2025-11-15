@@ -21,6 +21,7 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score
 from collections import defaultdict
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -189,11 +190,12 @@ class ParentFinderGRU(nn.Module):
         key = self.key_proj(gru_output)  # [B, L, gru_hidden]
 
         # 注意力分数: alpha(q_i, h_j)
-        # [B, L, L] = [B, L, 1, gru_hidden] @ [B, 1, gru_hidden, L]
-        attention_scores = torch.matmul(
-            query.unsqueeze(2),  # [B, L, 1, gru_hidden]
-            key.transpose(1, 2).unsqueeze(1)  # [B, 1, gru_hidden, L]
-        ).squeeze(2) / (self.gru_hidden_size ** 0.5)  # [B, L, L]
+        # 使用高效的 bmm 避免创建巨大的中间张量
+        # [B, L, L] = [B, L, gru_hidden] @ [B, gru_hidden, L]
+        attention_scores = torch.bmm(
+            query,  # [B, L, gru_hidden]
+            key.transpose(1, 2)  # [B, gru_hidden, L]
+        ) / (self.gru_hidden_size ** 0.5)  # [B, L, L]
 
         # 4. Soft-mask 操作（已禁用 - 需要语义标签）
         # 简化版本：不使用 soft-mask，直接基于注意力分数预测父节点
@@ -250,10 +252,19 @@ def collate_fn_simple(batch):
     }
 
 
-def collate_fn(batch):
-    """自定义 collate 函数，处理可变长度的序列"""
-    # 找出 batch 中最大的行数
-    max_lines = max(item["line_features"].shape[0] for item in batch)
+def collate_fn(batch, max_lines_limit=256):
+    """
+    自定义 collate 函数，处理可变长度的序列
+
+    Args:
+        batch: batch 数据
+        max_lines_limit: 最大行数限制（防止极端情况导致显存爆炸）
+    """
+    # 找出 batch 中最大的行数，但限制在 max_lines_limit 以内
+    max_lines = min(
+        max(item["line_features"].shape[0] for item in batch),
+        max_lines_limit
+    )
 
     batch_size = len(batch)
     hidden_size = batch[0]["line_features"].shape[1]
@@ -264,9 +275,10 @@ def collate_fn(batch):
     line_parent_ids = torch.full((batch_size, max_lines), -1, dtype=torch.long)
 
     for i, item in enumerate(batch):
-        num_lines = item["line_features"].shape[0]
-        line_features[i, :num_lines] = item["line_features"]
-        line_mask[i, :num_lines] = item["line_mask"]
+        # 截断到 max_lines
+        num_lines = min(item["line_features"].shape[0], max_lines)
+        line_features[i, :num_lines] = item["line_features"][:num_lines]
+        line_mask[i, :num_lines] = item["line_mask"][:num_lines]
 
         # line_parent_ids 可能比 line_features 更长，截断或padding
         parent_ids = item["line_parent_ids"]
@@ -668,6 +680,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
     total_loss = 0
     total_parent_correct = 0
     total_parent_count = 0
+    num_batches = 0  # 手动计数 batch 数量（IterableDataset 不支持 len）
 
     for batch in tqdm(dataloader, desc="训练"):
         line_features = batch["line_features"].to(device)
@@ -688,7 +701,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         # 只计算有效位置的损失
         valid_mask = line_mask  # [B, L]
 
-        loss = 0
+        losses = []  # 收集所有损失，最后一次性计算
         correct = 0
         count = 0
 
@@ -698,23 +711,45 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
                     continue
 
                 # 位置i的父节点预测
-                logits_i = parent_logits[b, i, :i+1]  # [0:i+1] 包含ROOT和之前的单元
-                target_i = line_parent_ids[b, i]
-
-                # 将parent_id映射到logits索引
-                # parent_id=-1 -> index=0 (ROOT)
-                # parent_id=0,1,2,... -> index=1,2,3,...
-                target_idx = target_i + 1 if target_i >= 0 else 0
-
-                if target_idx > i:
-                    # 父节点在当前位置之后，跳过（数据错误）
+                # 注意：我们将位置0视为隐式ROOT
+                if i == 0:
+                    # 第一个位置的父节点应该是ROOT，跳过
                     continue
 
-                # 交叉熵损失
-                loss += F.cross_entropy(
+                logits_i = parent_logits[b, i, :i]  # 只取0到i-1的候选父节点
+                target_i = line_parent_ids[b, i]
+
+                # 映射：parent_id直接对应logits索引
+                # parent_id=0 -> index=0
+                # parent_id=1 -> index=1
+                # ...
+                # parent_id=-1 (ROOT) 视为position 0
+                target_idx = target_i if target_i >= 0 else 0
+
+                # 检查 target_idx 是否在有效范围内
+                if target_idx < 0 or target_idx >= i:
+                    # 父节点无效或在当前位置之后，跳过
+                    continue
+
+                # 检查 logits 是否有效（避免全是 -inf 导致 NaN）
+                if torch.isinf(logits_i).all() or torch.isnan(logits_i).any():
+                    continue
+
+                # 再次检查索引（防御性编程）
+                if target_idx >= len(logits_i):
+                    continue
+
+                # 交叉熵损失（收集而不是累加）
+                loss_i = F.cross_entropy(
                     logits_i.unsqueeze(0),
                     torch.tensor([target_idx], device=device)
                 )
+
+                # 检查损失是否有效
+                if torch.isnan(loss_i) or torch.isinf(loss_i):
+                    continue
+
+                losses.append(loss_i)
 
                 # 统计准确率
                 pred_idx = torch.argmax(logits_i).item()
@@ -722,8 +757,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
                     correct += 1
                 count += 1
 
-        if count > 0:
-            loss = loss / count
+        if len(losses) > 0:
+            # 一次性计算平均损失，避免巨大计算图
+            loss = torch.stack(losses).mean()
         else:
             continue
 
@@ -734,8 +770,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         total_loss += loss.item()
         total_parent_correct += correct
         total_parent_count += count
+        num_batches += 1
 
-    avg_loss = total_loss / len(dataloader)
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0
     accuracy = total_parent_correct / total_parent_count if total_parent_count > 0 else 0
 
     return avg_loss, accuracy
@@ -764,11 +801,20 @@ def evaluate(model, dataloader, device):
                     if not valid_mask[b, i]:
                         continue
 
-                    logits_i = parent_logits[b, i, :i+1]
-                    target_i = line_parent_ids[b, i]
-                    target_idx = target_i + 1 if target_i >= 0 else 0
+                    # 跳过第一个位置（隐式ROOT）
+                    if i == 0:
+                        continue
 
-                    if target_idx > i:
+                    logits_i = parent_logits[b, i, :i]  # 只取0到i-1的候选父节点
+                    target_i = line_parent_ids[b, i]
+                    target_idx = target_i if target_i >= 0 else 0
+
+                    # 检查有效性
+                    if target_idx < 0 or target_idx >= i:
+                        continue
+
+                    # 跳过全是-inf或NaN的情况
+                    if torch.isinf(logits_i).all() or torch.isnan(logits_i).any():
                         continue
 
                     pred_idx = torch.argmax(logits_i).item()
@@ -987,17 +1033,20 @@ def main():
         logger.info(f"验证集: {val_dataset.total_pages} 页（流式加载）")
 
         # 创建dataloader（IterableDataset 不支持 shuffle 参数）
+        # 使用 partial 设置最大行数限制为 256（防止极端情况导致显存爆炸）
+        collate_fn_with_limit = partial(collate_fn, max_lines_limit=256)
+
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=batch_size,
             num_workers=0,  # IterableDataset 建议 num_workers=0
-            collate_fn=collate_fn
+            collate_fn=collate_fn_with_limit
         )
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=batch_size,
             num_workers=0,
-            collate_fn=collate_fn
+            collate_fn=collate_fn_with_limit
         )
 
         # 创建GRU模型

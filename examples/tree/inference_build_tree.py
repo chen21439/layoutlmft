@@ -261,6 +261,42 @@ def predict_relations(
     return relation_types, relation_confidences
 
 
+def tree_to_hrds_format(tree, page_num=0):
+    """
+    将DocumentTree转换为HRDS平铺格式
+
+    Args:
+        tree: DocumentTree实例
+        page_num: 页码
+
+    Returns:
+        list: HRDS格式的平铺列表
+    """
+    flat_list = []
+
+    def traverse(node, parent_id=-1):
+        if node.idx >= 0:  # 跳过ROOT
+            # 转换为HRDS格式
+            hrds_item = {
+                "line_id": node.idx,
+                "text": node.text if node.text else "",
+                "box": node.bbox,
+                "class": node.label.lower().replace("-", "_"),
+                "page": page_num,
+                "parent_id": parent_id,
+                "relation": node.relation_to_parent if node.relation_to_parent else "none",
+                "is_meta": (node.relation_to_parent == "meta"),
+            }
+            flat_list.append(hrds_item)
+
+        # 递归遍历子节点
+        for child in node.children:
+            traverse(child, node.idx)
+
+    traverse(tree.root)
+    return flat_list
+
+
 def inference_single_page(
     page_data: dict,
     subtask2_model,
@@ -384,6 +420,13 @@ def main():
         action="store_true",
         help="是否保存ASCII格式的树",
     )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="hrds",
+        choices=["tree", "hrds", "both"],
+        help="输出格式：tree=嵌套树，hrds=HRDS平铺格式，both=两种都输出",
+    )
 
     args = parser.parse_args()
 
@@ -456,19 +499,29 @@ def main():
             # 保存单个树
             page_idx = page_data.get("page_idx", i)
 
-            if args.save_json:
-                json_path = output_dir / f"tree_{page_idx:04d}.json"
-                tree.to_json(str(json_path))
+            # 根据output_format保存
+            if args.output_format in ["hrds", "both"]:
+                # 保存HRDS格式
+                hrds_data = tree_to_hrds_format(tree, page_num=page_idx)
+                hrds_path = output_dir / f"page_{page_idx:04d}.json"
+                with open(hrds_path, 'w', encoding='utf-8') as f:
+                    json.dump(hrds_data, f, indent=2, ensure_ascii=False)
 
-            if args.save_markdown:
-                md_path = output_dir / f"tree_{page_idx:04d}.md"
-                with open(md_path, 'w', encoding='utf-8') as f:
-                    f.write(tree.to_markdown())
+            if args.output_format in ["tree", "both"]:
+                # 保存树格式
+                if args.save_json:
+                    json_path = output_dir / f"tree_{page_idx:04d}.json"
+                    tree.to_json(str(json_path))
 
-            if args.save_ascii:
-                ascii_path = output_dir / f"tree_{page_idx:04d}_ascii.txt"
-                with open(ascii_path, 'w', encoding='utf-8') as f:
-                    f.write(tree.visualize_ascii())
+                if args.save_markdown:
+                    md_path = output_dir / f"tree_{page_idx:04d}.md"
+                    with open(md_path, 'w', encoding='utf-8') as f:
+                        f.write(tree.to_markdown())
+
+                if args.save_ascii:
+                    ascii_path = output_dir / f"tree_{page_idx:04d}_ascii.txt"
+                    with open(ascii_path, 'w', encoding='utf-8') as f:
+                        f.write(tree.visualize_ascii())
 
         except Exception as e:
             import traceback
