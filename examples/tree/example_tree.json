@@ -1,0 +1,78 @@
+{
+  "root": {
+    "idx": -1,
+    "label": "ROOT",
+    "bbox": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "text": null,
+    "confidence": null,
+    "relation_to_parent": null,
+    "relation_confidence": null,
+    "children": [
+      {
+        "idx": 0,
+        "label": "Title",
+        "bbox": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "text": "Document Title",
+        "confidence": null,
+        "relation_to_parent": "none",
+        "relation_confidence": null,
+        "children": [
+          {
+            "idx": 1,
+            "label": "Section",
+            "bbox": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "text": "Section Header",
+            "confidence": null,
+            "relation_to_parent": "contain",
+            "relation_confidence": null,
+            "children": [
+              {
+                "idx": 2,
+                "label": "Para-Line",
+                "bbox": [
+                  0,
+                  0,
+                  0,
+                  0
+                ],
+                "text": "Paragraph text here.",
+                "confidence": null,
+                "relation_to_parent": "contain",
+                "relation_confidence": null
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "num_nodes": 3,
+  "statistics": {
+    "total_nodes": 3,
+    "max_depth": 3,
+    "label_distribution": {
+      "Title": 1,
+      "Section": 1,
+      "Para-Line": 1
+    },
+    "relation_distribution": {
+      "none": 1,
+      "contain": 2
+    }
+  }
+}

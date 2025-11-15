@@ -167,7 +167,7 @@ def main():
                             token_line_ids.append(raw_sample["line_ids"][word_idx])
                         previous_word_idx = word_idx
 
-                    # 计算行级 bbox
+                    # 计算行级 bbox 和 labels
                     valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
                     if len(valid_line_ids) > 0:
                         max_line_id = max(valid_line_ids)
@@ -179,16 +179,37 @@ def main():
                         line_bboxes[:, 2] = -1e9
                         line_bboxes[:, 3] = -1e9
 
-                        for bbox, lid in zip(bboxes, token_line_ids):
+                        # 收集每个line的所有标签（用于多数投票）
+                        from collections import defaultdict, Counter
+                        line_label_votes = defaultdict(list)
+
+                        for bbox, label, lid in zip(bboxes, labels, token_line_ids):
                             if lid < 0:
                                 continue
+                            # 更新bbox
                             x1, y1, x2, y2 = bbox
                             line_bboxes[lid, 0] = min(line_bboxes[lid, 0], x1)
                             line_bboxes[lid, 1] = min(line_bboxes[lid, 1], y1)
                             line_bboxes[lid, 2] = max(line_bboxes[lid, 2], x2)
                             line_bboxes[lid, 3] = max(line_bboxes[lid, 3], y2)
+
+                            # 收集标签（忽略特殊标签-100）
+                            if label != -100:
+                                line_label_votes[lid].append(label)
+
+                        # 计算每个line的最终标签（多数投票）
+                        line_labels = []
+                        for lid in range(num_lines):
+                            if lid in line_label_votes and len(line_label_votes[lid]) > 0:
+                                # 使用多数投票
+                                most_common_label = Counter(line_label_votes[lid]).most_common(1)[0][0]
+                                line_labels.append(most_common_label)
+                            else:
+                                # 如果没有有效标签，使用-1
+                                line_labels.append(-1)
                     else:
                         line_bboxes = np.zeros((0, 4), dtype=np.float32)
+                        line_labels = []
 
                     # 准备模型输入
                     sample_dict = {
@@ -235,6 +256,7 @@ def main():
                         "line_parent_ids": raw_sample["line_parent_ids"],
                         "line_relations": raw_sample["line_relations"],
                         "line_bboxes": line_bboxes,
+                        "line_labels": line_labels,  # 新增：行级语义标签
                         "page_idx": idx,
                     }
 
