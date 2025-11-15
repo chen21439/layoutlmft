@@ -446,7 +446,7 @@ class ParentFinderDatasetSimple(torch.utils.data.Dataset):
 
 class ParentFinderDataset(torch.utils.data.Dataset):
     """
-    完整版数据集：页面级别
+    完整版数据集：页面级别（全量加载，适合小数据集）
     每个样本是一个文档页面，包含多个语义单元（lines）
     """
 
@@ -500,6 +500,104 @@ class ParentFinderDataset(torch.utils.data.Dataset):
             "line_mask": line_mask,
             "line_parent_ids": line_parent_ids
         }
+
+
+class ChunkIterableDataset(torch.utils.data.IterableDataset):
+    """
+    基于 chunk 的流式数据集（内存友好，适合大数据集）
+    逐个加载 chunk，避免一次性占用大量内存
+    """
+
+    def __init__(
+        self,
+        features_dir: str,
+        split: str = "train",
+        max_chunks: int = None,
+        shuffle: bool = True,
+        seed: int = 42
+    ):
+        import glob
+
+        self.features_dir = features_dir
+        self.split = split
+        self.shuffle = shuffle
+        self.seed = seed
+
+        # 查找 chunk 文件
+        single_file = os.path.join(features_dir, f"{split}_line_features.pkl")
+        if os.path.exists(single_file):
+            # 单文件模式，转换为列表
+            self.chunk_files = [single_file]
+        else:
+            pattern = os.path.join(features_dir, f"{split}_line_features_chunk_*.pkl")
+            self.chunk_files = sorted(glob.glob(pattern))
+
+            if max_chunks is not None:
+                self.chunk_files = self.chunk_files[:max_chunks]
+
+            if len(self.chunk_files) == 0:
+                raise ValueError(f"没有找到特征文件: {single_file} 或 {pattern}")
+
+        logger.info(f"[ChunkIterable] 找到 {len(self.chunk_files)} 个chunk文件")
+        logger.info(f"[ChunkIterable] 流式加载模式，内存占用低")
+
+        # 统计总页面数（用于显示）
+        self.total_pages = 0
+        for chunk_file in self.chunk_files:
+            with open(chunk_file, "rb") as f:
+                chunk_data = pickle.load(f)
+                self.total_pages += len(chunk_data)
+
+        logger.info(f"[ChunkIterable] 总计 {self.total_pages} 页")
+
+    def process_page(self, page_data):
+        """处理单个页面数据"""
+        line_features = page_data["line_features"].squeeze(0)
+        line_mask = page_data["line_mask"].squeeze(0)
+        line_parent_ids = torch.tensor(page_data["line_parent_ids"], dtype=torch.long)
+
+        return {
+            "line_features": line_features,
+            "line_mask": line_mask,
+            "line_parent_ids": line_parent_ids
+        }
+
+    def __iter__(self):
+        # 获取 worker info（支持多进程）
+        worker_info = torch.utils.data.get_worker_info()
+
+        # 打乱 chunk 顺序（每个 epoch）
+        chunk_files = self.chunk_files.copy()
+        if self.shuffle:
+            # 使用固定 seed + epoch 保证可复现
+            rng = random.Random(self.seed + torch.initial_seed())
+            rng.shuffle(chunk_files)
+
+        # 如果有多个 worker，分配 chunk
+        if worker_info is not None:
+            # 分配给当前 worker 的 chunk
+            per_worker = int(np.ceil(len(chunk_files) / worker_info.num_workers))
+            worker_id = worker_info.id
+            start = worker_id * per_worker
+            end = min(start + per_worker, len(chunk_files))
+            chunk_files = chunk_files[start:end]
+
+        # 逐个 chunk 加载和返回
+        for chunk_file in chunk_files:
+            # 加载当前 chunk
+            with open(chunk_file, "rb") as f:
+                chunk_data = pickle.load(f)
+
+            # 打乱 chunk 内的页面
+            if self.shuffle:
+                rng = random.Random(self.seed + torch.initial_seed())
+                rng.shuffle(chunk_data)
+
+            # 逐个返回页面
+            for page_data in chunk_data:
+                yield self.process_page(page_data)
+
+            # chunk_data 离开作用域，内存自动释放
 
 
 def train_epoch_simple(model, dataloader, optimizer, criterion, device):
@@ -869,19 +967,37 @@ def main():
         eval_fn = evaluate_simple
 
     else:  # full
-        # 完整版
-        train_dataset = ParentFinderDataset(features_dir, split="train", max_chunks=max_chunks)
-        val_dataset = ParentFinderDataset(features_dir, split="validation", max_chunks=max_chunks)
+        # 完整版 - 使用流式加载（内存友好）
+        train_dataset = ChunkIterableDataset(
+            features_dir,
+            split="train",
+            max_chunks=max_chunks,
+            shuffle=True,  # 在 Dataset 内部打乱
+            seed=42
+        )
+        val_dataset = ChunkIterableDataset(
+            features_dir,
+            split="validation",
+            max_chunks=max_chunks,
+            shuffle=False,  # 验证集不打乱
+            seed=42
+        )
 
-        logger.info(f"训练集: {len(train_dataset)} 页")
-        logger.info(f"验证集: {len(val_dataset)} 页")
+        logger.info(f"训练集: {train_dataset.total_pages} 页（流式加载）")
+        logger.info(f"验证集: {val_dataset.total_pages} 页（流式加载）")
 
-        # 创建dataloader
+        # 创建dataloader（IterableDataset 不支持 shuffle 参数）
         train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn
+            train_dataset,
+            batch_size=batch_size,
+            num_workers=0,  # IterableDataset 建议 num_workers=0
+            collate_fn=collate_fn
         )
         val_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn
+            val_dataset,
+            batch_size=batch_size,
+            num_workers=0,
+            collate_fn=collate_fn
         )
 
         # 创建GRU模型

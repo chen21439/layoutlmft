@@ -64,7 +64,15 @@ class DocumentNode:
         """
         self.idx = idx
         self.label = label
-        self.bbox = bbox if bbox else [0, 0, 0, 0]
+        # 安全处理bbox（可能是numpy数组或list）
+        if bbox is not None:
+            # 如果是numpy数组，转换为list
+            if hasattr(bbox, 'tolist'):
+                self.bbox = bbox.tolist()
+            else:
+                self.bbox = list(bbox) if bbox is not None else [0, 0, 0, 0]
+        else:
+            self.bbox = [0, 0, 0, 0]
         self.text = text
         self.confidence = confidence
 
@@ -156,9 +164,9 @@ class DocumentTree:
             label_id = line_labels[i]
             label_name = LABEL_MAP.get(label_id, f"Unknown-{label_id}")
 
-            bbox = line_bboxes[i] if line_bboxes and i < len(line_bboxes) else None
-            text = line_texts[i] if line_texts and i < len(line_texts) else None
-            label_conf = label_confidences[i] if label_confidences and i < len(label_confidences) else None
+            bbox = line_bboxes[i] if line_bboxes is not None and i < len(line_bboxes) else None
+            text = line_texts[i] if line_texts is not None and i < len(line_texts) else None
+            label_conf = label_confidences[i] if label_confidences is not None and i < len(label_confidences) else None
 
             node = DocumentNode(
                 idx=i,
@@ -175,7 +183,7 @@ class DocumentTree:
             parent_idx = parent_indices[i]
             relation_id = relation_types[i]
             relation_name = RELATION_MAP.get(relation_id, "none")
-            relation_conf = relation_confidences[i] if relation_confidences and i < len(relation_confidences) else None
+            relation_conf = relation_confidences[i] if relation_confidences is not None and i < len(relation_confidences) else None
 
             # 确定父节点
             if parent_idx < 0:
