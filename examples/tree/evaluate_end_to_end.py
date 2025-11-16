@@ -14,20 +14,12 @@ import torch.nn.functional as F
 import pickle
 import numpy as np
 from tqdm import tqdm
-from collections import defaultdict, Counter
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score, classification_report, confusion_matrix
-from datasets import load_dataset
-from transformers import BertTokenizerFast, set_seed
+from transformers import set_seed
 
 # 添加父目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import layoutlmft.data.datasets.hrdoc
-from layoutlmft.data import DataCollatorForKeyValueExtraction
-from layoutlmft.models.relation_classifier import MultiClassRelationClassifier, compute_geometry_features, LineFeatureExtractor
-from layoutlmft.models.layoutlmv2 import LayoutLMv2ForTokenClassification, LayoutLMv2Config
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-
-CONFIG_MAPPING.update({"layoutlmv2": LayoutLMv2Config})
+from layoutlmft.models.relation_classifier import MultiClassRelationClassifier, compute_geometry_features
 
 logger = logging.getLogger(__name__)
 
@@ -186,17 +178,8 @@ RELATION_LABELS = {
 RELATION_NAMES = ["none", "connect", "contain", "equality"]
 
 
-def load_models(subtask1_path, subtask2_path, subtask3_path, device):
-    """加载所有模型"""
-    # 加载 SubTask 1 模型 (LayoutLMv2)
-    logger.info(f"加载SubTask 1模型 (LayoutLMv2): {subtask1_path}")
-    config = LayoutLMv2Config.from_pretrained(subtask1_path)
-    tokenizer = BertTokenizerFast.from_pretrained(subtask1_path)
-    subtask1_model = LayoutLMv2ForTokenClassification.from_pretrained(subtask1_path, config=config)
-    subtask1_model = subtask1_model.to(device)
-    subtask1_model.eval()
-    logger.info(f"✓ SubTask 1加载成功 (num_labels: {config.num_labels})")
-
+def load_models(subtask2_path, subtask3_path, device):
+    """加载模型"""
     # 加载 SubTask 2 模型 (ParentFinderGRU)
     logger.info(f"加载SubTask 2模型 (ParentFinderGRU - Full): {subtask2_path}")
     subtask2_checkpoint = torch.load(subtask2_path, map_location=device)
@@ -233,7 +216,7 @@ def load_models(subtask1_path, subtask2_path, subtask3_path, device):
     subtask3_model.eval()
     logger.info(f"✓ SubTask 3加载成功 (F1: {subtask3_checkpoint.get('best_f1', 'N/A')})")
 
-    return subtask1_model, tokenizer, subtask2_model, subtask3_model
+    return subtask2_model, subtask3_model
 
 
 def load_validation_data(features_dir, max_chunks=None):
@@ -259,157 +242,27 @@ def load_validation_data(features_dir, max_chunks=None):
     return page_features
 
 
-def load_raw_validation_data(data_dir, max_samples=None):
-    """加载原始验证集数据（用于 SubTask 1 评估）"""
-    os.environ["HRDOC_DATA_DIR"] = data_dir
-
-    logger.info("加载原始验证集数据...")
-    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
-
-    if "test" not in datasets:
-        raise ValueError("数据集中没有test集（验证集）")
-
-    validation_dataset = datasets["test"]
-
-    if max_samples is not None and max_samples > 0:
-        logger.info(f"限制验证集样本数: {max_samples}")
-        if len(validation_dataset) > max_samples:
-            validation_dataset = validation_dataset.select(range(max_samples))
-
-    logger.info(f"加载了 {len(validation_dataset)} 个验证集样本")
-    return validation_dataset
-
-
-def evaluate_subtask1_semantic_classification(subtask1_model, tokenizer, validation_dataset, device):
+def evaluate_subtask1_semantic_classification(page_features):
     """
-    评估SubTask 1：语义分类（完整论文方法）
+    评估SubTask 1：语义分类（Line-level）
 
-    流程：
-    1. Token-level 推理（使用 LayoutLMv2）
-    2. Line-level 聚合（多数投票）
-    3. 计算 line-level F1-score（Micro + Macro）
+    说明：
+    - 根据论文，使用预先提取的语义单元特征
+    - SubTask 1 的 token-level 评估已在 run_hrdoc.py 中完成
+    - 这里跳过重复评估，建议查看 run_hrdoc.py 的训练日志获取 F1 结果
     """
     logger.info("\n" + "="*80)
-    logger.info("SubTask 1: Semantic Classification (Token→Line)")
+    logger.info("SubTask 1: Semantic Classification")
     logger.info("="*80)
+    logger.info("说明：")
+    logger.info("  1. 论文使用预先提取的语义单元（离线特征提取）")
+    logger.info("  2. SubTask 1 的评估已在 run_hrdoc.py 中完成（token-level F1）")
+    logger.info("  3. 当前使用 extract_line_features.py 预提取的特征")
+    logger.info("  4. 建议：查看 hrdoc_train 训练日志获取 token-level F1 结果")
+    logger.info("")
+    logger.info("⏭  跳过 SubTask 1 重复评估，专注于 SubTask 2/3")
 
-    # Data collator
-    data_collator = DataCollatorForKeyValueExtraction(
-        tokenizer,
-        pad_to_multiple_of=8,
-        padding="max_length",
-        max_length=512,
-    )
-
-    # 收集所有预测和真实标签
-    all_pred_labels = []
-    all_gt_labels = []
-
-    with torch.no_grad():
-        for sample_idx, raw_sample in enumerate(tqdm(validation_dataset, desc="SubTask 1评估")):
-            # 准备输入数据
-            tokenized = raw_sample["tokenized"]
-            bboxes = np.array(tokenized["bbox"])
-            labels = np.array(tokenized["ner_tags"])
-            token_line_ids = raw_sample["token_line_ids"]
-
-            # 准备模型输入
-            sample_dict = {
-                "input_ids": tokenized["input_ids"],
-                "attention_mask": tokenized["attention_mask"],
-                "bbox": bboxes,
-                "labels": labels,
-                "image": raw_sample["image"],
-            }
-
-            batch = data_collator([sample_dict])
-
-            # 转移到GPU
-            for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k] = v.to(device)
-                elif k == "image" and hasattr(v, "to"):
-                    batch[k] = v.to(device)
-
-            # Token-level 推理
-            outputs = subtask1_model(
-                input_ids=batch["input_ids"],
-                bbox=batch["bbox"],
-                attention_mask=batch["attention_mask"],
-                image=batch["image"],
-            )
-
-            # 获取 token-level 预测
-            logits = outputs.logits  # [batch_size, seq_len, num_labels]
-            predictions = torch.argmax(logits, dim=-1).cpu().numpy()[0]  # [seq_len]
-
-            # Line-level 聚合（多数投票）
-            num_lines = raw_sample["num_lines"]
-            line_label_votes_pred = defaultdict(list)
-            line_label_votes_gt = defaultdict(list)
-
-            for pred_label, gt_label, lid in zip(predictions, labels, token_line_ids):
-                if lid < 0:
-                    continue
-                # 忽略特殊标签
-                if gt_label != -100:
-                    line_label_votes_pred[lid].append(pred_label)
-                    line_label_votes_gt[lid].append(gt_label)
-
-            # 计算每个 line 的最终标签（多数投票）
-            for lid in range(num_lines):
-                if lid in line_label_votes_gt and len(line_label_votes_gt[lid]) > 0:
-                    # 预测标签（多数投票）
-                    pred_line_label = Counter(line_label_votes_pred[lid]).most_common(1)[0][0]
-                    # GT 标签（多数投票）
-                    gt_line_label = Counter(line_label_votes_gt[lid]).most_common(1)[0][0]
-
-                    all_pred_labels.append(pred_line_label)
-                    all_gt_labels.append(gt_line_label)
-
-    if len(all_gt_labels) == 0:
-        logger.warning("没有找到有效的语义标签数据")
-        return None
-
-    # 计算 F1 指标
-    accuracy = accuracy_score(all_gt_labels, all_pred_labels)
-
-    # Micro F1 (整体准确率)
-    micro_precision, micro_recall, micro_f1, _ = precision_recall_fscore_support(
-        all_gt_labels, all_pred_labels, average="micro", zero_division=0
-    )
-
-    # Macro F1 (各类别平均)
-    macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
-        all_gt_labels, all_pred_labels, average="macro", zero_division=0
-    )
-
-    # 分类报告
-    unique_labels = sorted(set(all_gt_labels))
-    target_names = [SEMANTIC_NAMES[i] if i < len(SEMANTIC_NAMES) else f"class_{i}" for i in unique_labels]
-    report = classification_report(
-        all_gt_labels, all_pred_labels,
-        labels=unique_labels,
-        target_names=target_names,
-        zero_division=0
-    )
-
-    logger.info(f"\nSubTask 1 结果 (Line-level):")
-    logger.info(f"  总样本数: {len(all_gt_labels)}")
-    logger.info(f"  准确率: {accuracy:.4f}")
-    logger.info(f"  Micro-F1: {micro_f1:.4f}")
-    logger.info(f"  Macro-F1: {macro_f1:.4f}")
-    logger.info(f"\n分类报告:\n{report}")
-
-    return {
-        "accuracy": accuracy,
-        "micro_f1": micro_f1,
-        "macro_f1": macro_f1,
-        "micro_precision": micro_precision,
-        "micro_recall": micro_recall,
-        "macro_precision": macro_precision,
-        "macro_recall": macro_recall,
-    }
+    return None
 
 
 def evaluate_subtask2_parent_finding(subtask2_model, page_features, device):
@@ -643,16 +496,9 @@ def evaluate_end_to_end(subtask3_model, page_features, subtask2_predictions, dev
 
 def main():
     # 配置
-    data_dir = os.getenv("HRDOC_DATA_DIR", "/mnt/e/models/data/Section/HRDS")
-
     features_dir = os.getenv(
         "LAYOUTLMFT_FEATURES_DIR",
         "/mnt/e/models/train_data/layoutlmft/line_features"
-    )
-
-    subtask1_model_path = os.getenv(
-        "SUBTASK1_MODEL_PATH",
-        "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000"
     )
 
     subtask2_model_path = os.getenv(
@@ -669,10 +515,6 @@ def main():
     if max_chunks == -1:
         max_chunks = None
 
-    max_samples = int(os.getenv("MAX_SAMPLES", "-1"))
-    if max_samples == -1:
-        max_samples = None
-
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -684,33 +526,25 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("="*80)
-    logger.info("HRDoc End-to-End 评估（完整论文方法 - Full模式）")
+    logger.info("HRDoc End-to-End 评估（论文方法 - 使用预提取特征）")
     logger.info("="*80)
     logger.info(f"使用设备: {device}")
-    logger.info(f"数据集目录: {data_dir}")
     logger.info(f"特征目录: {features_dir}")
-    logger.info(f"SubTask 1模型: {subtask1_model_path}")
     logger.info(f"SubTask 2模型 (Full): {subtask2_model_path}")
     logger.info(f"SubTask 3模型: {subtask3_model_path}")
 
-    # 加载所有模型
-    subtask1_model, tokenizer, subtask2_model, subtask3_model = load_models(
-        subtask1_model_path,
+    # 加载模型
+    subtask2_model, subtask3_model = load_models(
         subtask2_model_path,
         subtask3_model_path,
         device
     )
 
-    # 加载原始验证数据（用于 SubTask 1）
-    validation_dataset = load_raw_validation_data(data_dir, max_samples)
-
-    # 加载预处理特征（用于 SubTask 2/3）
+    # 加载预处理特征
     page_features = load_validation_data(features_dir, max_chunks)
 
-    # 1. 评估SubTask 1: 语义分类（Token→Line）
-    subtask1_metrics = evaluate_subtask1_semantic_classification(
-        subtask1_model, tokenizer, validation_dataset, device
-    )
+    # 1. 说明SubTask 1评估
+    subtask1_metrics = evaluate_subtask1_semantic_classification(page_features)
 
     # 2. 评估SubTask 2: 父节点查找
     subtask2_metrics, subtask2_predictions = evaluate_subtask2_parent_finding(
