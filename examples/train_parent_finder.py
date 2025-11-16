@@ -162,66 +162,142 @@ class ParentFinderGRU(nn.Module):
         Args:
             line_features: 行级特征 [B, L, H]
             line_mask: 有效行mask [B, L]
-            line_labels: 语义类别标签 [B, L]（训练时可提供ground truth）
 
         Returns:
-            parent_logits: [B, L, L] - 每个位置i的父节点logits（对位置0到i-1）
-            cls_logits: [B, L, num_classes] - 语义类别预测logits
+            parent_logits: [B, L+1, L+1] - 每个位置i的父节点logits（包括ROOT）
         """
-        batch_size, max_lines, _ = line_features.shape
+        batch_size, max_lines, hidden_size = line_features.shape
         device = line_features.device
 
-        # 1. 通过 GRU 获取隐藏状态
+        # 1. 构建 ROOT 节点（论文方法：所有单元表示的平均）
+        # 只对有效行求平均
+        valid_sum = (line_features * line_mask.unsqueeze(-1)).sum(dim=1)  # [B, H]
+        valid_count = line_mask.sum(dim=1, keepdim=True).clamp(min=1)     # [B, 1]
+        root_feat = valid_sum / valid_count                                # [B, H]
+        root_feat = root_feat.unsqueeze(1)                                 # [B, 1, H]
+
+        # 2. 将 ROOT 节点拼接到序列最前面
+        line_features_with_root = torch.cat([root_feat, line_features], dim=1)  # [B, L+1, H]
+        line_mask_with_root = torch.cat(
+            [torch.ones(batch_size, 1, dtype=torch.bool, device=device), line_mask],
+            dim=1
+        )  # [B, L+1]
+
+        # 3. 通过 GRU 获取隐藏状态
         # h_i 包含了从开始到第i个单元的上下文信息
-        gru_output, _ = self.gru(line_features)  # [B, L, gru_hidden]
+        gru_output, _ = self.gru(line_features_with_root)  # [B, L+1, gru_hidden]
 
-        # 2. 预测每个单元的语义类别概率（仅用于 soft-mask）
-        # 简化版本：不使用语义类别，直接基于特征计算父节点
-        # cls_logits = self.cls_head(line_features)  # [B, L, num_classes]
-        # cls_probs = F.softmax(cls_logits, dim=-1)  # [B, L, num_classes]
+        # 2. 预测每个单元的语义类别概率（用于 soft-mask）
+        # 注意：line_features 是原始行特征 [B, L, H]，不包括 ROOT
+        cls_logits = self.cls_head(line_features)  # [B, L, num_classes]
+        cls_probs = F.softmax(cls_logits, dim=-1)  # [B, L, num_classes]
 
-        # 3. 计算父节点概率
+        # 为 ROOT 添加一个虚拟的类别概率分布（全1的均匀分布或特殊处理）
+        # ROOT 的类别概率：使用一个特殊的"ROOT类别"（索引 num_classes）
+        root_cls_prob = torch.zeros(batch_size, 1, self.num_classes + 1, device=device)
+        root_cls_prob[:, :, -1] = 1.0  # ROOT 类别（最后一个）
+
+        # 原始类别概率需要扩展到 num_classes+1（添加 ROOT 类别）
+        # 为每行添加一个0的 ROOT 类别概率
+        cls_probs_extended = torch.cat([
+            cls_probs,
+            torch.zeros(batch_size, max_lines, 1, device=device)
+        ], dim=-1)  # [B, L, num_classes+1]
+
+        # 将 ROOT 和行的类别概率拼接
+        cls_probs_with_root = torch.cat([root_cls_prob, cls_probs_extended], dim=1)  # [B, L+1, num_classes+1]
+
+        # 4. 计算父节点概率
         # 对每个位置 i，计算它与之前所有位置 j (0 <= j < i) 的父子概率
+        # 现在序列长度是 L+1（包括 ROOT）
 
         # 查询向量（当前单元）
-        query = self.query_proj(gru_output)  # [B, L, gru_hidden]
+        query = self.query_proj(gru_output)  # [B, L+1, gru_hidden]
 
         # 键向量（候选父节点）
-        key = self.key_proj(gru_output)  # [B, L, gru_hidden]
+        key = self.key_proj(gru_output)  # [B, L+1, gru_hidden]
 
         # 注意力分数: alpha(q_i, h_j)
         # 使用高效的 bmm 避免创建巨大的中间张量
-        # [B, L, L] = [B, L, gru_hidden] @ [B, gru_hidden, L]
+        # [B, L+1, L+1] = [B, L+1, gru_hidden] @ [B, gru_hidden, L+1]
         attention_scores = torch.bmm(
-            query,  # [B, L, gru_hidden]
-            key.transpose(1, 2)  # [B, gru_hidden, L]
-        ) / (self.gru_hidden_size ** 0.5)  # [B, L, L]
+            query,  # [B, L+1, gru_hidden]
+            key.transpose(1, 2)  # [B, gru_hidden, L+1]
+        ) / (self.gru_hidden_size ** 0.5)  # [B, L+1, L+1]
 
-        # 4. Soft-mask 操作（已禁用 - 需要语义标签）
-        # 简化版本：不使用 soft-mask，直接基于注意力分数预测父节点
-        # if self.use_soft_mask and self.M_cp is not None:
-        #     ... (soft-mask 代码已省略)
+        # 5. Soft-mask 操作（根据语义类别约束）
+        if self.use_soft_mask and self.M_cp is not None:
+            # M_cp: [num_classes+1, num_classes] = [17, 16]
+            # cls_probs: [B, L, num_classes] = [B, L, 16] (原始行的类别概率，不包括 ROOT)
+            # cls_probs_with_root: [B, L+1, num_classes+1] (包括 ROOT)
 
-        # 5. 创建因果mask（只能选择之前的单元作为父节点）
+            # 论文公式：P_dom(i,j) = P_cls_j · M_cp · P_cls_i^T
+            # 其中 i 是 child（只能是语义单元，不包括 ROOT），j 是 parent（可以是 ROOT 或语义单元）
+
+            # 对于每个 child i (位置 1 到 L+1，对应原始行 0 到 L-1)
+            # 和每个 parent j (位置 0 到 i-1)，计算领域先验概率
+
+            # soft_mask[b, i, j] = P_cls_j · M_cp · P_cls_i^T
+            # = cls_probs_with_root[b, j] @ M_cp @ cls_probs[b, i-1].T
+
+            # 使用 einsum 计算：
+            # cls_probs: [B, L, C]
+            # cls_probs_with_root: [B, L+1, C+1] (parent 的类别概率)
+            # M_cp: [C+1, C]
+
+            # 步骤1：M_cp @ cls_probs[child].T -> [C+1, B*L]
+            # 步骤2：cls_probs_with_root[parent] @ 结果 -> [B, L+1, B*L]
+
+            # 更简单的方法：逐对计算
+            # soft_mask[b, i, j] = cls_probs_with_root[b, j, :] @ M_cp @ cls_probs[b, i-1, :]
+
+            # 使用 einsum 一次性计算所有对：
+            # 'bic,cp,bjp->bij'
+            # b=batch, i=child位置(1~L), j=parent位置(0~i-1), c=parent类别(C+1), p=child类别(C)
+
+            # 注意：位置 0 是 ROOT，它的 child 类别概率需要特殊处理
+            # ROOT 不能作为 child，所以我们只需要计算位置 1~L+1 作为 child 的情况
+
+            # 为了简化，我们可以给 ROOT 一个虚拟的 child 类别概率（全0或均匀分布）
+            # 但实际上 ROOT 永远不会作为 child，所以这个值不重要
+
+            # cls_probs 只包含原始行（不包括 ROOT），形状是 [B, L, C]
+            # 我们需要为 ROOT 添加一个虚拟的 child 类别概率
+            cls_probs_for_child = torch.cat([
+                torch.ones(batch_size, 1, self.num_classes, device=device) / self.num_classes,  # ROOT 的虚拟分布
+                cls_probs  # [B, L, C]
+            ], dim=1)  # [B, L+1, C]
+
+            # 计算 soft_mask:
+            # soft_mask[b, i, j] = cls_probs_with_root[b, j, :] @ M_cp @ cls_probs_for_child[b, i, :]
+            # 使用 einsum: 'bjc,cp,bip->bij'
+            soft_mask = torch.einsum('bjc,cp,bip->bij',
+                                     cls_probs_with_root,  # [B, L+1, C+1] - parent 类别概率
+                                     self.M_cp,            # [C+1, C] - 分布矩阵
+                                     cls_probs_for_child)  # [B, L+1, C] - child 类别概率
+
+            # 将 soft-mask 与注意力分数相乘（使用 log 空间相加避免数值下溢）
+            attention_scores = attention_scores + torch.log(soft_mask.clamp(min=1e-10))
+
+        # 6. 创建因果mask（只能选择之前的单元作为父节点）
         # 对于位置i，只有位置0到i-1可以作为候选父节点
-        causal_mask = torch.triu(torch.ones(max_lines, max_lines, device=device), diagonal=1)
+        # 注意：现在序列长度是 L+1
+        seq_len = max_lines + 1
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
         causal_mask = causal_mask.bool()
 
         # 应用 causal mask
         attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0), float('-inf'))
 
-        # 6. 应用 line_mask（忽略无效位置）
-        # 如果 parent j 或 child i 无效，则mask掉
-        parent_mask = ~line_mask.unsqueeze(1)  # [B, 1, L]
-        child_mask = ~line_mask.unsqueeze(2)   # [B, L, 1]
+        # 7. 应用 line_mask（忽略无效位置）
+        # ROOT 始终有效，其余行按 line_mask_with_root 判断
+        parent_mask = ~line_mask_with_root.unsqueeze(1)  # [B, 1, L+1]
+        child_mask = ~line_mask_with_root.unsqueeze(2)   # [B, L+1, 1]
         combined_mask = parent_mask | child_mask
 
         attention_scores = attention_scores.masked_fill(combined_mask, float('-inf'))
 
-        # 7. 对于第一个位置（i=0），强制其父节点为ROOT（假设ROOT在位置0）
-        # 这里我们假设ROOT就是位置0，可以调整
-
-        return attention_scores  # [B, L, L] - 父节点logits
+        return attention_scores  # [B, L+1, L+1] - 父节点logits（包括ROOT）
 
 
 def collate_fn_simple(batch):
@@ -273,6 +349,7 @@ def collate_fn(batch, max_lines_limit=256):
     line_features = torch.zeros(batch_size, max_lines, hidden_size)
     line_mask = torch.zeros(batch_size, max_lines, dtype=torch.bool)
     line_parent_ids = torch.full((batch_size, max_lines), -1, dtype=torch.long)
+    line_labels = torch.full((batch_size, max_lines), -1, dtype=torch.long)  # 语义标签
 
     for i, item in enumerate(batch):
         # 截断到 max_lines
@@ -285,10 +362,17 @@ def collate_fn(batch, max_lines_limit=256):
         actual_len = min(len(parent_ids), num_lines)
         line_parent_ids[i, :actual_len] = parent_ids[:actual_len]
 
+        # line_labels（如果存在）
+        if "line_labels" in item:
+            labels = item["line_labels"]
+            actual_len_labels = min(len(labels), num_lines)
+            line_labels[i, :actual_len_labels] = torch.tensor(labels[:actual_len_labels], dtype=torch.long)
+
     return {
         "line_features": line_features,
         "line_mask": line_mask,
-        "line_parent_ids": line_parent_ids
+        "line_parent_ids": line_parent_ids,
+        "line_labels": line_labels
     }
 
 
@@ -693,41 +777,45 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
         parent_logits = model(line_features, line_mask)
 
         # 计算损失
-        # parent_logits: [B, L, L]
-        # line_parent_ids: [B, L] - 每个位置的父节点索引
+        # parent_logits: [B, L+1, L+1] - 包括ROOT节点
+        # line_parent_ids: [B, L] - 每个位置的父节点索引（不包括ROOT）
 
-        batch_size, max_lines, _ = parent_logits.shape
+        batch_size = parent_logits.shape[0]
+        num_lines = line_features.shape[1]  # 原始行数（不包括ROOT）
 
         # 只计算有效位置的损失
         valid_mask = line_mask  # [B, L]
 
-        losses = []  # 收集所有损失，最后一次性计算
+        # 使用累加而非列表收集，避免大量计算图堆积
+        batch_loss = 0.0
+        total_loss_value = 0.0
         correct = 0
         count = 0
 
         for b in range(batch_size):
-            for i in range(max_lines):
+            for i in range(num_lines):
                 if not valid_mask[b, i]:
                     continue
 
-                # 位置i的父节点预测
-                # 注意：我们将位置0视为隐式ROOT
-                if i == 0:
-                    # 第一个位置的父节点应该是ROOT，跳过
-                    continue
-
-                logits_i = parent_logits[b, i, :i]  # 只取0到i-1的候选父节点
+                # 行 i 在新序列中的位置是 i+1（因为 ROOT 在位置 0）
+                # parent_logits[b, i+1, :i+2] 包含：
+                #   - 位置 0: ROOT
+                #   - 位置 1 到 i+1: 行 0 到 i
+                # 但行 i 只能选择 0 到 i-1 作为父节点（不能选自己），加上 ROOT
+                # 所以取 parent_logits[b, i+1, :i+1]
+                logits_i = parent_logits[b, i+1, :i+1]  # [0:i+1] 包含 ROOT 和行 0~i-1
                 target_i = line_parent_ids[b, i]
 
-                # 映射：parent_id直接对应logits索引
-                # parent_id=0 -> index=0
-                # parent_id=1 -> index=1
-                # ...
-                # parent_id=-1 (ROOT) 视为position 0
-                target_idx = target_i if target_i >= 0 else 0
+                # 映射：line_parent_ids -> logits索引
+                # parent_id = -1 (ROOT) -> index = 0
+                # parent_id = j (行j)    -> index = j+1
+                if target_i == -1:
+                    target_idx = 0  # ROOT
+                else:
+                    target_idx = target_i + 1  # 行j在新序列中的位置是j+1
 
                 # 检查 target_idx 是否在有效范围内
-                if target_idx < 0 or target_idx >= i:
+                if target_idx < 0 or target_idx > i:
                     # 父节点无效或在当前位置之后，跳过
                     continue
 
@@ -739,7 +827,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
                 if target_idx >= len(logits_i):
                     continue
 
-                # 交叉熵损失（收集而不是累加）
+                # 交叉熵损失
                 loss_i = F.cross_entropy(
                     logits_i.unsqueeze(0),
                     torch.tensor([target_idx], device=device)
@@ -749,7 +837,9 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
                 if torch.isnan(loss_i) or torch.isinf(loss_i):
                     continue
 
-                losses.append(loss_i)
+                # 累加损失（避免 torch.stack 导致的内存问题）
+                batch_loss = batch_loss + loss_i
+                total_loss_value += loss_i.item()
 
                 # 统计准确率
                 pred_idx = torch.argmax(logits_i).item()
@@ -757,17 +847,18 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
                     correct += 1
                 count += 1
 
-        if len(losses) > 0:
-            # 一次性计算平均损失，避免巨大计算图
-            loss = torch.stack(losses).mean()
+        # 计算平均损失并反向传播
+        if count > 0:
+            loss = batch_loss / count
+            loss.backward()
         else:
+            # 没有有效样本，跳过
             continue
 
-        # 反向传播
-        loss.backward()
+        # 执行优化步骤
         optimizer.step()
 
-        total_loss += loss.item()
+        total_loss += total_loss_value / max(1, count)  # 当前批次的平均loss
         total_parent_correct += correct
         total_parent_count += count
         num_batches += 1
@@ -793,28 +884,41 @@ def evaluate(model, dataloader, device):
             # 前向传播
             parent_logits = model(line_features, line_mask)
 
-            batch_size, max_lines, _ = parent_logits.shape
-            valid_mask = line_mask
+            # parent_logits: [B, L+1, L+1] - 包括ROOT节点
+            # line_parent_ids: [B, L] - 每个位置的父节点索引（不包括ROOT）
+
+            batch_size = parent_logits.shape[0]
+            num_lines = line_features.shape[1]  # 原始行数（不包括ROOT）
+            valid_mask = line_mask  # [B, L]
 
             for b in range(batch_size):
-                for i in range(max_lines):
+                for i in range(num_lines):
                     if not valid_mask[b, i]:
                         continue
 
-                    # 跳过第一个位置（隐式ROOT）
-                    if i == 0:
-                        continue
-
-                    logits_i = parent_logits[b, i, :i]  # 只取0到i-1的候选父节点
+                    # 行 i 在新序列中的位置是 i+1（因为 ROOT 在位置 0）
+                    # parent_logits[b, i+1, :i+1] 包含 ROOT 和行 0~i-1
+                    logits_i = parent_logits[b, i+1, :i+1]
                     target_i = line_parent_ids[b, i]
-                    target_idx = target_i if target_i >= 0 else 0
 
-                    # 检查有效性
-                    if target_idx < 0 or target_idx >= i:
+                    # 映射：line_parent_ids -> logits索引
+                    # parent_id = -1 (ROOT) -> index = 0
+                    # parent_id = j (行j)    -> index = j+1
+                    if target_i == -1:
+                        target_idx = 0  # ROOT
+                    else:
+                        target_idx = target_i + 1  # 行j在新序列中的位置是j+1
+
+                    # 检查 target_idx 是否在有效范围内
+                    if target_idx < 0 or target_idx > i:
                         continue
 
                     # 跳过全是-inf或NaN的情况
                     if torch.isinf(logits_i).all() or torch.isnan(logits_i).any():
+                        continue
+
+                    # 再次检查索引（防御性编程）
+                    if target_idx >= len(logits_i):
                         continue
 
                     pred_idx = torch.argmax(logits_i).item()
@@ -917,6 +1021,8 @@ def main():
                         help="是否使用soft-mask（需要语义标签，仅full模式）")
     parser.add_argument("--gradient_checkpointing", action="store_true",
                         help="是否使用梯度检查点（节省显存，稍慢）")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="梯度累积步数（模拟更大的batch size）")
 
     args = parser.parse_args()
 
@@ -947,7 +1053,7 @@ def main():
         logger.info("模式: 简化版（内存友好，适合本地4GB显存测试）")
         logger.info("=" * 60)
     else:  # full
-        batch_size = args.batch_size if args.batch_size is not None else 2
+        batch_size = args.batch_size if args.batch_size is not None else 1
         learning_rate = args.learning_rate if args.learning_rate is not None else 1e-4
         use_gru = True
         use_soft_mask = args.use_soft_mask
