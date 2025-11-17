@@ -968,13 +968,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 创建各阶段的输出目录（用于调试）
-    stage1_dir = output_dir / "stage1"
-    stage2_dir = output_dir / "stage2"
-    stage3_dir = output_dir / "stage3"
-    stage1_dir.mkdir(exist_ok=True)
-    stage2_dir.mkdir(exist_ok=True)
-    stage3_dir.mkdir(exist_ok=True)
+    # 注意：stage 目录现在在每个文档的子目录中创建，不再创建全局的 stage 目录
 
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1033,8 +1027,20 @@ def main():
     logger.info("="*80)
 
     trees = []
+    # 记录当前文档名称和文档内的页面映射
+    current_doc_name = None
+    doc_page_counter = {}  # {doc_name: page_counter}
+
     for i, raw_sample in enumerate(tqdm(dataset, desc="推理进度")):
         try:
+            # 获取文档名称和页码
+            document_name = raw_sample.get("document_name", f"document_{i}")
+            page_number = raw_sample.get("page_number", i)
+
+            # 初始化文档计数器
+            if document_name not in doc_page_counter:
+                doc_page_counter[document_name] = 0
+
             tree, stage_results = inference_single_page(
                 raw_sample,
                 subtask1_model,
@@ -1047,8 +1053,19 @@ def main():
             )
             trees.append(tree)
 
-            # 保存单个树（使用数据集索引）
-            page_idx = i
+            # 创建文档专属的输出目录
+            doc_output_dir = output_dir / document_name
+            doc_output_dir.mkdir(parents=True, exist_ok=True)
+
+            doc_stage1_dir = doc_output_dir / "stage1"
+            doc_stage2_dir = doc_output_dir / "stage2"
+            doc_stage3_dir = doc_output_dir / "stage3"
+            doc_stage1_dir.mkdir(exist_ok=True)
+            doc_stage2_dir.mkdir(exist_ok=True)
+            doc_stage3_dir.mkdir(exist_ok=True)
+
+            # 使用原始页码作为文件名
+            page_idx = page_number
 
             # ==================== 保存各阶段的中间结果（用于调试）====================
             # Stage 1: 只有 class, text, bbox, 以及 top5 预测
@@ -1080,7 +1097,7 @@ def main():
 
                 stage1_data.append(item)
 
-            stage1_path = stage1_dir / f"page_{page_idx:04d}.json"
+            stage1_path = doc_stage1_dir / f"page_{page_idx:04d}.json"
             with open(stage1_path, 'w', encoding='utf-8') as f:
                 json.dump(stage1_data, f, indent=2, ensure_ascii=False)
 
@@ -1095,7 +1112,7 @@ def main():
                     "page": page_idx,
                     "parent_id": stage_results["stage2"]["parent_indices"][idx],
                 })
-            stage2_path = stage2_dir / f"page_{page_idx:04d}.json"
+            stage2_path = doc_stage2_dir / f"page_{page_idx:04d}.json"
             with open(stage2_path, 'w', encoding='utf-8') as f:
                 json.dump(stage2_data, f, indent=2, ensure_ascii=False)
 
@@ -1111,7 +1128,7 @@ def main():
                     "parent_id": stage_results["stage2"]["parent_indices"][idx],
                     "relation": stage_results["stage3"]["relation_types"][idx],
                 })
-            stage3_path = stage3_dir / f"page_{page_idx:04d}.json"
+            stage3_path = doc_stage3_dir / f"page_{page_idx:04d}.json"
             with open(stage3_path, 'w', encoding='utf-8') as f:
                 json.dump(stage3_data, f, indent=2, ensure_ascii=False)
 
@@ -1119,7 +1136,7 @@ def main():
             if args.output_format in ["hrds", "both"]:
                 # 保存HRDS格式（从树转换，包含层级结构）
                 hrds_data = tree_to_hrds_format(tree, page_num=page_idx)
-                hrds_path = output_dir / f"page_{page_idx:04d}.json"
+                hrds_path = doc_output_dir / f"page_{page_idx:04d}.json"
                 with open(hrds_path, 'w', encoding='utf-8') as f:
                     json.dump(hrds_data, f, indent=2, ensure_ascii=False)
 

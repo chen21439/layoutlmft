@@ -84,6 +84,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     "line_ids": datasets.Sequence(datasets.Value("int64")),  # 每个token对应的line_id
                     "line_parent_ids": datasets.Sequence(datasets.Value("int64")),  # 每个line的parent_id
                     "line_relations": datasets.Sequence(datasets.Value("string")),  # 每个line的relation
+                    # 新增：文档名称和页码（用于推理时区分不同文档）
+                    "document_name": datasets.Value("string"),  # 文档名称（不含扩展名）
+                    "page_number": datasets.Value("int64"),     # 页码
                 }
             ),
             supervised_keys=None,
@@ -167,6 +170,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             file_path = os.path.join(ann_dir, file)
             with open(file_path, "r", encoding="utf8") as f:
                 data = json.load(f)
+
+            # 提取文档名称（不含扩展名）
+            document_name = os.path.splitext(file)[0]
 
             # 支持两种数据格式：
             # 1. FUNSD格式：{"form": [...]} - 每个文件是一页
@@ -279,5 +285,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     "line_ids": line_ids,
                     "line_parent_ids": line_parent_ids,
                     "line_relations": line_relations,
+                    "document_name": document_name,  # 文档名称
+                    "page_number": page_num,         # 页码
                 }
                 guid += 1
