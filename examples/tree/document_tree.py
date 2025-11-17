@@ -6,29 +6,46 @@
 """
 
 import json
+import sys
+import os
 from typing import List, Dict, Optional, Any
 from collections import defaultdict
 
+# 【重要】HRDS BIO标签定义（和训练时完全一致）
+# 数据来源：layoutlmft/data/datasets/hrdoc.py 中的 _LABELS
+# 注意：这是唯一的标签定义来源，训练和推理必须使用相同的标签
+_LABELS = [
+    "O",
+    "B-AFFILI", "I-AFFILI",
+    "B-ALG", "I-ALG",
+    "B-AUTHOR", "I-AUTHOR",
+    "B-EQU", "I-EQU",                # equation
+    "B-FIG", "I-FIG",                # figure
+    "B-FIGCAP", "I-FIGCAP",          # figure caption
+    "B-FNOTE", "I-FNOTE",            # footnote
+    "B-FOOT", "I-FOOT",              # footer
+    "B-FSTLINE", "I-FSTLINE",        # first line
+    "B-MAIL", "I-MAIL",
+    "B-OPARA", "I-OPARA",            # other paragraph
+    "B-PARA", "I-PARA",              # paragraph
+    "B-SEC1", "I-SEC1",              # section level 1
+    "B-SEC2", "I-SEC2",              # section level 2
+    "B-SEC3", "I-SEC3",              # section level 3
+    "B-SEC4", "I-SEC4",              # section level 4
+    "B-SECX", "I-SECX",              # section level X (additional)
+    "B-TAB", "I-TAB",                # table
+    "B-TABCAP", "I-TABCAP",          # table caption
+    "B-TITLE", "I-TITLE",
+]
 
-# 语义标签映射（从run_hrdoc.py）
-LABEL_MAP = {
-    0: "Title",
-    1: "Section",
-    2: "Para-Title",
-    3: "Para-Line",
-    4: "List-Title",
-    5: "List-Item",
-    6: "Table-Title",
-    7: "Table-Column-Header",
-    8: "Table-Row-Header",
-    9: "Table-Misc",
-    10: "Figure-Title",
-    11: "Figure-Caption",
-    12: "Figure-Misc",
-    13: "Formula-Title",
-    14: "Formula-Caption",
-    15: "Formula-Misc",
-}
+# 将标签列表转换为字典映射（label_id → label_name）
+# 模型预测的是数字 ID（0-42），我们用这个映射转换成标签名称
+LABEL_MAP = {i: label for i, label in enumerate(_LABELS)}
+
+# 注释：
+# - 训练时：run_hrdoc.py 从数据集 features 读取 label_list = _LABELS
+# - 推理时：我们直接从同一个源导入 _LABELS
+# - 这样保证了标签映射的一致性：模型预测的数字 ID 可以正确映射回标签名称
 
 # 关系类型映射
 RELATION_MAP = {

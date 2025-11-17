@@ -4,18 +4,35 @@
 HRDoc 完整推理 Pipeline
 实现论文的 Overall Task：将三个子任务串联，输出文档结构树
 
-Pipeline 流程：
-1. SubTask 1: 语义单元分类 (LayoutLMv2) → line_labels
-2. SubTask 2: 父节点查找 (ParentFinder) → parent_indices
-3. SubTask 3: 关系分类 (RelationClassifier) → relation_types
-4. Overall Task: 构建文档树 (DocumentTree)
+重要说明 - 数据流转：
+推理时，输入数据中的 parent_id、relation、class 都是占位符（默认值：-1/none/paragraph）
+这些值需要通过三个阶段的模型推理得到，最终输出的是推理结果而不是输入占位符：
+
+输入数据（占位符）:
+    - class: "paragraph" (默认值，不使用)
+    - parent_id: -1 (默认值，不使用)
+    - relation: "none" (默认值，不使用)
+    - tokens, bboxes, line_ids, image: 真实数据（使用）
+
+推理流程（生成真实值）:
+    1. SubTask 1: 语义单元分类 (LayoutLMv2) → line_labels (预测 class)
+    2. SubTask 2: 父节点查找 (ParentFinder) → parent_indices (预测 parent_id)
+    3. SubTask 3: 关系分类 (RelationClassifier) → relation_types (预测 relation)
+    4. Overall Task: 构建文档树 (DocumentTree)
+
+输出数据（推理结果）:
+    - class: 一阶段预测的语义标签
+    - parent_id: 二阶段预测的父节点索引
+    - relation: 三阶段预测的关系类型
+    - text: 从 tokens 聚合得到
+    - box: 从 token bbox 聚合得到
 
 使用方法：
     python examples/tree/inference_build_tree.py \\
         --subtask1_model /path/to/layoutlmv2/checkpoint \\
         --subtask2_model /path/to/parent_finder/best_model.pt \\
         --subtask3_model /path/to/relation_classifier/best_model.pt \\
-        --features_dir /path/to/line_features \\
+        --data_dir /path/to/hrdoc_data \\
         --output_dir ./outputs/trees \\
         --max_samples 10
 """
@@ -220,7 +237,7 @@ class ParentFinderGRU(nn.Module):
 
 # ==================== 工具函数 ====================
 
-def extract_line_texts(tokens, line_ids):
+def extract_line_texts(tokens, line_ids, line_id_mapping=None):
     """
     从 token-level 数据聚合成 line-level 文本
 
@@ -228,7 +245,8 @@ def extract_line_texts(tokens, line_ids):
 
     Args:
         tokens: token 列表 [num_tokens]
-        line_ids: 每个 token 对应的 line_id [num_tokens]
+        line_ids: 每个 token 对应的 line_id [num_tokens]（可能是全局编号）
+        line_id_mapping: 全局 line_id 到本地索引的映射 {global_id: local_idx}
 
     Returns:
         line_texts: 每个 line 的文本 [num_lines]
@@ -238,21 +256,40 @@ def extract_line_texts(tokens, line_ids):
     if len(valid_line_ids) == 0:
         return []
 
-    # 确定 line 数量
-    num_lines = max(valid_line_ids) + 1
-    line_texts = []
+    # 如果提供了映射，使用映射；否则假设从 0 开始连续
+    if line_id_mapping is not None:
+        # 获取唯一的 line_ids 并排序
+        unique_line_ids = sorted(set(valid_line_ids))
+        num_lines = len(unique_line_ids)
+        line_texts = []
 
-    # 按 line_id 分组 tokens
-    for line_id in range(num_lines):
-        # 收集这个 line 的所有 tokens
-        line_tokens = []
-        for i in range(len(tokens)):
-            if i < len(line_ids) and line_ids[i] == line_id:
-                line_tokens.append(tokens[i])
+        # 按映射后的顺序收集文本
+        for global_lid in unique_line_ids:
+            # 收集这个 line 的所有 tokens
+            line_tokens = []
+            for i in range(len(tokens)):
+                if i < len(line_ids) and line_ids[i] == global_lid:
+                    line_tokens.append(tokens[i])
 
-        # 拼接成文本
-        line_text = " ".join(line_tokens) if line_tokens else ""
-        line_texts.append(line_text)
+            # 拼接成文本
+            line_text = " ".join(line_tokens) if line_tokens else ""
+            line_texts.append(line_text)
+    else:
+        # 原始逻辑：假设 line_id 从 0 开始连续
+        num_lines = max(valid_line_ids) + 1
+        line_texts = []
+
+        # 按 line_id 分组 tokens
+        for line_id in range(num_lines):
+            # 收集这个 line 的所有 tokens
+            line_tokens = []
+            for i in range(len(tokens)):
+                if i < len(line_ids) and line_ids[i] == line_id:
+                    line_tokens.append(tokens[i])
+
+            # 拼接成文本
+            line_text = " ".join(line_tokens) if line_tokens else ""
+            line_texts.append(line_text)
 
     return line_texts
 
@@ -543,14 +580,20 @@ def tree_to_hrds_format(tree, page_num=0):
     def traverse(node, parent_id=-1):
         if node.idx >= 0:  # 跳过ROOT
             # 转换为HRDS格式
+            # 【重要】所有字段都来自推理结果，不是输入数据的占位符：
+            # - class: 来自一阶段预测（node.label）
+            # - parent_id: 来自二阶段预测（通过树结构传递）
+            # - relation: 来自三阶段预测（node.relation_to_parent）
+            # - text: 从 tokens 聚合得到
+            # - box: 从 token bbox 聚合得到
             hrds_item = {
                 "line_id": node.idx,
                 "text": node.text if node.text else "",
                 "box": node.bbox,
-                "class": node.label.lower().replace("-", "_"),
+                "class": node.label.lower().replace("-", "_"),  # 一阶段预测
                 "page": page_num,
-                "parent_id": parent_id,
-                "relation": node.relation_to_parent if node.relation_to_parent else "none",
+                "parent_id": parent_id,  # 二阶段预测
+                "relation": node.relation_to_parent if node.relation_to_parent else "none",  # 三阶段预测
                 "is_meta": (node.relation_to_parent == "meta"),
             }
             flat_list.append(hrds_item)
@@ -576,8 +619,17 @@ def inference_single_page(
     """
     对单个页面进行完整推理（和训练流程一致）
 
+    重要说明：
+    - 推理时，输入数据中的 parent_id、relation、class 都是占位符（默认值：-1/none/paragraph）
+    - 这些值需要通过三个阶段的模型推理得到：
+      * 一阶段（LayoutLMv2）：预测 class（语义标签）
+      * 二阶段（ParentFinder）：预测 parent_id（父节点）
+      * 三阶段（RelationClassifier）：预测 relation（关系类型）
+    - 输出时必须使用推理结果，而不是输入数据的占位符
+
     Args:
         raw_sample: 原始样本数据（包含 tokens, bboxes, line_ids, image等）
+                   注意：raw_sample中的parent_id/relation/class是占位符，不使用
         subtask1_model: LayoutLMv2 模型
         tokenizer: tokenizer
         data_collator: data collator
@@ -587,7 +639,7 @@ def inference_single_page(
         device: 设备
 
     Returns:
-        DocumentTree实例
+        DocumentTree实例（包含推理得到的class、parent_id、relation）
     """
     # ==================== 一阶段：提取行级特征 ====================
     # 和 extract_line_features.py 保持一致的逻辑
@@ -619,8 +671,17 @@ def inference_single_page(
             token_line_ids.append(raw_sample["line_ids"][word_idx])
         previous_word_idx = word_idx
 
-    # 提取 line_texts（从 tokens 聚合）
-    line_texts = extract_line_texts(raw_sample["tokens"], raw_sample["line_ids"])
+    # ==================== 创建 line_id 映射（全局 -> 本地）====================
+    # HRDS 数据使用全局 line_id（跨页面连续），需要映射为本地索引（0, 1, 2, ...）
+    valid_global_line_ids = [lid for lid in raw_sample["line_ids"] if lid >= 0]
+    if len(valid_global_line_ids) > 0:
+        unique_global_line_ids = sorted(set(valid_global_line_ids))
+        global_to_local = {global_id: local_idx for local_idx, global_id in enumerate(unique_global_line_ids)}
+    else:
+        global_to_local = {}
+
+    # 提取 line_texts（从 tokens 聚合），使用映射
+    line_texts = extract_line_texts(raw_sample["tokens"], raw_sample["line_ids"], line_id_mapping=global_to_local)
 
     # 准备模型输入（推理时不需要 labels）
     # 注意：image 需要单独处理，不通过 data_collator
@@ -650,7 +711,8 @@ def inference_single_page(
     if hasattr(image, "to"):
         image = image.to(device)
 
-    # ==================== 一阶段：模型预测（关键！）====================
+    # ==================== 一阶段：模型预测语义标签（class）====================
+    # 【重要】输入数据的 class 是占位符（paragraph），这里预测真正的 class
     with torch.no_grad():
         outputs = subtask1_model(
             input_ids=batch["input_ids"],
@@ -660,17 +722,23 @@ def inference_single_page(
             output_hidden_states=True,
         )
 
-    # 【关键修复】从模型输出中提取预测的标签（而不是使用输入的 ner_tags）
+    # 【关键】从模型输出中提取预测的标签（而不是使用输入的 ner_tags 占位符）
+    # 这些预测的标签将作为最终输出的 class 字段
     logits = outputs.logits  # [1, seq_len, num_labels]
     predicted_labels = torch.argmax(logits, dim=-1)  # [1, seq_len]
     predicted_labels = predicted_labels.squeeze(0).cpu().tolist()  # [seq_len]
 
+    # 保存 logits 用于计算 top5（squeeze 去掉 batch 维度）
+    token_logits = logits.squeeze(0).cpu()  # [seq_len, num_labels]
+
     # ==================== 聚合成 line-level 的 bbox 和 labels ====================
     # 使用预测的标签（而不是 ground truth）
+    # 使用本地索引（映射后的）
     valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
     if len(valid_line_ids) > 0:
-        max_line_id = max(valid_line_ids)
-        num_lines = max_line_id + 1
+        # 获取唯一的全局 line_ids 并排序
+        unique_global_line_ids = sorted(set(valid_line_ids))
+        num_lines = len(unique_global_line_ids)
 
         line_bboxes = np.zeros((num_lines, 4), dtype=np.float32)
         line_bboxes[:, 0] = 1e9
@@ -679,35 +747,68 @@ def inference_single_page(
         line_bboxes[:, 3] = -1e9
 
         # 收集每个 line 的所有预测标签（用于多数投票）
+        # 使用本地索引
         line_label_votes = defaultdict(list)
 
-        for bbox, pred_label, lid in zip(bboxes, predicted_labels, token_line_ids):
-            if lid < 0:
+        # 收集每个 line 的所有 token logits（用于计算 top5）
+        line_logits_list = defaultdict(list)
+
+        for bbox, pred_label, token_logit, global_lid in zip(bboxes, predicted_labels, token_logits, token_line_ids):
+            if global_lid < 0:
                 continue
+
+            # 映射为本地索引
+            local_idx = global_to_local[global_lid]
+
             # 更新 bbox
             x1, y1, x2, y2 = bbox
-            line_bboxes[lid, 0] = min(line_bboxes[lid, 0], x1)
-            line_bboxes[lid, 1] = min(line_bboxes[lid, 1], y1)
-            line_bboxes[lid, 2] = max(line_bboxes[lid, 2], x2)
-            line_bboxes[lid, 3] = max(line_bboxes[lid, 3], y2)
+            line_bboxes[local_idx, 0] = min(line_bboxes[local_idx, 0], x1)
+            line_bboxes[local_idx, 1] = min(line_bboxes[local_idx, 1], y1)
+            line_bboxes[local_idx, 2] = max(line_bboxes[local_idx, 2], x2)
+            line_bboxes[local_idx, 3] = max(line_bboxes[local_idx, 3], y2)
 
             # 收集预测的标签（忽略特殊标签 0=O，对应"其他"类别）
             if pred_label > 0:  # 只收集有意义的标签
-                line_label_votes[lid].append(pred_label)
+                line_label_votes[local_idx].append(pred_label)
 
-        # 计算每个 line 的最终标签（多数投票）
+            # 收集 logits
+            line_logits_list[local_idx].append(token_logit)
+
+        # 计算每个 line 的最终标签（多数投票）和 top5 预测
         line_labels = []
-        for lid in range(num_lines):
-            if lid in line_label_votes and len(line_label_votes[lid]) > 0:
+        line_top5_labels = []
+        line_top5_scores = []
+
+        for local_idx in range(num_lines):
+            if local_idx in line_label_votes and len(line_label_votes[local_idx]) > 0:
                 # 使用多数投票
-                most_common_label = Counter(line_label_votes[lid]).most_common(1)[0][0]
+                most_common_label = Counter(line_label_votes[local_idx]).most_common(1)[0][0]
                 line_labels.append(most_common_label)
             else:
                 # 如果没有有效标签，使用 0（O 标签）
                 line_labels.append(0)
+
+            # 计算 top5：对该 line 的所有 token logits 取平均
+            if local_idx in line_logits_list and len(line_logits_list[local_idx]) > 0:
+                # 平均所有 token 的 logits
+                avg_logits = torch.stack(line_logits_list[local_idx]).mean(dim=0)  # [num_labels]
+
+                # Softmax 得到概率
+                probs = torch.softmax(avg_logits, dim=0)  # [num_labels]
+
+                # 取 top5
+                top5_probs, top5_indices = torch.topk(probs, k=min(5, len(probs)))
+
+                line_top5_labels.append(top5_indices.tolist())
+                line_top5_scores.append(top5_probs.tolist())
+            else:
+                line_top5_labels.append([])
+                line_top5_scores.append([])
     else:
         line_bboxes = np.zeros((0, 4), dtype=np.float32)
         line_labels = []
+        line_top5_labels = []
+        line_top5_scores = []
         num_lines = 0
 
     # 提取hidden states
@@ -733,28 +834,56 @@ def inference_single_page(
     line_labels = line_labels[:num_lines]
     line_texts = line_texts[:num_lines]
 
-    # ==================== 二阶段：预测父节点 ====================
+    # ==================== 二阶段：预测父节点（parent_id）====================
+    # 【重要】输入数据的 parent_id 是占位符（-1），这里预测真正的父节点索引
+    # parent_indices: 每个 line 的父节点索引（本地索引，范围 0 到 num_lines-1）
     parent_indices = predict_parents(
         subtask2_model, line_features, line_mask, line_bboxes, device
     )
 
-    # ==================== 三阶段：预测关系 ====================
+    # ==================== 三阶段：预测关系类型（relation）====================
+    # 【重要】输入数据的 relation 是占位符（none），这里预测真正的关系类型
+    # relation_types: 每个 line 与其父节点的关系类型（如 meta, continuation 等）
     relation_types, relation_confidences = predict_relations(
         subtask3_model, line_features, parent_indices, line_bboxes, device
     )
 
-    # ==================== 构建树（包含 text！）====================
+    # ==================== 构建树（使用推理结果，不是输入占位符）====================
+    # 【关键】所有值都来自推理结果：
+    # - line_labels: 一阶段预测的语义标签（class）
+    # - parent_indices: 二阶段预测的父节点索引（parent_id）
+    # - relation_types: 三阶段预测的关系类型（relation）
+    # - line_texts: 从 tokens 聚合的文本
+    # - line_bboxes: 从 token bbox 聚合的边界框
     tree = DocumentTree.from_predictions(
-        line_labels=line_labels,
-        parent_indices=parent_indices,
-        relation_types=relation_types,
-        line_bboxes=line_bboxes,
-        line_texts=line_texts,  # ← 不再是 None！
+        line_labels=line_labels,           # 一阶段预测
+        parent_indices=parent_indices,     # 二阶段预测
+        relation_types=relation_types,     # 三阶段预测
+        line_bboxes=line_bboxes,          # 聚合得到
+        line_texts=line_texts,            # 聚合得到
         label_confidences=None,
         relation_confidences=relation_confidences,
     )
 
-    return tree
+    # 返回树和各阶段的中间结果（用于调试）
+    stage_results = {
+        "stage1": {
+            "line_labels": line_labels,
+            "line_texts": line_texts,
+            "line_bboxes": line_bboxes.tolist(),
+            "line_top5_labels": line_top5_labels,  # Top5 预测的标签 ID
+            "line_top5_scores": line_top5_scores,  # Top5 对应的置信度
+        },
+        "stage2": {
+            "parent_indices": parent_indices.tolist() if isinstance(parent_indices, np.ndarray) else parent_indices,
+        },
+        "stage3": {
+            "relation_types": relation_types,
+            "relation_confidences": relation_confidences if relation_confidences is not None else None,
+        },
+    }
+
+    return tree, stage_results
 
 
 def main():
@@ -835,9 +964,17 @@ def main():
     )
     logger.setLevel(logging.INFO)
 
-    # 创建输出目录
+    # 创建输出目录（包括各阶段子目录）
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建各阶段的输出目录（用于调试）
+    stage1_dir = output_dir / "stage1"
+    stage2_dir = output_dir / "stage2"
+    stage3_dir = output_dir / "stage3"
+    stage1_dir.mkdir(exist_ok=True)
+    stage2_dir.mkdir(exist_ok=True)
+    stage3_dir.mkdir(exist_ok=True)
 
     set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -898,7 +1035,7 @@ def main():
     trees = []
     for i, raw_sample in enumerate(tqdm(dataset, desc="推理进度")):
         try:
-            tree = inference_single_page(
+            tree, stage_results = inference_single_page(
                 raw_sample,
                 subtask1_model,
                 tokenizer,
@@ -913,9 +1050,74 @@ def main():
             # 保存单个树（使用数据集索引）
             page_idx = i
 
-            # 根据output_format保存
+            # ==================== 保存各阶段的中间结果（用于调试）====================
+            # Stage 1: 只有 class, text, bbox, 以及 top5 预测
+            stage1_data = []
+            for idx in range(len(stage_results["stage1"]["line_labels"])):
+                item = {
+                    "line_id": idx,
+                    "text": stage_results["stage1"]["line_texts"][idx],
+                    "box": stage_results["stage1"]["line_bboxes"][idx],
+                    "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
+                    "page": page_idx,
+                }
+
+                # 添加 top5 预测信息
+                if idx < len(stage_results["stage1"]["line_top5_labels"]):
+                    top5_labels = stage_results["stage1"]["line_top5_labels"][idx]
+                    top5_scores = stage_results["stage1"]["line_top5_scores"][idx]
+
+                    # 转换为标签名称和分数的列表
+                    top5_predictions = []
+                    for label_id, score in zip(top5_labels, top5_scores):
+                        label_name = LABEL_MAP.get(label_id, f"unknown_{label_id}")
+                        top5_predictions.append({
+                            "label": label_name,
+                            "label_id": label_id,
+                            "score": float(score)
+                        })
+                    item["top5_predictions"] = top5_predictions
+
+                stage1_data.append(item)
+
+            stage1_path = stage1_dir / f"page_{page_idx:04d}.json"
+            with open(stage1_path, 'w', encoding='utf-8') as f:
+                json.dump(stage1_data, f, indent=2, ensure_ascii=False)
+
+            # Stage 2: 添加 parent_id
+            stage2_data = []
+            for idx in range(len(stage_results["stage1"]["line_labels"])):
+                stage2_data.append({
+                    "line_id": idx,
+                    "text": stage_results["stage1"]["line_texts"][idx],
+                    "box": stage_results["stage1"]["line_bboxes"][idx],
+                    "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
+                    "page": page_idx,
+                    "parent_id": stage_results["stage2"]["parent_indices"][idx],
+                })
+            stage2_path = stage2_dir / f"page_{page_idx:04d}.json"
+            with open(stage2_path, 'w', encoding='utf-8') as f:
+                json.dump(stage2_data, f, indent=2, ensure_ascii=False)
+
+            # Stage 3: 添加 relation（最终结果，等同于主输出）
+            stage3_data = []
+            for idx in range(len(stage_results["stage1"]["line_labels"])):
+                stage3_data.append({
+                    "line_id": idx,
+                    "text": stage_results["stage1"]["line_texts"][idx],
+                    "box": stage_results["stage1"]["line_bboxes"][idx],
+                    "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
+                    "page": page_idx,
+                    "parent_id": stage_results["stage2"]["parent_indices"][idx],
+                    "relation": stage_results["stage3"]["relation_types"][idx],
+                })
+            stage3_path = stage3_dir / f"page_{page_idx:04d}.json"
+            with open(stage3_path, 'w', encoding='utf-8') as f:
+                json.dump(stage3_data, f, indent=2, ensure_ascii=False)
+
+            # 根据output_format保存最终结果
             if args.output_format in ["hrds", "both"]:
-                # 保存HRDS格式
+                # 保存HRDS格式（从树转换，包含层级结构）
                 hrds_data = tree_to_hrds_format(tree, page_num=page_idx)
                 hrds_path = output_dir / f"page_{page_idx:04d}.json"
                 with open(hrds_path, 'w', encoding='utf-8') as f:
