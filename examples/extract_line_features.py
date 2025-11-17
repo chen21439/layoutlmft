@@ -64,7 +64,8 @@ def main():
     logger.info("加载数据集...")
     datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
 
-    # 检查是否有 test 集（将其作为 validation 集使用）
+    # 检查是否有 train 和 test 集
+    has_train = "train" in datasets
     has_validation = "test" in datasets
     logger.info(f"数据集包含: {list(datasets.keys())}")
 
@@ -72,14 +73,16 @@ def main():
     num_samples = int(os.getenv("LAYOUTLMFT_NUM_SAMPLES", "-1"))
     if num_samples > 0:
         logger.info(f"限制样本数: {num_samples}")
-        if len(datasets["train"]) > num_samples:
+        if has_train and len(datasets["train"]) > num_samples:
             datasets["train"] = datasets["train"].select(range(num_samples))
         if has_validation and len(datasets["test"]) > num_samples:
             datasets["test"] = datasets["test"].select(range(num_samples))
     else:
         logger.info("提取所有数据（不限制样本数）")
 
-    logger.info(f"实际样本数 - train: {len(datasets['train'])}, validation: {len(datasets.get('test', []))}")
+    train_samples = len(datasets.get('train', [])) if has_train else 0
+    val_samples = len(datasets.get('test', [])) if has_validation else 0
+    logger.info(f"实际样本数 - train: {train_samples}, validation: {val_samples}")
 
     # 加载模型和tokenizer
     logger.info("加载模型...")
@@ -284,16 +287,19 @@ def main():
 
         return chunk_files
 
-    # 提取训练集特征（分批次 + 分块保存）
+    # 提取特征（分批次 + 分块保存）
     batch_size = int(os.getenv("LAYOUTLMFT_BATCH_SIZE", "50"))
     samples_per_chunk = int(os.getenv("LAYOUTLMFT_SAMPLES_PER_CHUNK", "1000"))
 
-    train_chunk_files = extract_features_in_batches(
-        datasets["train"], "train",
-        batch_size=batch_size,
-        samples_per_chunk=samples_per_chunk
-    )
-    logger.info(f"✓ 训练集完成！共保存 {len(train_chunk_files)} 个chunk文件")
+    train_chunk_files = []
+    # 如果有训练集，提取训练集特征
+    if has_train:
+        train_chunk_files = extract_features_in_batches(
+            datasets["train"], "train",
+            batch_size=batch_size,
+            samples_per_chunk=samples_per_chunk
+        )
+        logger.info(f"✓ 训练集完成！共保存 {len(train_chunk_files)} 个chunk文件")
 
     # 如果有validation集（test集），也提取validation特征（分批次 + 分块保存）
     valid_chunk_files = []
@@ -307,14 +313,16 @@ def main():
 
     logger.info(f"\n" + "="*50)
     logger.info(f"✓ 全部完成！")
-    logger.info(f"  训练集: {len(train_chunk_files)} 个chunk文件")
+    if has_train:
+        logger.info(f"  训练集: {len(train_chunk_files)} 个chunk文件")
     if has_validation:
         logger.info(f"  验证集: {len(valid_chunk_files)} 个chunk文件")
     logger.info(f"  每个chunk最多 {samples_per_chunk} 页")
     logger.info(f"  保存目录: {output_dir}")
-    logger.info(f"\n  训练集chunk文件:")
-    for i, f in enumerate(train_chunk_files):
-        logger.info(f"    {i}: {os.path.basename(f)}")
+    if train_chunk_files:
+        logger.info(f"\n  训练集chunk文件:")
+        for i, f in enumerate(train_chunk_files):
+            logger.info(f"    {i}: {os.path.basename(f)}")
     if valid_chunk_files:
         logger.info(f"\n  验证集chunk文件:")
         for i, f in enumerate(valid_chunk_files):

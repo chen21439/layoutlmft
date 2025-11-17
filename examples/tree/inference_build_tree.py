@@ -24,22 +24,38 @@ import logging
 import os
 import sys
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import pickle
 import argparse
 import json
+import numpy as np
 from tqdm import tqdm
 from pathlib import Path
+from collections import defaultdict, Counter
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 数据加载相关（和训练一致）
+from datasets import load_dataset
+from transformers import BertTokenizerFast, set_seed
+import layoutlmft.data.datasets.hrdoc
+from layoutlmft.data import DataCollatorForKeyValueExtraction
+from layoutlmft.models.layoutlmv2 import LayoutLMv2ForTokenClassification, LayoutLMv2Config
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+# 关系分类器
 from layoutlmft.models.relation_classifier import (
     MultiClassRelationClassifier,
+    LineFeatureExtractor,
     compute_geometry_features,
 )
 
 # 导入树结构
 from document_tree import DocumentTree, LABEL_MAP, RELATION_MAP
+
+CONFIG_MAPPING.update({"layoutlmv2": LayoutLMv2Config})
 
 logger = logging.getLogger(__name__)
 
@@ -69,32 +85,249 @@ class SimpleParentFinder(torch.nn.Module):
         return scores
 
 
-# ==================== 推理函数 ====================
+# ==================== ParentFinderGRU 模型定义 ====================
 
-def load_models(subtask2_path: str, subtask3_path: str, device: torch.device):
+class ParentFinderGRU(nn.Module):
     """
-    加载训练好的模型
+    基于GRU的父节点查找器（论文方法，从训练代码复制）
+
+    对每个语义单元 u_i，预测其父节点索引 P̂_i ∈ {0, 1, ..., i-1}
+    其中 0 表示 ROOT，1到i-1表示之前的语义单元
+    """
+
+    def __init__(
+        self,
+        hidden_size=768,
+        gru_hidden_size=512,
+        num_classes=16,
+        dropout=0.1,
+        use_soft_mask=True
+    ):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.gru_hidden_size = gru_hidden_size
+        self.num_classes = num_classes
+        self.use_soft_mask = use_soft_mask
+
+        # GRU decoder
+        self.gru = nn.GRU(
+            input_size=hidden_size,
+            hidden_size=gru_hidden_size,
+            num_layers=1,
+            batch_first=True,
+            dropout=0 if dropout == 0 else dropout
+        )
+
+        # 查询向量投影（用于注意力计算）
+        self.query_proj = nn.Linear(gru_hidden_size, gru_hidden_size)
+
+        # 键向量投影
+        self.key_proj = nn.Linear(gru_hidden_size, gru_hidden_size)
+
+        # 类别预测头（用于预测每个单元的语义类别概率）
+        self.cls_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, num_classes)
+        )
+
+        # Soft-mask 矩阵（可选）
+        self.register_buffer('M_cp', torch.ones(num_classes + 1, num_classes))
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, line_features, line_mask):
+        """
+        Args:
+            line_features: 行级特征 [B, L, H]
+            line_mask: 有效行mask [B, L]
+
+        Returns:
+            parent_logits: [B, L+1, L+1] - 每个位置i的父节点logits（包括ROOT）
+            cls_logits: [B, L, num_classes] - 类别预测logits
+        """
+        batch_size, max_lines, hidden_size = line_features.shape
+        device = line_features.device
+
+        # 1. 构建 ROOT 节点
+        valid_sum = (line_features * line_mask.unsqueeze(-1)).sum(dim=1)
+        valid_count = line_mask.sum(dim=1, keepdim=True).clamp(min=1)
+        root_feat = (valid_sum / valid_count).unsqueeze(1)
+
+        # 2. 将 ROOT 拼接到序列最前面
+        line_features_with_root = torch.cat([root_feat, line_features], dim=1)
+        line_mask_with_root = torch.cat(
+            [torch.ones(batch_size, 1, dtype=torch.bool, device=device), line_mask],
+            dim=1
+        )
+
+        # 3. 通过 GRU 获取隐藏状态
+        gru_output, _ = self.gru(line_features_with_root)
+
+        # 4. 预测语义类别概率
+        cls_logits = self.cls_head(line_features)
+        cls_probs = F.softmax(cls_logits, dim=-1)
+
+        # 为 ROOT 添加类别概率
+        root_cls_prob = torch.zeros(batch_size, 1, self.num_classes + 1, device=device)
+        root_cls_prob[:, :, -1] = 1.0
+
+        cls_probs_extended = torch.cat([
+            cls_probs,
+            torch.zeros(batch_size, max_lines, 1, device=device)
+        ], dim=-1)
+
+        cls_probs_with_root = torch.cat([root_cls_prob, cls_probs_extended], dim=1)
+
+        # 5. 计算父节点概率
+        query = self.query_proj(gru_output)
+        key = self.key_proj(gru_output)
+
+        attention_scores = torch.bmm(
+            query,
+            key.transpose(1, 2)
+        ) / (self.gru_hidden_size ** 0.5)
+
+        # 6. Soft-mask 操作
+        if self.use_soft_mask and self.M_cp is not None:
+            cls_probs_for_child = torch.cat([
+                torch.ones(batch_size, 1, self.num_classes, device=device) / self.num_classes,
+                cls_probs
+            ], dim=1)
+
+            soft_mask = torch.einsum('bjc,cp,bip->bij',
+                                     cls_probs_with_root,
+                                     self.M_cp,
+                                     cls_probs_for_child)
+
+            attention_scores = attention_scores + torch.log(soft_mask.clamp(min=1e-10))
+
+        # 7. 因果mask
+        seq_len = max_lines + 1
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+        attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0), float('-inf'))
+
+        # 8. 应用 line_mask
+        parent_mask = ~line_mask_with_root.unsqueeze(1)
+        child_mask = ~line_mask_with_root.unsqueeze(2)
+        combined_mask = parent_mask | child_mask
+        attention_scores = attention_scores.masked_fill(combined_mask, float('-inf'))
+
+        return attention_scores, cls_logits
+
+
+# ==================== 工具函数 ====================
+
+def extract_line_texts(tokens, line_ids):
+    """
+    从 token-level 数据聚合成 line-level 文本
+
+    和训练时保持一致的逻辑：根据 line_ids 将 tokens 分组
 
     Args:
+        tokens: token 列表 [num_tokens]
+        line_ids: 每个 token 对应的 line_id [num_tokens]
+
+    Returns:
+        line_texts: 每个 line 的文本 [num_lines]
+    """
+    # 找出有效的 line_ids（忽略特殊 token 的 -1）
+    valid_line_ids = [lid for lid in line_ids if lid >= 0]
+    if len(valid_line_ids) == 0:
+        return []
+
+    # 确定 line 数量
+    num_lines = max(valid_line_ids) + 1
+    line_texts = []
+
+    # 按 line_id 分组 tokens
+    for line_id in range(num_lines):
+        # 收集这个 line 的所有 tokens
+        line_tokens = []
+        for i in range(len(tokens)):
+            if i < len(line_ids) and line_ids[i] == line_id:
+                line_tokens.append(tokens[i])
+
+        # 拼接成文本
+        line_text = " ".join(line_tokens) if line_tokens else ""
+        line_texts.append(line_text)
+
+    return line_texts
+
+
+# ==================== 推理函数 ====================
+
+def load_models(
+    subtask1_path: str,
+    subtask2_path: str,
+    subtask3_path: str,
+    device: torch.device
+):
+    """
+    加载训练好的模型（和训练一致）
+
+    Args:
+        subtask1_path: SubTask 1模型路径（LayoutLMv2）
         subtask2_path: SubTask 2模型路径（父节点查找）
         subtask3_path: SubTask 3模型路径（关系分类）
         device: 设备
 
     Returns:
-        subtask2_model, subtask3_model
+        subtask1_model, tokenizer, data_collator, feature_extractor, subtask2_model, subtask3_model
     """
+    # ==================== SubTask 1: LayoutLMv2 ====================
+    logger.info(f"加载SubTask 1模型: {subtask1_path}")
+    config = LayoutLMv2Config.from_pretrained(subtask1_path)
+    tokenizer = BertTokenizerFast.from_pretrained(subtask1_path)
+    subtask1_model = LayoutLMv2ForTokenClassification.from_pretrained(
+        subtask1_path, config=config
+    )
+    subtask1_model = subtask1_model.to(device)
+    subtask1_model.eval()
+    logger.info(f"✓ SubTask 1模型加载成功")
+
+    # Data collator（和训练一致）
+    data_collator = DataCollatorForKeyValueExtraction(
+        tokenizer,
+        pad_to_multiple_of=8,
+        padding="max_length",
+        max_length=512,
+    )
+
+    # Line feature extractor（用于聚合 token → line）
+    feature_extractor = LineFeatureExtractor()
+
+    # ==================== SubTask 2: ParentFinder ====================
     logger.info(f"加载SubTask 2模型: {subtask2_path}")
     subtask2_checkpoint = torch.load(subtask2_path, map_location=device)
 
     # 尝试判断模型类型
     state_dict = subtask2_checkpoint.get("model_state_dict", subtask2_checkpoint)
 
-    # 检查是否是SimpleParentFinder（几何特征是4维）
-    if any("score_head" in k for k in state_dict.keys()):
+    # 检查模型类型（参考训练代码）
+    if any("gru" in k for k in state_dict.keys()):
+        # ParentFinderGRU模型（full模型）
+        subtask2_model = ParentFinderGRU(
+            hidden_size=768,
+            gru_hidden_size=512,
+            num_classes=16,
+            dropout=0.1,
+            use_soft_mask=True
+        )
+        logger.info("  检测到ParentFinderGRU模型（full）")
+
+        # 加载M_cp矩阵（如果存在）
+        if "M_cp" in subtask2_checkpoint:
+            subtask2_model.M_cp = subtask2_checkpoint["M_cp"].to(device)
+            logger.info("  ✓ 加载M_cp矩阵")
+
+    elif any("score_head" in k for k in state_dict.keys()):
+        # SimpleParentFinder模型
         subtask2_model = SimpleParentFinder(hidden_size=768, dropout=0.1)
         logger.info("  检测到SimpleParentFinder模型")
     else:
-        # 可能是其他类型的模型
         raise ValueError("不支持的SubTask 2模型类型")
 
     subtask2_model.load_state_dict(state_dict)
@@ -115,7 +348,14 @@ def load_models(subtask2_path: str, subtask3_path: str, device: torch.device):
     subtask3_model.eval()
     logger.info(f"✓ SubTask 3模型加载成功")
 
-    return subtask2_model, subtask3_model
+    return (
+        subtask1_model,
+        tokenizer,
+        data_collator,
+        feature_extractor,
+        subtask2_model,
+        subtask3_model,
+    )
 
 
 def predict_parents(
@@ -141,7 +381,33 @@ def predict_parents(
     num_lines = line_features.shape[0]
     parent_indices = []
 
+    # 判断模型类型（参考训练代码的推理方式）
+    is_gru_model = isinstance(subtask2_model, ParentFinderGRU)
+
     with torch.no_grad():
+        if is_gru_model:
+            # ParentFinderGRU: 一次性预测所有父节点
+            line_features_batch = line_features.unsqueeze(0)  # [1, L, H]
+            line_mask_batch = line_mask.unsqueeze(0)  # [1, L]
+
+            # forward返回 [B, L+1, L+1] 的logits
+            parent_logits, _ = subtask2_model(line_features_batch, line_mask_batch)
+            parent_logits = parent_logits.squeeze(0)  # [L+1, L+1]
+
+            # 对每个child（位置1到L），选择得分最高的parent（位置0到child-1）
+            for child_idx in range(num_lines):
+                # child在序列中的位置是child_idx+1（因为位置0是ROOT）
+                child_pos = child_idx + 1
+                # 候选parent：位置0到child_idx（对应ROOT和前面的行）
+                logits = parent_logits[child_pos, :child_pos+1]  # [child_pos+1]
+                pred_pos = torch.argmax(logits).item()
+                # 转换为parent索引：位置0表示ROOT(-1)，位置1-N表示行0-(N-1)
+                pred_parent_idx = -1 if pred_pos == 0 else pred_pos - 1
+                parent_indices.append(pred_parent_idx)
+
+            return parent_indices
+
+        # SimpleParentFinder: 逐个预测（原有逻辑）
         for child_idx in range(num_lines):
             # 检查有效性
             if child_idx >= line_mask.shape[0]:
@@ -298,16 +564,24 @@ def tree_to_hrds_format(tree, page_num=0):
 
 
 def inference_single_page(
-    page_data: dict,
+    raw_sample: dict,
+    subtask1_model,
+    tokenizer,
+    data_collator,
+    feature_extractor,
     subtask2_model,
     subtask3_model,
     device: torch.device,
 ) -> DocumentTree:
     """
-    对单个页面进行完整推理
+    对单个页面进行完整推理（和训练流程一致）
 
     Args:
-        page_data: 页面数据（包含line_features, line_mask, line_bboxes等）
+        raw_sample: 原始样本数据（包含 tokens, bboxes, line_ids, image等）
+        subtask1_model: LayoutLMv2 模型
+        tokenizer: tokenizer
+        data_collator: data collator
+        feature_extractor: line feature extractor
         subtask2_model: 父节点查找模型
         subtask3_model: 关系分类模型
         device: 设备
@@ -315,44 +589,167 @@ def inference_single_page(
     Returns:
         DocumentTree实例
     """
-    # 提取数据
-    line_features = page_data["line_features"].squeeze(0).to(device)
-    line_mask = page_data["line_mask"].squeeze(0)
-    line_bboxes = page_data["line_bboxes"]
+    # ==================== 一阶段：提取行级特征 ====================
+    # 和 extract_line_features.py 保持一致的逻辑
 
-    # 如果有预先提取的line_labels（SubTask 1的结果），使用它们
-    # 否则，需要用LayoutLMv2模型重新推理
-    if "line_labels" in page_data and page_data["line_labels"] is not None:
-        line_labels = page_data["line_labels"]
-        # 如果是numpy数组或tensor，转换为list
-        if hasattr(line_labels, 'tolist'):
-            line_labels = line_labels.tolist()
-        elif not isinstance(line_labels, list):
-            line_labels = list(line_labels)
+    # Tokenize（和训练一样）
+    tokenized = tokenizer(
+        raw_sample["tokens"],
+        padding="max_length",
+        truncation=True,
+        max_length=512,
+        is_split_into_words=True,
+    )
+
+    # 对齐 bbox 和 line_ids（推理时不需要 ground truth labels）
+    word_ids = tokenized.word_ids()
+    bboxes = []
+    token_line_ids = []
+
+    previous_word_idx = None
+    for word_idx in word_ids:
+        if word_idx is None:
+            bboxes.append([0, 0, 0, 0])
+            token_line_ids.append(-1)
+        elif word_idx != previous_word_idx:
+            bboxes.append(raw_sample["bboxes"][word_idx])
+            token_line_ids.append(raw_sample["line_ids"][word_idx])
+        else:
+            bboxes.append(raw_sample["bboxes"][word_idx])
+            token_line_ids.append(raw_sample["line_ids"][word_idx])
+        previous_word_idx = word_idx
+
+    # 提取 line_texts（从 tokens 聚合）
+    line_texts = extract_line_texts(raw_sample["tokens"], raw_sample["line_ids"])
+
+    # 准备模型输入（推理时不需要 labels）
+    # 注意：image 需要单独处理，不通过 data_collator
+    sample_dict = {
+        "input_ids": tokenized["input_ids"],
+        "attention_mask": tokenized["attention_mask"],
+        "bbox": bboxes,
+    }
+
+    batch = data_collator([sample_dict])
+
+    # 转移到GPU
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            batch[k] = v.to(device)
+
+    # 单独处理 image（不通过 data_collator）
+    # HuggingFace datasets 将 Array3D 序列化为 list，需要转回 tensor
+    image = raw_sample["image"]
+    if not isinstance(image, torch.Tensor):
+        image = torch.tensor(np.array(image), dtype=torch.uint8)
+
+    # 添加batch维度：(3, 224, 224) -> (1, 3, 224, 224)
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+
+    if hasattr(image, "to"):
+        image = image.to(device)
+
+    # ==================== 一阶段：模型预测（关键！）====================
+    with torch.no_grad():
+        outputs = subtask1_model(
+            input_ids=batch["input_ids"],
+            bbox=batch["bbox"],
+            attention_mask=batch["attention_mask"],
+            image=image,
+            output_hidden_states=True,
+        )
+
+    # 【关键修复】从模型输出中提取预测的标签（而不是使用输入的 ner_tags）
+    logits = outputs.logits  # [1, seq_len, num_labels]
+    predicted_labels = torch.argmax(logits, dim=-1)  # [1, seq_len]
+    predicted_labels = predicted_labels.squeeze(0).cpu().tolist()  # [seq_len]
+
+    # ==================== 聚合成 line-level 的 bbox 和 labels ====================
+    # 使用预测的标签（而不是 ground truth）
+    valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
+    if len(valid_line_ids) > 0:
+        max_line_id = max(valid_line_ids)
+        num_lines = max_line_id + 1
+
+        line_bboxes = np.zeros((num_lines, 4), dtype=np.float32)
+        line_bboxes[:, 0] = 1e9
+        line_bboxes[:, 1] = 1e9
+        line_bboxes[:, 2] = -1e9
+        line_bboxes[:, 3] = -1e9
+
+        # 收集每个 line 的所有预测标签（用于多数投票）
+        line_label_votes = defaultdict(list)
+
+        for bbox, pred_label, lid in zip(bboxes, predicted_labels, token_line_ids):
+            if lid < 0:
+                continue
+            # 更新 bbox
+            x1, y1, x2, y2 = bbox
+            line_bboxes[lid, 0] = min(line_bboxes[lid, 0], x1)
+            line_bboxes[lid, 1] = min(line_bboxes[lid, 1], y1)
+            line_bboxes[lid, 2] = max(line_bboxes[lid, 2], x2)
+            line_bboxes[lid, 3] = max(line_bboxes[lid, 3], y2)
+
+            # 收集预测的标签（忽略特殊标签 0=O，对应"其他"类别）
+            if pred_label > 0:  # 只收集有意义的标签
+                line_label_votes[lid].append(pred_label)
+
+        # 计算每个 line 的最终标签（多数投票）
+        line_labels = []
+        for lid in range(num_lines):
+            if lid in line_label_votes and len(line_label_votes[lid]) > 0:
+                # 使用多数投票
+                most_common_label = Counter(line_label_votes[lid]).most_common(1)[0][0]
+                line_labels.append(most_common_label)
+            else:
+                # 如果没有有效标签，使用 0（O 标签）
+                line_labels.append(0)
     else:
-        # 这里需要SubTask 1模型进行推理
-        # 为了简化，暂时使用占位符
-        logger.warning("page_data中没有line_labels，使用占位符")
-        num_lines = line_features.shape[0]
-        line_labels = [3] * num_lines  # 默认为Para-Line
+        line_bboxes = np.zeros((0, 4), dtype=np.float32)
+        line_labels = []
+        num_lines = 0
 
-    # SubTask 2: 预测父节点
+    # 提取hidden states
+    hidden_states = outputs.hidden_states[-1]
+    text_seq_len = batch["input_ids"].shape[1]
+    hidden_states = hidden_states[:, :text_seq_len, :]
+
+    # 提取行级特征
+    line_ids_tensor = torch.tensor(token_line_ids, device=device).unsqueeze(0)
+    line_features, line_mask = feature_extractor.extract_line_features(
+        hidden_states, line_ids_tensor, pooling="mean"
+    )
+
+    # 移除 batch 维度
+    line_features = line_features.squeeze(0)
+    line_mask = line_mask.squeeze(0)
+
+    # 过滤掉空行（和训练代码一致）
+    num_lines = line_mask.sum().item()
+    line_features = line_features[:num_lines]
+    line_mask = line_mask[:num_lines]
+    line_bboxes = line_bboxes[:num_lines]
+    line_labels = line_labels[:num_lines]
+    line_texts = line_texts[:num_lines]
+
+    # ==================== 二阶段：预测父节点 ====================
     parent_indices = predict_parents(
         subtask2_model, line_features, line_mask, line_bboxes, device
     )
 
-    # SubTask 3: 预测关系
+    # ==================== 三阶段：预测关系 ====================
     relation_types, relation_confidences = predict_relations(
         subtask3_model, line_features, parent_indices, line_bboxes, device
     )
 
-    # 构建树
+    # ==================== 构建树（包含 text！）====================
     tree = DocumentTree.from_predictions(
         line_labels=line_labels,
         parent_indices=parent_indices,
         relation_types=relation_types,
         line_bboxes=line_bboxes,
-        line_texts=None,  # 如果有文本数据可以传入
+        line_texts=line_texts,  # ← 不再是 None！
         label_confidences=None,
         relation_confidences=relation_confidences,
     )
@@ -361,11 +758,17 @@ def inference_single_page(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HRDoc完整推理Pipeline")
+    parser = argparse.ArgumentParser(description="HRDoc完整推理Pipeline（和训练一致）")
+    parser.add_argument(
+        "--subtask1_model",
+        type=str,
+        default="/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000",
+        help="SubTask 1模型路径（LayoutLMv2）",
+    )
     parser.add_argument(
         "--subtask2_model",
         type=str,
-        default="/mnt/e/models/train_data/layoutlmft/parent_finder_simple/best_model.pt",
+        default="/mnt/e/models/train_data/layoutlmft/parent_finder_full/best_model.pt",
         help="SubTask 2模型路径（父节点查找）",
     )
     parser.add_argument(
@@ -375,10 +778,10 @@ def main():
         help="SubTask 3模型路径（关系分类）",
     )
     parser.add_argument(
-        "--features_dir",
+        "--data_dir",
         type=str,
-        default="/mnt/e/models/train_data/layoutlmft/line_features",
-        help="特征文件目录",
+        default="/mnt/e/programFile/AIProgram/modelTrain/HRDoc/output",
+        help="数据目录（包含 JSON 和 images）",
     )
     parser.add_argument(
         "--output_dir",
@@ -389,7 +792,7 @@ def main():
     parser.add_argument(
         "--split",
         type=str,
-        default="validation",
+        default="test",
         choices=["train", "validation", "test"],
         help="数据集分割",
     )
@@ -398,12 +801,6 @@ def main():
         type=int,
         default=10,
         help="最多处理多少个样本（用于快速测试）",
-    )
-    parser.add_argument(
-        "--max_chunks",
-        type=int,
-        default=1,
-        help="最多加载多少个chunk",
     )
     parser.add_argument(
         "--save_json",
@@ -442,62 +839,79 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用设备: {device}")
-    logger.info(f"特征目录: {args.features_dir}")
+    logger.info(f"数据目录: {args.data_dir}")
     logger.info(f"输出目录: {args.output_dir}")
 
-    # 加载模型
+    # 设置数据集路径环境变量（传递给 hrdoc.py）
+    os.environ["HRDOC_DATA_DIR"] = args.data_dir
+
+    # 加载模型（和训练一致）
     logger.info("\n" + "="*80)
     logger.info("加载模型")
     logger.info("="*80)
-    subtask2_model, subtask3_model = load_models(
+    (
+        subtask1_model,
+        tokenizer,
+        data_collator,
+        feature_extractor,
+        subtask2_model,
+        subtask3_model,
+    ) = load_models(
+        args.subtask1_model,
         args.subtask2_model,
         args.subtask3_model,
         device
     )
 
-    # 加载数据
+    # 加载数据集（和训练一致）
     logger.info("\n" + "="*80)
-    logger.info("加载数据")
+    logger.info("加载数据集")
     logger.info("="*80)
-    import glob
-    pattern = os.path.join(args.features_dir, f"{args.split}_line_features_chunk_*.pkl")
-    chunk_files = sorted(glob.glob(pattern))[:args.max_chunks]
+    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
+    logger.info(f"数据集包含: {list(datasets.keys())}")
 
-    if len(chunk_files) == 0:
-        raise ValueError(f"没有找到特征文件: {pattern}")
+    # 根据 split 参数选择数据
+    if args.split == "train" and "train" in datasets:
+        dataset = datasets["train"]
+    elif args.split == "validation" and "validation" in datasets:
+        dataset = datasets["validation"]
+    elif args.split == "test" and "test" in datasets:
+        dataset = datasets["test"]
+    else:
+        raise ValueError(f"数据集中没有 {args.split} split，可用的有: {list(datasets.keys())}")
 
-    logger.info(f"找到 {len(chunk_files)} 个chunk文件")
-    page_features = []
-    for chunk_file in chunk_files:
-        logger.info(f"  加载 {os.path.basename(chunk_file)}...")
-        with open(chunk_file, "rb") as f:
-            chunk_data = pickle.load(f)
-        page_features.extend(chunk_data)
-
-    logger.info(f"总共加载了 {len(page_features)} 页")
+    logger.info(f"使用 {args.split} 集，共 {len(dataset)} 个样本")
 
     # 限制样本数量
-    if args.max_samples > 0:
-        page_features = page_features[:args.max_samples]
+    if args.max_samples > 0 and len(dataset) > args.max_samples:
+        dataset = dataset.select(range(args.max_samples))
         logger.info(f"限制处理前 {args.max_samples} 个样本")
 
-    # 推理
+    # 推理（和训练一致）
     logger.info("\n" + "="*80)
     logger.info("开始推理")
     logger.info("="*80)
 
     trees = []
-    for i, page_data in enumerate(tqdm(page_features, desc="推理进度")):
+    for i, raw_sample in enumerate(tqdm(dataset, desc="推理进度")):
         try:
             tree = inference_single_page(
-                page_data, subtask2_model, subtask3_model, device
+                raw_sample,
+                subtask1_model,
+                tokenizer,
+                data_collator,
+                feature_extractor,
+                subtask2_model,
+                subtask3_model,
+                device
             )
             trees.append(tree)
 
-            # 保存单个树
-            page_idx = page_data.get("page_idx", i)
+            # 保存单个树（使用数据集索引）
+            page_idx = i
 
             # 根据output_format保存
             if args.output_format in ["hrds", "both"]:
@@ -533,7 +947,7 @@ def main():
     logger.info("\n" + "="*80)
     logger.info("推理完成！")
     logger.info("="*80)
-    logger.info(f"成功处理: {len(trees)}/{len(page_features)} 个页面")
+    logger.info(f"成功处理: {len(trees)}/{len(dataset)} 个页面")
     logger.info(f"输出目录: {output_dir}")
 
     # 汇总统计

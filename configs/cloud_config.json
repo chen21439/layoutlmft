@@ -2,7 +2,6 @@
   "model_name_or_path": "microsoft/layoutlmv2-base-uncased",
   "local_model_path": "/home/linux/code/model/layoutlmv2-base-uncased",
   "output_dir": "/home/linux/code/layoutlmft/outputs/hrdoc_train",
-  "max_steps": 5000,
   "num_train_epochs": 10,
   "per_device_train_batch_size": 4,
   "per_device_eval_batch_size": 8,
