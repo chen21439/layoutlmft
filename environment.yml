@@ -4,4 +4,13 @@ channels:
   - nodefaults
 dependencies:
   - python=3.8
+  - pip
+  - pip:
+    - PyMuPDF==1.18.19
+    - pdfplumber
+    - Pillow
+    - python-Levenshtein
+    - opencv-python
+    - numpy
+    - tqdm
 prefix: /root/miniforge3/envs/layoutlmv2
