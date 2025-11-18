@@ -37,7 +37,8 @@ def main():
     # 模型路径(优先从环境变量读取,默认使用 E 盘训练的模型)
     model_path = os.getenv("LAYOUTLMFT_MODEL_PATH", "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000")
     # 特征输出到 E 盘节省系统盘空间
-    output_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_document_level")
+    # 默认输出目录: line_features_doc (与训练脚本默认路径一致)
+    output_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
     # 数据集路径(优先从环境变量读取)
     data_dir = os.getenv("HRDOC_DATA_DIR", "/mnt/e/models/data/Section/HRDS")
 
@@ -201,6 +202,7 @@ def main():
                         previous_word_idx = word_idx
 
                     # 计算行级 bbox 和 labels
+                    # raw_sample["line_parent_ids"] 和 ["line_relations"] 本身就是line级别的,直接使用!
                     valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
                     if len(valid_line_ids) > 0:
                         max_line_id = max(valid_line_ids)
@@ -216,10 +218,12 @@ def main():
                         from collections import Counter
                         line_label_votes = defaultdict(list)
 
+                        # 遍历所有token,聚合bbox和label为line级别
                         for bbox, label, lid in zip(bboxes, labels, token_line_ids):
                             if lid < 0:
                                 continue
                             local_lid = lid - min_line_id
+
                             # 更新bbox
                             x1, y1, x2, y2 = bbox
                             line_bboxes[local_lid, 0] = min(line_bboxes[local_lid, 0], x1)
@@ -227,19 +231,29 @@ def main():
                             line_bboxes[local_lid, 2] = max(line_bboxes[local_lid, 2], x2)
                             line_bboxes[local_lid, 3] = max(line_bboxes[local_lid, 3], y2)
 
+                            # 收集label投票
                             if label != -100:
                                 line_label_votes[local_lid].append(label)
 
+                        # 按顺序构建line级别的label列表
                         line_labels = []
-                        for lid in range(num_lines):
-                            if lid in line_label_votes and len(line_label_votes[lid]) > 0:
-                                most_common_label = Counter(line_label_votes[lid]).most_common(1)[0][0]
+                        for local_lid in range(num_lines):
+                            # label (多数投票)
+                            if local_lid in line_label_votes and len(line_label_votes[local_lid]) > 0:
+                                most_common_label = Counter(line_label_votes[local_lid]).most_common(1)[0][0]
                                 line_labels.append(most_common_label)
                             else:
                                 line_labels.append(-1)
+
+                        # parent_ids 和 relations 直接从raw_sample获取 (本身就是line级别)
+                        # raw_sample["line_parent_ids"][i] 对应当前页第 i 个line (line_id = min_line_id + i)
+                        page_line_parent_ids = raw_sample["line_parent_ids"]
+                        page_line_relations = raw_sample["line_relations"]
                     else:
                         line_bboxes = np.zeros((0, 4), dtype=np.float32)
                         line_labels = []
+                        page_line_parent_ids = []
+                        page_line_relations = []
 
                     # 准备模型输入
                     sample_dict = {
@@ -283,14 +297,14 @@ def main():
                     page_line_features = line_features.squeeze(0).cpu()  # [max_lines, H]
                     page_line_mask = line_mask.squeeze(0).cpu()  # [max_lines]
 
-                    # 只保留有效行
+                    # 只保留有效行 - 所有字段都要保持一致!
                     num_valid_lines = page_line_mask.sum().item()
                     all_line_features.append(page_line_features[:num_valid_lines])  # [num_valid_lines, H]
                     all_line_masks.append(page_line_mask[:num_valid_lines])  # [num_valid_lines]
-                    all_line_parent_ids.extend(raw_sample["line_parent_ids"])
-                    all_line_relations.extend(raw_sample["line_relations"])
-                    all_line_bboxes.append(line_bboxes)
-                    all_line_labels.extend(line_labels)
+                    all_line_parent_ids.extend(page_line_parent_ids[:num_valid_lines])  # 只取有效行的parent_ids
+                    all_line_relations.extend(page_line_relations[:num_valid_lines])    # 只取有效行的relations
+                    all_line_bboxes.append(line_bboxes[:num_valid_lines])  # 只取有效行的bboxes
+                    all_line_labels.extend(line_labels[:num_valid_lines])  # 只取有效行的labels
 
                 # 拼接所有页的特征 - 关键步骤!
                 doc_line_features = torch.cat(all_line_features, dim=0)  # [total_lines, H]

@@ -35,7 +35,12 @@ logger = logging.getLogger(__name__)
 
 class MultiClassRelationDataset(torch.utils.data.Dataset):
     """
-    多分类关系数据集（支持chunk文件加载）
+    多分类关系数据集（支持chunk文件加载，支持页面级别和文档级别）
+
+    数据级别：
+    - 页面级别: 每个样本是一页，关系仅限页内
+    - 文档级别: 每个样本是整个文档，支持跨页关系
+
     标签：0=none, 1=connect, 2=contain, 3=equality
     """
 
@@ -78,7 +83,7 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
                 self.page_features.extend(chunk_data)
                 logger.info(f"    已加载 {len(chunk_data)} 页，累计 {len(self.page_features)} 页")
 
-        logger.info(f"总共加载了 {len(self.page_features)} 页的特征")
+        logger.info(f"总共加载了 {len(self.page_features)} 个样本的特征（页面或文档）")
 
         # 构造样本对
         logger.info("构造多分类训练样本...")
@@ -299,10 +304,13 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    # 从 E 盘读取特征文件（支持chunk加载），输出也到 E 盘
-    features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features")
+    # 从特征文件目录读取（支持页面级别和文档级别）
+    # 默认使用文档级别特征目录 (line_features_doc)
+    # 页面级别: LAYOUTLMFT_FEATURES_DIR=/path/to/line_features
+    # 文档级别: LAYOUTLMFT_FEATURES_DIR=/path/to/line_features_doc (默认)
+    features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
     output_dir = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft") + "/multiclass_relation"
-    max_steps = 300  # 训练步数
+    max_steps = int(os.getenv("MAX_STEPS", "300"))  # 训练步数（可通过环境变量MAX_STEPS设置）
     batch_size = 32
     learning_rate = 5e-4
     neg_ratio = 1.5  # 负样本比例

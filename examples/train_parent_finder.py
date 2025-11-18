@@ -328,13 +328,18 @@ def collate_fn_simple(batch):
     }
 
 
-def collate_fn(batch, max_lines_limit=256):
+def collate_fn(batch, max_lines_limit=512):
     """
     自定义 collate 函数，处理可变长度的序列
+
+    支持页面级别和文档级别训练：
+    - 页面级别: 每个样本是一页，max_lines_limit=256 足够
+    - 文档级别: 每个样本是整个文档，max_lines_limit=512 支持跨页关系
 
     Args:
         batch: batch 数据
         max_lines_limit: 最大行数限制（防止极端情况导致显存爆炸）
+                        推荐：页面级别=256, 文档级别=512
     """
     # 找出 batch 中最大的行数，但限制在 max_lines_limit 以内
     max_lines = min(
@@ -542,8 +547,14 @@ class ParentFinderDatasetSimple(torch.utils.data.Dataset):
 
 class ParentFinderDataset(torch.utils.data.Dataset):
     """
-    完整版数据集：页面级别（全量加载，适合小数据集）
-    每个样本是一个文档页面，包含多个语义单元（lines）
+    完整版数据集：支持页面级别和文档级别（全量加载，适合小数据集）
+
+    数据级别：
+    - 页面级别: 每个样本是一页，parent_ids 是页内局部索引
+    - 文档级别: 每个样本是整个文档（多页），parent_ids 是文档内全局索引，支持跨页关系
+
+    特征文件由 extract_line_features.py (页面级别) 或
+    extract_line_features_document_level.py (文档级别) 生成
     """
 
     def __init__(
@@ -602,6 +613,10 @@ class ChunkIterableDataset(torch.utils.data.IterableDataset):
     """
     基于 chunk 的流式数据集（内存友好，适合大数据集）
     逐个加载 chunk，避免一次性占用大量内存
+
+    支持页面级别和文档级别训练：
+    - 页面级别: 每个样本是一页
+    - 文档级别: 每个样本是整个文档，支持跨页父子关系
     """
 
     def __init__(
@@ -1023,6 +1038,10 @@ def main():
                         help="是否使用梯度检查点（节省显存，稍慢）")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
                         help="梯度累积步数（模拟更大的batch size）")
+    parser.add_argument("--level", type=str, default="document", choices=["page", "document"],
+                        help="训练级别：page=页面级别，document=文档级别（支持跨页关系）")
+    parser.add_argument("--max_lines_limit", type=int, default=None,
+                        help="最大行数限制（page级别默认256，document级别默认512）")
 
     args = parser.parse_args()
 
@@ -1031,10 +1050,11 @@ def main():
     project_root = os.path.dirname(script_dir)
 
     # 路径配置：优先级 命令行参数 > 环境变量 > 默认值
+    # 默认使用文档级别特征目录 (line_features_doc)
     if args.features_dir:
         features_dir = args.features_dir
     else:
-        features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features")
+        features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
 
     if args.output_dir:
         output_dir_base = args.output_dir
@@ -1043,6 +1063,12 @@ def main():
 
     output_dir = os.path.join(output_dir_base, f"parent_finder_{args.mode}")
 
+    # 根据训练级别设置 max_lines_limit
+    if args.max_lines_limit is not None:
+        max_lines_limit = args.max_lines_limit
+    else:
+        max_lines_limit = 512 if args.level == "document" else 256
+
     # 根据模式设置默认参数
     if args.mode == "simple":
         batch_size = args.batch_size if args.batch_size is not None else 128
@@ -1050,7 +1076,8 @@ def main():
         use_gru = False
         use_soft_mask = False
         logger.info("=" * 60)
-        logger.info("模式: 简化版（内存友好，适合本地4GB显存测试）")
+        logger.info(f"模式: 简化版（内存友好，适合本地4GB显存测试）")
+        logger.info(f"级别: {args.level} (max_lines={max_lines_limit})")
         logger.info("=" * 60)
     else:  # full
         batch_size = args.batch_size if args.batch_size is not None else 1
@@ -1058,7 +1085,8 @@ def main():
         use_gru = True
         use_soft_mask = args.use_soft_mask
         logger.info("=" * 60)
-        logger.info("模式: 完整论文方法（需要24GB显存）")
+        logger.info(f"模式: 完整论文方法（需要24GB显存）")
+        logger.info(f"级别: {args.level} (max_lines={max_lines_limit})")
         logger.info("=" * 60)
 
     num_epochs = args.num_epochs
@@ -1139,8 +1167,9 @@ def main():
         logger.info(f"验证集: {val_dataset.total_pages} 页（流式加载）")
 
         # 创建dataloader（IterableDataset 不支持 shuffle 参数）
-        # 使用 partial 设置最大行数限制为 256（防止极端情况导致显存爆炸）
-        collate_fn_with_limit = partial(collate_fn, max_lines_limit=256)
+        # 使用 partial 设置最大行数限制（防止极端情况导致显存爆炸）
+        # 文档级别: 512行，页面级别: 256行
+        collate_fn_with_limit = partial(collate_fn, max_lines_limit=max_lines_limit)
 
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
