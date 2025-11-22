@@ -10,6 +10,7 @@ import os
 import sys
 import torch
 import pickle
+import argparse
 from tqdm import tqdm
 from datasets import load_dataset
 from collections import defaultdict
@@ -30,17 +31,26 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description="文档级别特征提取")
+    parser.add_argument("--data_dir", type=str, default=None, help="HRDS数据集路径")
+    parser.add_argument("--model_path", type=str, default=None, help="LayoutLMv2模型路径")
+    parser.add_argument("--output_dir", type=str, default=None, help="特征输出目录")
+    parser.add_argument("--num_samples", type=int, default=None, help="限制处理的样本数（用于快速测试）")
+    parser.add_argument("--docs_per_chunk", type=int, default=None, help="每个chunk包含的文档数")
+    args = parser.parse_args()
+
     # 配置
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    # 模型路径(优先从环境变量读取,默认使用 E 盘训练的模型)
-    model_path = os.getenv("LAYOUTLMFT_MODEL_PATH", "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000")
-    # 特征输出到 E 盘节省系统盘空间
-    # 默认输出目录: line_features_doc (与训练脚本默认路径一致)
-    output_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
-    # 数据集路径(优先从环境变量读取)
-    data_dir = os.getenv("HRDOC_DATA_DIR", "/mnt/e/models/data/Section/HRDS")
+    # 参数优先级: 命令行参数 > 环境变量 > 默认值
+    # 模型路径
+    model_path = args.model_path or os.getenv("LAYOUTLMFT_MODEL_PATH", "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000")
+    # 特征输出目录
+    output_dir = args.output_dir or os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
+    # 数据集路径
+    data_dir = args.data_dir or os.getenv("HRDOC_DATA_DIR", "/mnt/e/models/data/Section/HRDS")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -72,7 +82,8 @@ def main():
     logger.info(f"数据集包含: {list(datasets.keys())}")
 
     # 是否限制数据量(默认-1表示不限制,提取所有数据)
-    num_samples = int(os.getenv("LAYOUTLMFT_NUM_SAMPLES", "-1"))
+    # 参数优先级: 命令行参数 > 环境变量 > 默认值(-1)
+    num_samples = args.num_samples if args.num_samples is not None else int(os.getenv("LAYOUTLMFT_NUM_SAMPLES", "-1"))
     if num_samples > 0:
         logger.info(f"限制样本数: {num_samples}")
         if has_train and len(datasets["train"]) > num_samples:
@@ -352,7 +363,8 @@ def main():
 
     # 提取特征
     batch_size = int(os.getenv("LAYOUTLMFT_BATCH_SIZE", "50"))
-    docs_per_chunk = int(os.getenv("LAYOUTLMFT_DOCS_PER_CHUNK", "100"))
+    # 参数优先级: 命令行参数 > 环境变量 > 默认值(100)
+    docs_per_chunk = args.docs_per_chunk if args.docs_per_chunk is not None else int(os.getenv("LAYOUTLMFT_DOCS_PER_CHUNK", "100"))
 
     train_chunk_files = []
     if has_train:

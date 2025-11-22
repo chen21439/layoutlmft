@@ -606,6 +606,208 @@ def tree_to_hrds_format(tree, page_num=0):
     return flat_list
 
 
+def extract_page_features(
+    raw_sample: dict,
+    subtask1_model,
+    tokenizer,
+    data_collator,
+    feature_extractor,
+    device: torch.device,
+):
+    """
+    提取单个页面的行级特征（一阶段）
+
+    Args:
+        raw_sample: 原始样本数据
+        subtask1_model: LayoutLMv2 模型
+        tokenizer: tokenizer
+        data_collator: data collator
+        feature_extractor: line feature extractor
+        device: 设备
+
+    Returns:
+        line_features, line_mask, line_labels, line_bboxes, line_texts, line_page_numbers, line_top5_labels, line_top5_scores
+    """
+    # Tokenize
+    tokenized = tokenizer(
+        raw_sample["tokens"],
+        padding="max_length",
+        truncation=True,
+        max_length=512,
+        is_split_into_words=True,
+    )
+
+    # 对齐 bbox 和 line_ids
+    word_ids = tokenized.word_ids()
+    bboxes = []
+    token_line_ids = []
+
+    previous_word_idx = None
+    for word_idx in word_ids:
+        if word_idx is None:
+            bboxes.append([0, 0, 0, 0])
+            token_line_ids.append(-1)
+        elif word_idx != previous_word_idx:
+            bboxes.append(raw_sample["bboxes"][word_idx])
+            token_line_ids.append(raw_sample["line_ids"][word_idx])
+        else:
+            bboxes.append(raw_sample["bboxes"][word_idx])
+            token_line_ids.append(raw_sample["line_ids"][word_idx])
+        previous_word_idx = word_idx
+
+    # 创建 line_id 映射（全局 -> 本地）
+    valid_global_line_ids = [lid for lid in raw_sample["line_ids"] if lid >= 0]
+    if len(valid_global_line_ids) > 0:
+        unique_global_line_ids = sorted(set(valid_global_line_ids))
+        global_to_local = {global_id: local_idx for local_idx, global_id in enumerate(unique_global_line_ids)}
+    else:
+        global_to_local = {}
+
+    # 提取 line_texts
+    line_texts = extract_line_texts(raw_sample["tokens"], raw_sample["line_ids"], line_id_mapping=global_to_local)
+
+    # 准备模型输入
+    sample_dict = {
+        "input_ids": tokenized["input_ids"],
+        "attention_mask": tokenized["attention_mask"],
+        "bbox": bboxes,
+    }
+
+    batch = data_collator([sample_dict])
+
+    # 转移到GPU
+    for k, v in batch.items():
+        if isinstance(v, torch.Tensor):
+            batch[k] = v.to(device)
+
+    # 单独处理 image
+    image = raw_sample["image"]
+    if not isinstance(image, torch.Tensor):
+        image = torch.tensor(np.array(image), dtype=torch.uint8)
+
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+
+    if hasattr(image, "to"):
+        image = image.to(device)
+
+    # 一阶段：模型预测
+    with torch.no_grad():
+        outputs = subtask1_model(
+            input_ids=batch["input_ids"],
+            bbox=batch["bbox"],
+            attention_mask=batch["attention_mask"],
+            image=image,
+            output_hidden_states=True,
+        )
+
+    # 提取预测标签
+    logits = outputs.logits
+    predicted_labels = torch.argmax(logits, dim=-1)
+    predicted_labels = predicted_labels.squeeze(0).cpu().tolist()
+
+    token_logits = logits.squeeze(0).cpu()
+
+    # 聚合成 line-level
+    valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
+    if len(valid_line_ids) > 0:
+        unique_global_line_ids = sorted(set(valid_line_ids))
+        num_lines = len(unique_global_line_ids)
+
+        line_bboxes = np.zeros((num_lines, 4), dtype=np.float32)
+        line_bboxes[:, 0] = 1e9
+        line_bboxes[:, 1] = 1e9
+        line_bboxes[:, 2] = -1e9
+        line_bboxes[:, 3] = -1e9
+
+        line_label_votes = defaultdict(list)
+        line_logits_list = defaultdict(list)
+
+        for bbox, pred_label, token_logit, global_lid in zip(bboxes, predicted_labels, token_logits, token_line_ids):
+            if global_lid < 0:
+                continue
+
+            local_idx = global_to_local[global_lid]
+
+            x1, y1, x2, y2 = bbox
+            line_bboxes[local_idx, 0] = min(line_bboxes[local_idx, 0], x1)
+            line_bboxes[local_idx, 1] = min(line_bboxes[local_idx, 1], y1)
+            line_bboxes[local_idx, 2] = max(line_bboxes[local_idx, 2], x2)
+            line_bboxes[local_idx, 3] = max(line_bboxes[local_idx, 3], y2)
+
+            if pred_label > 0:
+                line_label_votes[local_idx].append(pred_label)
+
+            line_logits_list[local_idx].append(token_logit)
+
+        line_labels = []
+        line_top5_labels = []
+        line_top5_scores = []
+
+        for local_idx in range(num_lines):
+            if local_idx in line_label_votes and len(line_label_votes[local_idx]) > 0:
+                most_common_label = Counter(line_label_votes[local_idx]).most_common(1)[0][0]
+                line_labels.append(most_common_label)
+            else:
+                line_labels.append(0)
+
+            if local_idx in line_logits_list and len(line_logits_list[local_idx]) > 0:
+                avg_logits = torch.stack(line_logits_list[local_idx]).mean(dim=0)
+                probs = torch.softmax(avg_logits, dim=0)
+                top5_probs, top5_indices = torch.topk(probs, k=min(5, len(probs)))
+                line_top5_labels.append(top5_indices.tolist())
+                line_top5_scores.append(top5_probs.tolist())
+            else:
+                line_top5_labels.append([])
+                line_top5_scores.append([])
+    else:
+        line_bboxes = np.zeros((0, 4), dtype=np.float32)
+        line_labels = []
+        line_top5_labels = []
+        line_top5_scores = []
+        num_lines = 0
+
+    # 提取hidden states
+    hidden_states = outputs.hidden_states[-1]
+    text_seq_len = batch["input_ids"].shape[1]
+    hidden_states = hidden_states[:, :text_seq_len, :]
+
+    # 提取行级特征
+    line_ids_tensor = torch.tensor(token_line_ids, device=device).unsqueeze(0)
+    line_features, line_mask = feature_extractor.extract_line_features(
+        hidden_states, line_ids_tensor, pooling="mean"
+    )
+
+    # 移除 batch 维度
+    line_features = line_features.squeeze(0)
+    line_mask = line_mask.squeeze(0)
+
+    # 过滤掉空行
+    num_lines = line_mask.sum().item()
+    line_features = line_features[:num_lines]
+    line_mask = line_mask[:num_lines]
+    line_bboxes = line_bboxes[:num_lines]
+    line_labels = line_labels[:num_lines]
+    line_texts = line_texts[:num_lines]
+    line_top5_labels = line_top5_labels[:num_lines]
+    line_top5_scores = line_top5_scores[:num_lines]
+
+    # 为每一行添加页码信息
+    page_number = raw_sample.get("page_number", 0)
+    line_page_numbers = [page_number] * num_lines
+
+    return (
+        line_features,
+        line_mask,
+        line_labels,
+        line_bboxes,
+        line_texts,
+        line_page_numbers,
+        line_top5_labels,
+        line_top5_scores,
+    )
+
+
 def inference_single_page(
     raw_sample: dict,
     subtask1_model,
@@ -641,198 +843,19 @@ def inference_single_page(
     Returns:
         DocumentTree实例（包含推理得到的class、parent_id、relation）
     """
-    # ==================== 一阶段：提取行级特征 ====================
-    # 和 extract_line_features.py 保持一致的逻辑
-
-    # Tokenize（和训练一样）
-    tokenized = tokenizer(
-        raw_sample["tokens"],
-        padding="max_length",
-        truncation=True,
-        max_length=512,
-        is_split_into_words=True,
+    # 一阶段：提取行级特征
+    (
+        line_features,
+        line_mask,
+        line_labels,
+        line_bboxes,
+        line_texts,
+        line_page_numbers,
+        line_top5_labels,
+        line_top5_scores,
+    ) = extract_page_features(
+        raw_sample, subtask1_model, tokenizer, data_collator, feature_extractor, device
     )
-
-    # 对齐 bbox 和 line_ids（推理时不需要 ground truth labels）
-    word_ids = tokenized.word_ids()
-    bboxes = []
-    token_line_ids = []
-
-    previous_word_idx = None
-    for word_idx in word_ids:
-        if word_idx is None:
-            bboxes.append([0, 0, 0, 0])
-            token_line_ids.append(-1)
-        elif word_idx != previous_word_idx:
-            bboxes.append(raw_sample["bboxes"][word_idx])
-            token_line_ids.append(raw_sample["line_ids"][word_idx])
-        else:
-            bboxes.append(raw_sample["bboxes"][word_idx])
-            token_line_ids.append(raw_sample["line_ids"][word_idx])
-        previous_word_idx = word_idx
-
-    # ==================== 创建 line_id 映射（全局 -> 本地）====================
-    # HRDS 数据使用全局 line_id（跨页面连续），需要映射为本地索引（0, 1, 2, ...）
-    valid_global_line_ids = [lid for lid in raw_sample["line_ids"] if lid >= 0]
-    if len(valid_global_line_ids) > 0:
-        unique_global_line_ids = sorted(set(valid_global_line_ids))
-        global_to_local = {global_id: local_idx for local_idx, global_id in enumerate(unique_global_line_ids)}
-    else:
-        global_to_local = {}
-
-    # 提取 line_texts（从 tokens 聚合），使用映射
-    line_texts = extract_line_texts(raw_sample["tokens"], raw_sample["line_ids"], line_id_mapping=global_to_local)
-
-    # 准备模型输入（推理时不需要 labels）
-    # 注意：image 需要单独处理，不通过 data_collator
-    sample_dict = {
-        "input_ids": tokenized["input_ids"],
-        "attention_mask": tokenized["attention_mask"],
-        "bbox": bboxes,
-    }
-
-    batch = data_collator([sample_dict])
-
-    # 转移到GPU
-    for k, v in batch.items():
-        if isinstance(v, torch.Tensor):
-            batch[k] = v.to(device)
-
-    # 单独处理 image（不通过 data_collator）
-    # HuggingFace datasets 将 Array3D 序列化为 list，需要转回 tensor
-    image = raw_sample["image"]
-    if not isinstance(image, torch.Tensor):
-        image = torch.tensor(np.array(image), dtype=torch.uint8)
-
-    # 添加batch维度：(3, 224, 224) -> (1, 3, 224, 224)
-    if image.dim() == 3:
-        image = image.unsqueeze(0)
-
-    if hasattr(image, "to"):
-        image = image.to(device)
-
-    # ==================== 一阶段：模型预测语义标签（class）====================
-    # 【重要】输入数据的 class 是占位符（paragraph），这里预测真正的 class
-    with torch.no_grad():
-        outputs = subtask1_model(
-            input_ids=batch["input_ids"],
-            bbox=batch["bbox"],
-            attention_mask=batch["attention_mask"],
-            image=image,
-            output_hidden_states=True,
-        )
-
-    # 【关键】从模型输出中提取预测的标签（而不是使用输入的 ner_tags 占位符）
-    # 这些预测的标签将作为最终输出的 class 字段
-    logits = outputs.logits  # [1, seq_len, num_labels]
-    predicted_labels = torch.argmax(logits, dim=-1)  # [1, seq_len]
-    predicted_labels = predicted_labels.squeeze(0).cpu().tolist()  # [seq_len]
-
-    # 保存 logits 用于计算 top5（squeeze 去掉 batch 维度）
-    token_logits = logits.squeeze(0).cpu()  # [seq_len, num_labels]
-
-    # ==================== 聚合成 line-level 的 bbox 和 labels ====================
-    # 使用预测的标签（而不是 ground truth）
-    # 使用本地索引（映射后的）
-    valid_line_ids = [lid for lid in token_line_ids if lid >= 0]
-    if len(valid_line_ids) > 0:
-        # 获取唯一的全局 line_ids 并排序
-        unique_global_line_ids = sorted(set(valid_line_ids))
-        num_lines = len(unique_global_line_ids)
-
-        line_bboxes = np.zeros((num_lines, 4), dtype=np.float32)
-        line_bboxes[:, 0] = 1e9
-        line_bboxes[:, 1] = 1e9
-        line_bboxes[:, 2] = -1e9
-        line_bboxes[:, 3] = -1e9
-
-        # 收集每个 line 的所有预测标签（用于多数投票）
-        # 使用本地索引
-        line_label_votes = defaultdict(list)
-
-        # 收集每个 line 的所有 token logits（用于计算 top5）
-        line_logits_list = defaultdict(list)
-
-        for bbox, pred_label, token_logit, global_lid in zip(bboxes, predicted_labels, token_logits, token_line_ids):
-            if global_lid < 0:
-                continue
-
-            # 映射为本地索引
-            local_idx = global_to_local[global_lid]
-
-            # 更新 bbox
-            x1, y1, x2, y2 = bbox
-            line_bboxes[local_idx, 0] = min(line_bboxes[local_idx, 0], x1)
-            line_bboxes[local_idx, 1] = min(line_bboxes[local_idx, 1], y1)
-            line_bboxes[local_idx, 2] = max(line_bboxes[local_idx, 2], x2)
-            line_bboxes[local_idx, 3] = max(line_bboxes[local_idx, 3], y2)
-
-            # 收集预测的标签（忽略特殊标签 0=O，对应"其他"类别）
-            if pred_label > 0:  # 只收集有意义的标签
-                line_label_votes[local_idx].append(pred_label)
-
-            # 收集 logits
-            line_logits_list[local_idx].append(token_logit)
-
-        # 计算每个 line 的最终标签（多数投票）和 top5 预测
-        line_labels = []
-        line_top5_labels = []
-        line_top5_scores = []
-
-        for local_idx in range(num_lines):
-            if local_idx in line_label_votes and len(line_label_votes[local_idx]) > 0:
-                # 使用多数投票
-                most_common_label = Counter(line_label_votes[local_idx]).most_common(1)[0][0]
-                line_labels.append(most_common_label)
-            else:
-                # 如果没有有效标签，使用 0（O 标签）
-                line_labels.append(0)
-
-            # 计算 top5：对该 line 的所有 token logits 取平均
-            if local_idx in line_logits_list and len(line_logits_list[local_idx]) > 0:
-                # 平均所有 token 的 logits
-                avg_logits = torch.stack(line_logits_list[local_idx]).mean(dim=0)  # [num_labels]
-
-                # Softmax 得到概率
-                probs = torch.softmax(avg_logits, dim=0)  # [num_labels]
-
-                # 取 top5
-                top5_probs, top5_indices = torch.topk(probs, k=min(5, len(probs)))
-
-                line_top5_labels.append(top5_indices.tolist())
-                line_top5_scores.append(top5_probs.tolist())
-            else:
-                line_top5_labels.append([])
-                line_top5_scores.append([])
-    else:
-        line_bboxes = np.zeros((0, 4), dtype=np.float32)
-        line_labels = []
-        line_top5_labels = []
-        line_top5_scores = []
-        num_lines = 0
-
-    # 提取hidden states
-    hidden_states = outputs.hidden_states[-1]
-    text_seq_len = batch["input_ids"].shape[1]
-    hidden_states = hidden_states[:, :text_seq_len, :]
-
-    # 提取行级特征
-    line_ids_tensor = torch.tensor(token_line_ids, device=device).unsqueeze(0)
-    line_features, line_mask = feature_extractor.extract_line_features(
-        hidden_states, line_ids_tensor, pooling="mean"
-    )
-
-    # 移除 batch 维度
-    line_features = line_features.squeeze(0)
-    line_mask = line_mask.squeeze(0)
-
-    # 过滤掉空行（和训练代码一致）
-    num_lines = line_mask.sum().item()
-    line_features = line_features[:num_lines]
-    line_mask = line_mask[:num_lines]
-    line_bboxes = line_bboxes[:num_lines]
-    line_labels = line_labels[:num_lines]
-    line_texts = line_texts[:num_lines]
 
     # ==================== 二阶段：预测父节点（parent_id）====================
     # 【重要】输入数据的 parent_id 是占位符（-1），这里预测真正的父节点索引
@@ -873,6 +896,125 @@ def inference_single_page(
             "line_bboxes": line_bboxes.tolist(),
             "line_top5_labels": line_top5_labels,  # Top5 预测的标签 ID
             "line_top5_scores": line_top5_scores,  # Top5 对应的置信度
+        },
+        "stage2": {
+            "parent_indices": parent_indices.tolist() if isinstance(parent_indices, np.ndarray) else parent_indices,
+        },
+        "stage3": {
+            "relation_types": relation_types,
+            "relation_confidences": relation_confidences if relation_confidences is not None else None,
+        },
+    }
+
+    return tree, stage_results
+
+
+def inference_single_document(
+    page_samples: list,
+    subtask1_model,
+    tokenizer,
+    data_collator,
+    feature_extractor,
+    subtask2_model,
+    subtask3_model,
+    device: torch.device,
+):
+    """
+    对单个文档的所有页面进行文档级别推理（支持跨页关系）
+
+    Args:
+        page_samples: 该文档的所有页面样本列表（按页码排序）
+        subtask1_model: LayoutLMv2 模型
+        tokenizer: tokenizer
+        data_collator: data collator
+        feature_extractor: line feature extractor
+        subtask2_model: 父节点查找模型
+        subtask3_model: 关系分类模型
+        device: 设备
+
+    Returns:
+        tree: DocumentTree实例
+        stage_results: 各阶段结果（包含页码信息）
+    """
+    # 一阶段：提取每个页面的特征
+    all_line_features = []
+    all_line_masks = []
+    all_line_labels = []
+    all_line_bboxes = []
+    all_line_texts = []
+    all_line_page_numbers = []
+    all_line_top5_labels = []
+    all_line_top5_scores = []
+
+    logger.info(f"  提取 {len(page_samples)} 个页面的特征...")
+
+    for page_sample in page_samples:
+        (
+            line_features,
+            line_mask,
+            line_labels,
+            line_bboxes,
+            line_texts,
+            line_page_numbers,
+            line_top5_labels,
+            line_top5_scores,
+        ) = extract_page_features(
+            page_sample, subtask1_model, tokenizer, data_collator, feature_extractor, device
+        )
+
+        all_line_features.append(line_features)
+        all_line_masks.append(line_mask)
+        all_line_labels.extend(line_labels)
+        all_line_bboxes.extend(line_bboxes)
+        all_line_texts.extend(line_texts)
+        all_line_page_numbers.extend(line_page_numbers)
+        all_line_top5_labels.extend(line_top5_labels)
+        all_line_top5_scores.extend(line_top5_scores)
+
+    # 聚合所有页面的特征
+    if len(all_line_features) > 0:
+        line_features = torch.cat(all_line_features, dim=0)  # [total_lines, hidden_size]
+        line_mask = torch.cat(all_line_masks, dim=0)  # [total_lines]
+        line_bboxes = np.array(all_line_bboxes)
+    else:
+        logger.warning("  文档没有有效的行特征")
+        return None, None
+
+    num_lines = len(all_line_labels)
+    logger.info(f"  文档总行数: {num_lines}")
+
+    # 二阶段：预测父节点（跨页）
+    logger.info(f"  二阶段：预测父节点...")
+    parent_indices = predict_parents(
+        subtask2_model, line_features, line_mask, line_bboxes, device
+    )
+
+    # 三阶段：预测关系类型
+    logger.info(f"  三阶段：预测关系类型...")
+    relation_types, relation_confidences = predict_relations(
+        subtask3_model, line_features, parent_indices, line_bboxes, device
+    )
+
+    # 构建树
+    tree = DocumentTree.from_predictions(
+        line_labels=all_line_labels,
+        parent_indices=parent_indices,
+        relation_types=relation_types,
+        line_bboxes=line_bboxes,
+        line_texts=all_line_texts,
+        label_confidences=None,
+        relation_confidences=relation_confidences,
+    )
+
+    # 返回结果（包含页码信息）
+    stage_results = {
+        "stage1": {
+            "line_labels": all_line_labels,
+            "line_texts": all_line_texts,
+            "line_bboxes": line_bboxes.tolist(),
+            "line_page_numbers": all_line_page_numbers,  # 页码信息
+            "line_top5_labels": all_line_top5_labels,
+            "line_top5_scores": all_line_top5_scores,
         },
         "stage2": {
             "parent_indices": parent_indices.tolist() if isinstance(parent_indices, np.ndarray) else parent_indices,
@@ -953,6 +1095,13 @@ def main():
         choices=["tree", "hrds", "both"],
         help="输出格式：tree=嵌套树，hrds=HRDS平铺格式，both=两种都输出",
     )
+    parser.add_argument(
+        "--level",
+        type=str,
+        default="document",
+        choices=["page", "document"],
+        help="推理级别：page=页面级别，document=文档级别（支持跨页关系，默认）",
+    )
 
     args = parser.parse_args()
 
@@ -1021,146 +1170,272 @@ def main():
         dataset = dataset.select(range(args.max_samples))
         logger.info(f"限制处理前 {args.max_samples} 个样本")
 
-    # 推理（和训练一致）
+    # 推理
     logger.info("\n" + "="*80)
-    logger.info("开始推理")
+    logger.info(f"开始推理 (模式: {args.level})")
     logger.info("="*80)
 
     trees = []
-    # 记录当前文档名称和文档内的页面映射
-    current_doc_name = None
-    doc_page_counter = {}  # {doc_name: page_counter}
 
-    for i, raw_sample in enumerate(tqdm(dataset, desc="推理进度")):
-        try:
-            # 获取文档名称和页码
-            document_name = raw_sample.get("document_name", f"document_{i}")
-            page_number = raw_sample.get("page_number", i)
+    if args.level == "document":
+        # ==================== 文档级别推理 ====================
+        logger.info("文档级别推理：按文档聚合页面...")
 
-            # 初始化文档计数器
-            if document_name not in doc_page_counter:
-                doc_page_counter[document_name] = 0
+        # 按 document_name 分组
+        from collections import defaultdict
+        doc_samples = defaultdict(list)
+        for sample in dataset:
+            doc_name = sample.get("document_name", f"document_{len(doc_samples)}")
+            doc_samples[doc_name].append(sample)
 
-            tree, stage_results = inference_single_page(
-                raw_sample,
-                subtask1_model,
-                tokenizer,
-                data_collator,
-                feature_extractor,
-                subtask2_model,
-                subtask3_model,
-                device
-            )
-            trees.append(tree)
+        logger.info(f"共 {len(doc_samples)} 个文档，{len(dataset)} 个页面")
 
-            # 创建文档专属的输出目录
-            doc_output_dir = output_dir / document_name
-            doc_output_dir.mkdir(parents=True, exist_ok=True)
+        # 对每个文档进行推理
+        for doc_name, pages in tqdm(doc_samples.items(), desc="文档推理进度"):
+            try:
+                # 按页码排序
+                pages = sorted(pages, key=lambda x: x.get("page_number", 0))
 
-            doc_stage1_dir = doc_output_dir / "stage1"
-            doc_stage2_dir = doc_output_dir / "stage2"
-            doc_stage3_dir = doc_output_dir / "stage3"
-            doc_stage1_dir.mkdir(exist_ok=True)
-            doc_stage2_dir.mkdir(exist_ok=True)
-            doc_stage3_dir.mkdir(exist_ok=True)
+                logger.info(f"\n处理文档: {doc_name} ({len(pages)} 页)")
 
-            # 使用原始页码作为文件名
-            page_idx = page_number
+                tree, stage_results = inference_single_document(
+                    pages,
+                    subtask1_model,
+                    tokenizer,
+                    data_collator,
+                    feature_extractor,
+                    subtask2_model,
+                    subtask3_model,
+                    device
+                )
 
-            # ==================== 保存各阶段的中间结果（用于调试）====================
-            # Stage 1: 只有 class, text, bbox, 以及 top5 预测
-            stage1_data = []
-            for idx in range(len(stage_results["stage1"]["line_labels"])):
-                item = {
-                    "line_id": idx,
-                    "text": stage_results["stage1"]["line_texts"][idx],
-                    "box": stage_results["stage1"]["line_bboxes"][idx],
-                    "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
-                    "page": page_idx,
-                }
+                if tree is None:
+                    logger.warning(f"  文档 {doc_name} 推理失败")
+                    continue
 
-                # 添加 top5 预测信息
-                if idx < len(stage_results["stage1"]["line_top5_labels"]):
-                    top5_labels = stage_results["stage1"]["line_top5_labels"][idx]
-                    top5_scores = stage_results["stage1"]["line_top5_scores"][idx]
+                trees.append(tree)
 
-                    # 转换为标签名称和分数的列表
-                    top5_predictions = []
-                    for label_id, score in zip(top5_labels, top5_scores):
-                        label_name = LABEL_MAP.get(label_id, f"unknown_{label_id}")
-                        top5_predictions.append({
-                            "label": label_name,
-                            "label_id": label_id,
-                            "score": float(score)
+                # 创建文档专属的输出目录
+                doc_output_dir = output_dir / doc_name
+                doc_output_dir.mkdir(parents=True, exist_ok=True)
+
+                doc_stage1_dir = doc_output_dir / "stage1"
+                doc_stage2_dir = doc_output_dir / "stage2"
+                doc_stage3_dir = doc_output_dir / "stage3"
+                doc_stage1_dir.mkdir(exist_ok=True)
+                doc_stage2_dir.mkdir(exist_ok=True)
+                doc_stage3_dir.mkdir(exist_ok=True)
+
+                # 按页分组保存结果
+                # 文档级别：每行都有对应的页码信息
+                page_lines = defaultdict(list)  # {page_num: [line_indices]}
+                for idx, page_num in enumerate(stage_results["stage1"]["line_page_numbers"]):
+                    page_lines[page_num].append(idx)
+
+                # 为每个页面保存结果
+                for page_num, line_indices in sorted(page_lines.items()):
+                    # Stage 1
+                    stage1_data = []
+                    for local_idx, global_idx in enumerate(line_indices):
+                        item = {
+                            "line_id": local_idx,
+                            "global_line_id": global_idx,
+                            "text": stage_results["stage1"]["line_texts"][global_idx],
+                            "box": stage_results["stage1"]["line_bboxes"][global_idx],
+                            "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][global_idx], f"unknown_{stage_results['stage1']['line_labels'][global_idx]}"),
+                            "page": page_num,
+                        }
+                        if global_idx < len(stage_results["stage1"]["line_top5_labels"]):
+                            top5_labels = stage_results["stage1"]["line_top5_labels"][global_idx]
+                            top5_scores = stage_results["stage1"]["line_top5_scores"][global_idx]
+                            top5_predictions = []
+                            for label_id, score in zip(top5_labels, top5_scores):
+                                label_name = LABEL_MAP.get(label_id, f"unknown_{label_id}")
+                                top5_predictions.append({
+                                    "label": label_name,
+                                    "label_id": label_id,
+                                    "score": float(score)
+                                })
+                            item["top5_predictions"] = top5_predictions
+                        stage1_data.append(item)
+
+                    stage1_path = doc_stage1_dir / f"page_{page_num:04d}.json"
+                    with open(stage1_path, 'w', encoding='utf-8') as f:
+                        json.dump(stage1_data, f, indent=2, ensure_ascii=False)
+
+                    # Stage 2
+                    stage2_data = []
+                    for local_idx, global_idx in enumerate(line_indices):
+                        stage2_data.append({
+                            "line_id": local_idx,
+                            "global_line_id": global_idx,
+                            "text": stage_results["stage1"]["line_texts"][global_idx],
+                            "box": stage_results["stage1"]["line_bboxes"][global_idx],
+                            "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][global_idx], f"unknown_{stage_results['stage1']['line_labels'][global_idx]}"),
+                            "page": page_num,
+                            "parent_id": stage_results["stage2"]["parent_indices"][global_idx],
                         })
-                    item["top5_predictions"] = top5_predictions
+                    stage2_path = doc_stage2_dir / f"page_{page_num:04d}.json"
+                    with open(stage2_path, 'w', encoding='utf-8') as f:
+                        json.dump(stage2_data, f, indent=2, ensure_ascii=False)
 
-                stage1_data.append(item)
+                    # Stage 3
+                    stage3_data = []
+                    for local_idx, global_idx in enumerate(line_indices):
+                        stage3_data.append({
+                            "line_id": local_idx,
+                            "global_line_id": global_idx,
+                            "text": stage_results["stage1"]["line_texts"][global_idx],
+                            "box": stage_results["stage1"]["line_bboxes"][global_idx],
+                            "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][global_idx], f"unknown_{stage_results['stage1']['line_labels'][global_idx]}"),
+                            "page": page_num,
+                            "parent_id": stage_results["stage2"]["parent_indices"][global_idx],
+                            "relation": RELATION_MAP.get(stage_results["stage3"]["relation_types"][global_idx], f"unknown_{stage_results['stage3']['relation_types'][global_idx]}"),
+                        })
+                    stage3_path = doc_stage3_dir / f"page_{page_num:04d}.json"
+                    with open(stage3_path, 'w', encoding='utf-8') as f:
+                        json.dump(stage3_data, f, indent=2, ensure_ascii=False)
 
-            stage1_path = doc_stage1_dir / f"page_{page_idx:04d}.json"
-            with open(stage1_path, 'w', encoding='utf-8') as f:
-                json.dump(stage1_data, f, indent=2, ensure_ascii=False)
+                # 保存整个文档的树（如果需要）
+                if args.output_format in ["tree", "both"]:
+                    if args.save_json:
+                        json_path = doc_output_dir / f"{doc_name}_tree.json"
+                        tree.to_json(str(json_path))
 
-            # Stage 2: 添加 parent_id
-            stage2_data = []
-            for idx in range(len(stage_results["stage1"]["line_labels"])):
-                stage2_data.append({
-                    "line_id": idx,
-                    "text": stage_results["stage1"]["line_texts"][idx],
-                    "box": stage_results["stage1"]["line_bboxes"][idx],
-                    "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
-                    "page": page_idx,
-                    "parent_id": stage_results["stage2"]["parent_indices"][idx],
-                })
-            stage2_path = doc_stage2_dir / f"page_{page_idx:04d}.json"
-            with open(stage2_path, 'w', encoding='utf-8') as f:
-                json.dump(stage2_data, f, indent=2, ensure_ascii=False)
+                    if args.save_markdown:
+                        md_path = doc_output_dir / f"{doc_name}_tree.md"
+                        with open(md_path, 'w', encoding='utf-8') as f:
+                            f.write(tree.to_markdown())
 
-            # Stage 3: 添加 relation（最终结果，等同于主输出）
-            stage3_data = []
-            for idx in range(len(stage_results["stage1"]["line_labels"])):
-                stage3_data.append({
-                    "line_id": idx,
-                    "text": stage_results["stage1"]["line_texts"][idx],
-                    "box": stage_results["stage1"]["line_bboxes"][idx],
-                    "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
-                    "page": page_idx,
-                    "parent_id": stage_results["stage2"]["parent_indices"][idx],
-                    "relation": stage_results["stage3"]["relation_types"][idx],
-                })
-            stage3_path = doc_stage3_dir / f"page_{page_idx:04d}.json"
-            with open(stage3_path, 'w', encoding='utf-8') as f:
-                json.dump(stage3_data, f, indent=2, ensure_ascii=False)
+                    if args.save_ascii:
+                        ascii_path = doc_output_dir / f"{doc_name}_tree_ascii.txt"
+                        with open(ascii_path, 'w', encoding='utf-8') as f:
+                            f.write(tree.visualize_ascii())
 
-            # 根据output_format保存最终结果
-            if args.output_format in ["hrds", "both"]:
-                # 保存HRDS格式（从树转换，包含层级结构）
-                hrds_data = tree_to_hrds_format(tree, page_num=page_idx)
-                hrds_path = doc_output_dir / f"page_{page_idx:04d}.json"
-                with open(hrds_path, 'w', encoding='utf-8') as f:
-                    json.dump(hrds_data, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                import traceback
+                logger.error(f"处理文档 {doc_name} 时出错: {str(e)}")
+                logger.error(f"详细错误:\n{traceback.format_exc()}")
+                continue
 
-            if args.output_format in ["tree", "both"]:
+    else:
+        # ==================== 页面级别推理（原有逻辑）====================
+        logger.info("页面级别推理：逐页处理...")
+
+        for i, raw_sample in enumerate(tqdm(dataset, desc="页面推理进度")):
+            try:
+                document_name = raw_sample.get("document_name", f"document_{i}")
+                page_number = raw_sample.get("page_number", i)
+
+                tree, stage_results = inference_single_page(
+                    raw_sample,
+                    subtask1_model,
+                    tokenizer,
+                    data_collator,
+                    feature_extractor,
+                    subtask2_model,
+                    subtask3_model,
+                    device
+                )
+                trees.append(tree)
+
+                # 创建文档专属的输出目录
+                doc_output_dir = output_dir / document_name
+                doc_output_dir.mkdir(parents=True, exist_ok=True)
+
+                doc_stage1_dir = doc_output_dir / "stage1"
+                doc_stage2_dir = doc_output_dir / "stage2"
+                doc_stage3_dir = doc_output_dir / "stage3"
+                doc_stage1_dir.mkdir(exist_ok=True)
+                doc_stage2_dir.mkdir(exist_ok=True)
+                doc_stage3_dir.mkdir(exist_ok=True)
+
+                page_idx = page_number
+
+                # Stage 1
+                stage1_data = []
+                for idx in range(len(stage_results["stage1"]["line_labels"])):
+                    item = {
+                        "line_id": idx,
+                        "text": stage_results["stage1"]["line_texts"][idx],
+                        "box": stage_results["stage1"]["line_bboxes"][idx],
+                        "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
+                        "page": page_idx,
+                    }
+                    if idx < len(stage_results["stage1"]["line_top5_labels"]):
+                        top5_labels = stage_results["stage1"]["line_top5_labels"][idx]
+                        top5_scores = stage_results["stage1"]["line_top5_scores"][idx]
+                        top5_predictions = []
+                        for label_id, score in zip(top5_labels, top5_scores):
+                            label_name = LABEL_MAP.get(label_id, f"unknown_{label_id}")
+                            top5_predictions.append({
+                                "label": label_name,
+                                "label_id": label_id,
+                                "score": float(score)
+                            })
+                        item["top5_predictions"] = top5_predictions
+                    stage1_data.append(item)
+
+                stage1_path = doc_stage1_dir / f"page_{page_idx:04d}.json"
+                with open(stage1_path, 'w', encoding='utf-8') as f:
+                    json.dump(stage1_data, f, indent=2, ensure_ascii=False)
+
+                # Stage 2
+                stage2_data = []
+                for idx in range(len(stage_results["stage1"]["line_labels"])):
+                    stage2_data.append({
+                        "line_id": idx,
+                        "text": stage_results["stage1"]["line_texts"][idx],
+                        "box": stage_results["stage1"]["line_bboxes"][idx],
+                        "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
+                        "page": page_idx,
+                        "parent_id": stage_results["stage2"]["parent_indices"][idx],
+                    })
+                stage2_path = doc_stage2_dir / f"page_{page_idx:04d}.json"
+                with open(stage2_path, 'w', encoding='utf-8') as f:
+                    json.dump(stage2_data, f, indent=2, ensure_ascii=False)
+
+                # Stage 3
+                stage3_data = []
+                for idx in range(len(stage_results["stage1"]["line_labels"])):
+                    stage3_data.append({
+                        "line_id": idx,
+                        "text": stage_results["stage1"]["line_texts"][idx],
+                        "box": stage_results["stage1"]["line_bboxes"][idx],
+                        "class": LABEL_MAP.get(stage_results["stage1"]["line_labels"][idx], f"unknown_{stage_results['stage1']['line_labels'][idx]}"),
+                        "page": page_idx,
+                        "parent_id": stage_results["stage2"]["parent_indices"][idx],
+                        "relation": RELATION_MAP.get(stage_results["stage3"]["relation_types"][idx], f"unknown_{stage_results['stage3']['relation_types'][idx]}"),
+                    })
+                stage3_path = doc_stage3_dir / f"page_{page_idx:04d}.json"
+                with open(stage3_path, 'w', encoding='utf-8') as f:
+                    json.dump(stage3_data, f, indent=2, ensure_ascii=False)
+
                 # 保存树格式
-                if args.save_json:
-                    json_path = output_dir / f"tree_{page_idx:04d}.json"
-                    tree.to_json(str(json_path))
+                if args.output_format in ["hrds", "both"]:
+                    hrds_data = tree_to_hrds_format(tree, page_num=page_idx)
+                    hrds_path = doc_output_dir / f"page_{page_idx:04d}.json"
+                    with open(hrds_path, 'w', encoding='utf-8') as f:
+                        json.dump(hrds_data, f, indent=2, ensure_ascii=False)
 
-                if args.save_markdown:
-                    md_path = output_dir / f"tree_{page_idx:04d}.md"
-                    with open(md_path, 'w', encoding='utf-8') as f:
-                        f.write(tree.to_markdown())
+                if args.output_format in ["tree", "both"]:
+                    if args.save_json:
+                        json_path = output_dir / f"tree_{page_idx:04d}.json"
+                        tree.to_json(str(json_path))
+                    if args.save_markdown:
+                        md_path = output_dir / f"tree_{page_idx:04d}.md"
+                        with open(md_path, 'w', encoding='utf-8') as f:
+                            f.write(tree.to_markdown())
+                    if args.save_ascii:
+                        ascii_path = output_dir / f"tree_{page_idx:04d}_ascii.txt"
+                        with open(ascii_path, 'w', encoding='utf-8') as f:
+                            f.write(tree.visualize_ascii())
 
-                if args.save_ascii:
-                    ascii_path = output_dir / f"tree_{page_idx:04d}_ascii.txt"
-                    with open(ascii_path, 'w', encoding='utf-8') as f:
-                        f.write(tree.visualize_ascii())
-
-        except Exception as e:
-            import traceback
-            logger.error(f"处理页面 {i} 时出错: {str(e)}")
-            logger.error(f"详细错误:\n{traceback.format_exc()}")
-            continue
+            except Exception as e:
+                import traceback
+                logger.error(f"处理页面 {i} 时出错: {str(e)}")
+                logger.error(f"详细错误:\n{traceback.format_exc()}")
+                continue
 
     # 统计
     logger.info("\n" + "="*80)
