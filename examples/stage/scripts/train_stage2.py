@@ -4,11 +4,12 @@
 Stage 2: Feature Extraction Script
 
 Usage:
-    # Auto-detect environment
-    python scripts/train_stage2.py
-
-    # Specify environment
+    # Auto-detect environment, use default dataset (hrds)
     python scripts/train_stage2.py --env test
+
+    # Specify dataset
+    python scripts/train_stage2.py --env test --dataset hrds
+    python scripts/train_stage2.py --env test --dataset hrdh
 
     # Quick test mode
     python scripts/train_stage2.py --env test --quick
@@ -36,6 +37,10 @@ def parse_args():
                         help="Environment: dev, test, or auto-detect if not specified")
     parser.add_argument("--quick", action="store_true",
                         help="Force quick test mode (overrides config)")
+
+    # Dataset selection
+    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
+                        help="Dataset to use: hrds (HRDoc-Simple) or hrdh (HRDoc-Hard)")
 
     # Override parameters
     parser.add_argument("--num_samples", type=int, default=None,
@@ -79,9 +84,26 @@ def main():
     if args.batch_size is not None:
         config.feature_extraction.batch_size = args.batch_size
 
-    # Determine paths
-    model_path = args.model_path or config.paths.stage1_model_path
-    output_dir = args.output_dir or config.paths.features_dir
+    # Determine paths based on dataset
+    # Stage 1 model path (dataset-specific)
+    base_model_path = config.paths.stage1_model_path
+    model_path = args.model_path or f"{base_model_path}_{args.dataset}"
+
+    # Output directory (dataset-specific)
+    base_features_dir = config.paths.features_dir
+    output_dir = args.output_dir or f"{base_features_dir}_{args.dataset}"
+
+    # Data directory (dataset-specific)
+    data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
+    if args.dataset == "hrds":
+        data_dir = os.path.join(data_dir_base, "HRDS")
+    else:  # hrdh
+        data_dir = os.path.join(data_dir_base, "HRDH")
+
+    # Fallback to config path if dataset-specific path doesn't exist
+    if not os.path.exists(data_dir):
+        data_dir = config.paths.hrdoc_data_dir
+        print(f"Warning: Dataset-specific path not found, using: {data_dir}")
 
     # Set GPU (CUDA_VISIBLE_DEVICES must be set before importing torch)
     if config.gpu.cuda_visible_devices:
@@ -93,7 +115,7 @@ def main():
         os.environ["TRANSFORMERS_CACHE"] = config.paths.hf_cache_dir
 
     # Set environment variables for the extraction script
-    os.environ["HRDOC_DATA_DIR"] = config.paths.hrdoc_data_dir
+    os.environ["HRDOC_DATA_DIR"] = data_dir
     os.environ["LAYOUTLMFT_MODEL_PATH"] = model_path
     os.environ["LAYOUTLMFT_FEATURES_DIR"] = output_dir
     os.environ["LAYOUTLMFT_NUM_SAMPLES"] = str(config.feature_extraction.num_samples)
@@ -105,11 +127,12 @@ def main():
     print("Stage 2: Feature Extraction (Document Level)")
     print("=" * 60)
     print(f"Environment:    {config.env}")
+    print(f"Dataset:        {args.dataset.upper()}")
     print(f"Quick Test:     {config.quick_test.enabled}")
     print(f"GPU:            {config.gpu.cuda_visible_devices or 'all available'}")
     print(f"Model Path:     {model_path}")
     print(f"Output Dir:     {output_dir}")
-    print(f"Data Dir:       {config.paths.hrdoc_data_dir}")
+    print(f"Data Dir:       {data_dir}")
     print("-" * 60)
     print(f"Num Samples:    {config.feature_extraction.num_samples} (-1 = all)")
     print(f"Docs per Chunk: {config.feature_extraction.docs_per_chunk}")
@@ -123,7 +146,8 @@ def main():
     # Check if model path exists
     if not os.path.exists(model_path):
         print(f"\nError: Model path does not exist: {model_path}")
-        print("Please run Stage 1 training first or specify a valid model path.")
+        print(f"Please run Stage 1 training first:")
+        print(f"  python scripts/train_stage1.py --env {args.env or 'test'} --dataset {args.dataset}")
         sys.exit(1)
 
     # Create output directory
@@ -134,7 +158,7 @@ def main():
 
     cmd_args = [
         sys.executable, extract_script,
-        "--data_dir", config.paths.hrdoc_data_dir,
+        "--data_dir", data_dir,
         "--model_path", model_path,
         "--output_dir", output_dir,
         "--num_samples", str(config.feature_extraction.num_samples),
@@ -166,7 +190,7 @@ def main():
         print("=" * 60)
         print("\nNext steps:")
         print("  1. Check extracted features in output directory")
-        print("  2. Train ParentFinder: python scripts/train_stage3.py")
+        print(f"  2. Train ParentFinder: python scripts/train_stage3.py --env {args.env or 'test'} --dataset {args.dataset}")
     else:
         print("\n" + "=" * 60)
         print("Feature extraction failed!")

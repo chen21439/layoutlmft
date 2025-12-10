@@ -40,6 +40,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default=None, help="HRDS数据集路径")
     parser.add_argument("--model_path", type=str, default=None, help="LayoutLMv2模型路径")
     parser.add_argument("--output_dir", type=str, default=None, help="特征输出目录")
+    parser.add_argument("--tokenizer_path", type=str, default=None, help="Tokenizer路径（用于从原始模型加载tokenizer）")
     parser.add_argument("--num_samples", type=int, default=None, help="限制处理的样本数（用于快速测试）")
     parser.add_argument("--docs_per_chunk", type=int, default=None, help="每个chunk包含的文档数")
     args = parser.parse_args()

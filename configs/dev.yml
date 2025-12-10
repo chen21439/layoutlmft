@@ -27,8 +27,7 @@ model:
   # Pretrained model (from HuggingFace)
   name_or_path: "microsoft/layoutxlm-base"
   # Local downloaded model path (optional, takes priority)
-  # TODO: 需要下载 layoutxlm-base 模型后更新此路径
-  local_path: null
+  local_path: "/mnt/e/models/HuggingFace/hub/models--microsoft--layoutxlm-base/snapshots/8e04ebc4d3ba0013cf943b697c0aedf19b06472a"
 
 # Metrics configuration
 metrics:
@@ -81,6 +80,6 @@ quick_test:
   enabled: false
   num_samples: 10
   docs_per_chunk: 5
-  stage1_max_steps: 50
+  stage1_max_steps: 10
   parent_finder_epochs: 1
-  relation_max_steps: 50
+  relation_max_steps: 10

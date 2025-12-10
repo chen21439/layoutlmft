@@ -4,11 +4,12 @@
 Stage 4: Relation Classifier Training Script
 
 Usage:
-    # Auto-detect environment
-    python examples/stage/scripts/train_stage4.py
-
-    # Specify environment
+    # Auto-detect environment, use default dataset (hrds)
     python examples/stage/scripts/train_stage4.py --env test
+
+    # Specify dataset
+    python examples/stage/scripts/train_stage4.py --env test --dataset hrds
+    python examples/stage/scripts/train_stage4.py --env test --dataset hrdh
 
     # Quick test mode
     python examples/stage/scripts/train_stage4.py --env test --quick
@@ -28,6 +29,17 @@ sys.path.insert(0, PROJECT_ROOT)
 from configs.config_loader import get_config, load_config
 
 
+def get_latest_checkpoint(output_dir):
+    """Get the latest checkpoint (best_model.pt) from output_dir"""
+    if not os.path.isdir(output_dir):
+        return None
+
+    best_model = os.path.join(output_dir, "best_model.pt")
+    if os.path.exists(best_model):
+        return best_model
+    return None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Stage 4: Relation Classifier Training")
 
@@ -36,6 +48,14 @@ def parse_args():
                         help="Environment: dev, test, or auto-detect if not specified")
     parser.add_argument("--quick", action="store_true",
                         help="Force quick test mode (overrides config)")
+
+    # Dataset selection
+    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
+                        help="Dataset to use: hrds (HRDoc-Simple) or hrdh (HRDoc-Hard)")
+
+    # Checkpoint control
+    parser.add_argument("--restart", action="store_true",
+                        help="Restart training from scratch (ignore existing checkpoints)")
 
     # Override parameters
     parser.add_argument("--max_steps", type=int, default=None,
@@ -83,9 +103,19 @@ def main():
     if args.max_chunks is not None:
         config.relation_classifier.max_chunks = args.max_chunks
 
-    # Determine paths
-    features_dir = args.features_dir or config.paths.features_dir
-    output_dir = args.output_dir or os.path.join(config.paths.output_dir, "relation_classifier")
+    # Determine paths based on dataset
+    # Features directory (dataset-specific, from Stage 2)
+    base_features_dir = config.paths.features_dir
+    features_dir = args.features_dir or f"{base_features_dir}_{args.dataset}"
+
+    # Output directory (dataset-specific)
+    base_output_dir = os.path.join(config.paths.output_dir, "relation_classifier")
+    output_dir = args.output_dir or f"{base_output_dir}_{args.dataset}"
+
+    # Check for existing checkpoint
+    existing_checkpoint = None
+    if not args.restart:
+        existing_checkpoint = get_latest_checkpoint(output_dir)
 
     # Set GPU (CUDA_VISIBLE_DEVICES must be set before importing torch)
     if config.gpu.cuda_visible_devices:
@@ -108,6 +138,7 @@ def main():
     print("Stage 4: Relation Classifier Training")
     print("=" * 60)
     print(f"Environment:    {config.env}")
+    print(f"Dataset:        {args.dataset.upper()}")
     print(f"Quick Test:     {config.quick_test.enabled}")
     print(f"GPU Config:     CUDA_VISIBLE_DEVICES={config.gpu.cuda_visible_devices or 'all available'}")
     print(f"GPU Status:")
@@ -122,6 +153,14 @@ def main():
     print(f"Learning Rate:  {config.relation_classifier.learning_rate}")
     print(f"Neg Ratio:      {config.relation_classifier.neg_ratio}")
     print(f"Max Chunks:     {config.relation_classifier.max_chunks} (-1 = all)")
+    print("-" * 60)
+    if existing_checkpoint:
+        print(f"Existing Model: {existing_checkpoint}")
+        print(f"Note:           Will overwrite if new model is better")
+    elif args.restart:
+        print(f"Mode:           RESTART (training from scratch)")
+    else:
+        print(f"Mode:           NEW (no existing checkpoint found)")
     print("=" * 60)
 
     if args.dry_run:
@@ -131,7 +170,8 @@ def main():
     # Check if features directory exists
     if not os.path.exists(features_dir):
         print(f"\nError: Features directory does not exist: {features_dir}")
-        print("Please run Stage 2 feature extraction first.")
+        print(f"Please run Stage 2 feature extraction first:")
+        print(f"  python scripts/train_stage2.py --env {args.env or 'test'} --dataset {args.dataset}")
         sys.exit(1)
 
     # Create output directory
@@ -172,7 +212,10 @@ def main():
         print("Relation classifier training completed successfully!")
         print(f"Model saved to: {output_dir}")
         print("=" * 60)
-        print("\nAll stages completed! You can now run inference.")
+        print(f"\nAll stages for {args.dataset.upper()} completed!")
+        print("\nTo train on another dataset:")
+        other_dataset = 'hrdh' if args.dataset == 'hrds' else 'hrds'
+        print(f"  python scripts/train_stage1.py --env {args.env or 'test'} --dataset {other_dataset}")
     else:
         print("\n" + "=" * 60)
         print("Relation classifier training failed!")
