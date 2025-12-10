@@ -49,7 +49,7 @@ class PathsConfig:
 @dataclass
 class ModelConfig:
     """Model configuration"""
-    name_or_path: str = "microsoft/layoutlmv2-base-uncased"
+    name_or_path: str = "microsoft/layoutxlm-base"
     local_path: Optional[str] = None
 
 
@@ -61,7 +61,7 @@ class MetricsConfig:
 
 @dataclass
 class Stage1TrainingConfig:
-    """Stage 1 LayoutLMv2 fine-tuning parameters"""
+    """Stage 1 LayoutXLM fine-tuning parameters"""
     max_steps: int = 500
     per_device_train_batch_size: int = 2
     per_device_eval_batch_size: int = 4

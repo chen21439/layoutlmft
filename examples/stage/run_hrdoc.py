@@ -25,15 +25,19 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from layoutlmft.models.layoutlmv2 import LayoutLMv2ForTokenClassification
+from layoutlmft.models.layoutxlm import LayoutXLMForTokenClassification, LayoutXLMConfig
+from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 import layoutlmft
 from transformers import AutoConfig, AutoTokenizer
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-from layoutlmft.models.layoutlmv2 import LayoutLMv2Config
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
-CONFIG_MAPPING.update({"layoutlmv2": LayoutLMv2Config})
+# Register both layoutxlm and layoutlmv2 (LayoutXLM uses layoutlmv2 as model_type in config.json)
+CONFIG_MAPPING.update({
+    "layoutxlm": LayoutXLMConfig,
+    "layoutlmv2": LayoutXLMConfig,  # LayoutXLM's config.json has model_type="layoutlmv2"
+})
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.5.0")
@@ -145,20 +149,35 @@ def main():
     #     cache_dir=args.cache_dir,
     # )
 
-    if getattr(config, "model_type", None) == "layoutlmv2":
-        # LayoutLMv2 的文本 tokenizer 就是 BERT 的 tokenizer
+    # Determine if this is LayoutXLM or LayoutLMv2 by checking for sentencepiece model
+    # LayoutXLM uses XLMRoberta tokenizer (sentencepiece), LayoutLMv2 uses BERT tokenizer (vocab.txt)
+    model_path = model_args.model_name_or_path
+    is_layoutxlm = os.path.exists(os.path.join(model_path, "sentencepiece.bpe.model")) or \
+                   "layoutxlm" in model_path.lower()
+
+    if is_layoutxlm:
+        # LayoutXLM uses XLMRoberta tokenizer (sentencepiece)
+        tokenizer = LayoutXLMTokenizerFast.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+        )
+        logger.info("Using LayoutXLM tokenizer (XLMRoberta/sentencepiece)")
+    elif getattr(config, "model_type", None) == "layoutlmv2":
+        # LayoutLMv2 uses BERT tokenizer (vocab.txt)
         tokenizer = BertTokenizerFast.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
         )
+        logger.info("Using LayoutLMv2 tokenizer (BERT)")
     else:
         tokenizer = AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
             use_fast=True,
         )
+        logger.info("Using AutoTokenizer")
 
-    model = LayoutLMv2ForTokenClassification.from_pretrained(
+    model = LayoutXLMForTokenClassification.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,

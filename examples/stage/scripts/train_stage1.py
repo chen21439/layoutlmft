@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Stage 1: LayoutLMv2 Fine-tuning Training Script
+Stage 1: LayoutXLM Fine-tuning Training Script
 
 Usage:
     # Auto-detect environment
@@ -29,7 +29,7 @@ from configs.config_loader import get_config, load_config, print_config
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Stage 1: LayoutLMv2 Fine-tuning")
+    parser = argparse.ArgumentParser(description="Stage 1: LayoutXLM Fine-tuning")
 
     # Environment selection
     parser.add_argument("--env", type=str, default=None,
@@ -106,7 +106,7 @@ def main():
 
     # Print configuration
     print("=" * 60)
-    print("Stage 1: LayoutLMv2 Fine-tuning")
+    print("Stage 1: LayoutXLM Fine-tuning")
     print("=" * 60)
     print(f"Environment:  {config.env}")
     print(f"Quick Test:   {config.quick_test.enabled}")

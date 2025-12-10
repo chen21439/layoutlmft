@@ -25,16 +25,17 @@ paths:
 # Model configuration
 model:
   # Pretrained model (from HuggingFace)
-  name_or_path: "microsoft/layoutlmv2-base-uncased"
+  name_or_path: "microsoft/layoutxlm-base"
   # Local downloaded model path (optional, takes priority)
-  local_path: "/mnt/e/models/HuggingFace/hub/models--microsoft--layoutlmv2-base-uncased/snapshots/ae6f4350c668f88ec580046e35c670df6ec616c1"
+  # TODO: 需要下载 layoutxlm-base 模型后更新此路径
+  local_path: null
 
 # Metrics configuration
 metrics:
   # Local seqeval metric script path (for offline mode)
   seqeval_path: "/root/.cache/huggingface/modules/datasets_modules/metrics/seqeval/1fde2544ac1f3f7e54c639c73221d3a5e5377d2213b9b0fdb579b96980b84b2e/seqeval.py"
 
-# Stage 1: LayoutLMv2 fine-tuning parameters
+# Stage 1: LayoutXLM fine-tuning parameters
 stage1_training:
   max_steps: 500
   per_device_train_batch_size: 2
