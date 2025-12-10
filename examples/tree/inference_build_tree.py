@@ -15,7 +15,7 @@ HRDoc 完整推理 Pipeline
     - tokens, bboxes, line_ids, image: 真实数据（使用）
 
 推理流程（生成真实值）:
-    1. SubTask 1: 语义单元分类 (LayoutLMv2) → line_labels (预测 class)
+    1. SubTask 1: 语义单元分类 (LayoutXLM) → line_labels (预测 class)
     2. SubTask 2: 父节点查找 (ParentFinder) → parent_indices (预测 parent_id)
     3. SubTask 3: 关系分类 (RelationClassifier) → relation_types (预测 relation)
     4. Overall Task: 构建文档树 (DocumentTree)
@@ -29,7 +29,7 @@ HRDoc 完整推理 Pipeline
 
 使用方法：
     python examples/tree/inference_build_tree.py \\
-        --subtask1_model /path/to/layoutlmv2/checkpoint \\
+        --subtask1_model /path/to/layoutxlm/checkpoint \\
         --subtask2_model /path/to/parent_finder/best_model.pt \\
         --subtask3_model /path/to/relation_classifier/best_model.pt \\
         --data_dir /path/to/hrdoc_data \\
@@ -59,7 +59,7 @@ from datasets import load_dataset
 from transformers import BertTokenizerFast, set_seed
 import layoutlmft.data.datasets.hrdoc
 from layoutlmft.data import DataCollatorForKeyValueExtraction
-from layoutlmft.models.layoutlmv2 import LayoutLMv2ForTokenClassification, LayoutLMv2Config
+from layoutlmft.models.layoutxlm import LayoutXLMForTokenClassification, LayoutXLMConfig, LayoutXLMTokenizerFast
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 # 关系分类器
@@ -72,7 +72,11 @@ from layoutlmft.models.relation_classifier import (
 # 导入树结构
 from document_tree import DocumentTree, LABEL_MAP, RELATION_MAP
 
-CONFIG_MAPPING.update({"layoutlmv2": LayoutLMv2Config})
+# Register both layoutxlm and layoutlmv2 (LayoutXLM's config.json has model_type="layoutlmv2")
+CONFIG_MAPPING.update({
+    "layoutxlm": LayoutXLMConfig,
+    "layoutlmv2": LayoutXLMConfig,
+})
 
 logger = logging.getLogger(__name__)
 
@@ -306,7 +310,7 @@ def load_models(
     加载训练好的模型（和训练一致）
 
     Args:
-        subtask1_path: SubTask 1模型路径（LayoutLMv2）
+        subtask1_path: SubTask 1模型路径（LayoutXLM）
         subtask2_path: SubTask 2模型路径（父节点查找）
         subtask3_path: SubTask 3模型路径（关系分类）
         device: 设备
@@ -314,11 +318,22 @@ def load_models(
     Returns:
         subtask1_model, tokenizer, data_collator, feature_extractor, subtask2_model, subtask3_model
     """
-    # ==================== SubTask 1: LayoutLMv2 ====================
+    # ==================== SubTask 1: LayoutXLM ====================
     logger.info(f"加载SubTask 1模型: {subtask1_path}")
-    config = LayoutLMv2Config.from_pretrained(subtask1_path)
-    tokenizer = BertTokenizerFast.from_pretrained(subtask1_path)
-    subtask1_model = LayoutLMv2ForTokenClassification.from_pretrained(
+    config = LayoutXLMConfig.from_pretrained(subtask1_path)
+
+    # 根据模型类型选择 tokenizer
+    is_layoutxlm = os.path.exists(os.path.join(subtask1_path, "sentencepiece.bpe.model")) or \
+                   "layoutxlm" in subtask1_path.lower()
+
+    if is_layoutxlm:
+        tokenizer = LayoutXLMTokenizerFast.from_pretrained(subtask1_path)
+        logger.info("  使用 LayoutXLM tokenizer (XLMRoberta/sentencepiece)")
+    else:
+        tokenizer = BertTokenizerFast.from_pretrained(subtask1_path)
+        logger.info("  使用 LayoutLMv2 tokenizer (BERT)")
+
+    subtask1_model = LayoutXLMForTokenClassification.from_pretrained(
         subtask1_path, config=config
     )
     subtask1_model = subtask1_model.to(device)
@@ -619,7 +634,7 @@ def extract_page_features(
 
     Args:
         raw_sample: 原始样本数据
-        subtask1_model: LayoutLMv2 模型
+        subtask1_model: LayoutXLM 模型
         tokenizer: tokenizer
         data_collator: data collator
         feature_extractor: line feature extractor
@@ -824,7 +839,7 @@ def inference_single_page(
     重要说明：
     - 推理时，输入数据中的 parent_id、relation、class 都是占位符（默认值：-1/none/paragraph）
     - 这些值需要通过三个阶段的模型推理得到：
-      * 一阶段（LayoutLMv2）：预测 class（语义标签）
+      * 一阶段（LayoutXLM）：预测 class（语义标签）
       * 二阶段（ParentFinder）：预测 parent_id（父节点）
       * 三阶段（RelationClassifier）：预测 relation（关系类型）
     - 输出时必须使用推理结果，而不是输入数据的占位符
@@ -832,7 +847,7 @@ def inference_single_page(
     Args:
         raw_sample: 原始样本数据（包含 tokens, bboxes, line_ids, image等）
                    注意：raw_sample中的parent_id/relation/class是占位符，不使用
-        subtask1_model: LayoutLMv2 模型
+        subtask1_model: LayoutXLM 模型
         tokenizer: tokenizer
         data_collator: data collator
         feature_extractor: line feature extractor
@@ -924,7 +939,7 @@ def inference_single_document(
 
     Args:
         page_samples: 该文档的所有页面样本列表（按页码排序）
-        subtask1_model: LayoutLMv2 模型
+        subtask1_model: LayoutXLM 模型
         tokenizer: tokenizer
         data_collator: data collator
         feature_extractor: line feature extractor
@@ -1034,7 +1049,7 @@ def main():
         "--subtask1_model",
         type=str,
         default="/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000",
-        help="SubTask 1模型路径（LayoutLMv2）",
+        help="SubTask 1模型路径（LayoutXLM）",
     )
     parser.add_argument(
         "--subtask2_model",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-从已训练的 LayoutLMv2 模型提取行级特征并缓存到磁盘
+从已训练的 LayoutXLM/LayoutLMv2 模型提取行级特征并缓存到磁盘
 【文档级别版本】按文档聚合所有页面的 line_features,支持跨页父子关系
 """
 
@@ -22,10 +22,14 @@ from transformers import (
     BertTokenizerFast,
     set_seed,
 )
-from layoutlmft.models.layoutlmv2 import LayoutLMv2ForTokenClassification, LayoutLMv2Config
+from layoutlmft.models.layoutxlm import LayoutXLMForTokenClassification, LayoutXLMConfig, LayoutXLMTokenizerFast
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-CONFIG_MAPPING.update({"layoutlmv2": LayoutLMv2Config})
+# Register both layoutxlm and layoutlmv2 (LayoutXLM's config.json has model_type="layoutlmv2")
+CONFIG_MAPPING.update({
+    "layoutxlm": LayoutXLMConfig,
+    "layoutlmv2": LayoutXLMConfig,
+})
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +103,21 @@ def main():
 
     # 加载模型和tokenizer
     logger.info("加载模型...")
-    config = LayoutLMv2Config.from_pretrained(model_path)
-    tokenizer = BertTokenizerFast.from_pretrained(model_path)
-    model = LayoutLMv2ForTokenClassification.from_pretrained(model_path, config=config)
+    config = LayoutXLMConfig.from_pretrained(model_path)
+
+    # 根据模型类型选择 tokenizer
+    # LayoutXLM 使用 sentencepiece, LayoutLMv2 使用 vocab.txt
+    is_layoutxlm = os.path.exists(os.path.join(model_path, "sentencepiece.bpe.model")) or \
+                   "layoutxlm" in model_path.lower()
+
+    if is_layoutxlm:
+        tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_path)
+        logger.info("使用 LayoutXLM tokenizer (XLMRoberta/sentencepiece)")
+    else:
+        tokenizer = BertTokenizerFast.from_pretrained(model_path)
+        logger.info("使用 LayoutLMv2 tokenizer (BERT)")
+
+    model = LayoutXLMForTokenClassification.from_pretrained(model_path, config=config)
     model = model.to(device)
     model.eval()
 
