@@ -15,13 +15,13 @@ paths:
   hrdoc_data_dir: "/data/LLM_group/layoutlmft/data/HRDS"
 
   # Stage 1: Fine-tuned LayoutLMv2 model checkpoint
-  stage1_model_path: "/data/LLM_group/outputs/hrdoc_train/checkpoint-best"
+  stage1_model_path: "/data/LLM_group/layoutlmft/artifact/stage1"
 
   # Feature files directory (Stage 2 input/output)
-  features_dir: "/data/LLM_group/outputs/line_features_doc"
+  features_dir: "/data/LLM_group/layoutlmft/artifact/line_features"
 
   # Model output root directory
-  output_dir: "/data/LLM_group/outputs"
+  output_dir: "/data/LLM_group/layoutlmft/artifact"
 
   # HuggingFace model cache
   hf_cache_dir: "/data/LLM_group/models/huggingface"
