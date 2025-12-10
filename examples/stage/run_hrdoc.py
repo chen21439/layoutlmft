@@ -278,8 +278,9 @@ def main():
         max_length=512,
     )
 
-    # Metrics
-    metric = load_metric("seqeval")
+    # Metrics - use local path if SEQEVAL_PATH is set (for offline mode)
+    seqeval_path = os.environ.get("SEQEVAL_PATH", "seqeval")
+    metric = load_metric(seqeval_path)
 
     def compute_metrics(p):
         predictions, labels = p

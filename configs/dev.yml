@@ -1,0 +1,85 @@
+# Local Development Configuration
+# For local machine development and debugging
+
+# Environment identifier
+env: dev
+description: "Local Development - Windows WSL"
+
+# Data paths
+paths:
+  # HRDoc dataset root directory
+  hrdoc_data_dir: "/mnt/e/models/data/Section/HRDS"
+
+  # Stage 1: Fine-tuned LayoutLMv2 model checkpoint
+  stage1_model_path: "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000"
+
+  # Feature files directory (Stage 2 input/output)
+  features_dir: "/mnt/e/models/train_data/layoutlmft/line_features_doc"
+
+  # Model output root directory
+  output_dir: "/mnt/e/models/train_data/layoutlmft"
+
+  # HuggingFace model cache
+  hf_cache_dir: "/mnt/e/models/HuggingFace/hub"
+
+# Model configuration
+model:
+  # Pretrained model (from HuggingFace)
+  name_or_path: "microsoft/layoutlmv2-base-uncased"
+  # Local downloaded model path (optional, takes priority)
+  local_path: "/mnt/e/models/HuggingFace/hub/models--microsoft--layoutlmv2-base-uncased/snapshots/ae6f4350c668f88ec580046e35c670df6ec616c1"
+
+# Metrics configuration
+metrics:
+  # Local seqeval metric script path (for offline mode)
+  seqeval_path: "/root/.cache/huggingface/modules/datasets_modules/metrics/seqeval/1fde2544ac1f3f7e54c639c73221d3a5e5377d2213b9b0fdb579b96980b84b2e/seqeval.py"
+
+# Stage 1: LayoutLMv2 fine-tuning parameters
+stage1_training:
+  max_steps: 500
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 2
+  learning_rate: 5.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  logging_steps: 20
+  eval_steps: 100
+  save_steps: 100
+  save_total_limit: 3
+  fp16: true
+  dataloader_num_workers: 2
+  seed: 42
+
+# Stage 2: Feature extraction parameters
+feature_extraction:
+  batch_size: 50
+  docs_per_chunk: 100
+  num_samples: -1  # -1 means all, positive number limits samples
+
+# Stage 3: ParentFinder training parameters
+parent_finder:
+  mode: "full"  # simple or full
+  level: "document"  # page or document
+  max_lines_limit: 512
+  batch_size: 1
+  num_epochs: 20
+  learning_rate: 1.0e-4
+  max_chunks: -1  # -1 means all
+
+# Stage 4: Relation classifier training parameters
+relation_classifier:
+  max_steps: 300
+  batch_size: 32
+  learning_rate: 5.0e-4
+  neg_ratio: 1.5
+  max_chunks: -1
+
+# Quick test configuration (overrides above parameters)
+quick_test:
+  enabled: false
+  num_samples: 10
+  docs_per_chunk: 5
+  stage1_max_steps: 50
+  parent_finder_epochs: 1
+  relation_max_steps: 50
