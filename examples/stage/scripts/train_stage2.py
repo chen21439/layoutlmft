@@ -122,6 +122,15 @@ def main():
     os.environ["LAYOUTLMFT_DOCS_PER_CHUNK"] = str(config.feature_extraction.docs_per_chunk)
     os.environ["LAYOUTLMFT_BATCH_SIZE"] = str(config.feature_extraction.batch_size)
 
+    # Detect GPU info
+    import torch
+    cuda_available = torch.cuda.is_available()
+    cuda_device_count = torch.cuda.device_count() if cuda_available else 0
+    cuda_device_name = torch.cuda.get_device_name(0) if cuda_available and cuda_device_count > 0 else "N/A"
+
+    # Get feature extraction config
+    feat_cfg = config.feature_extraction
+
     # Print configuration
     print("=" * 60)
     print("Stage 2: Feature Extraction (Document Level)")
@@ -129,14 +138,21 @@ def main():
     print(f"Environment:    {config.env}")
     print(f"Dataset:        {args.dataset.upper()}")
     print(f"Quick Test:     {config.quick_test.enabled}")
-    print(f"GPU:            {config.gpu.cuda_visible_devices or 'all available'}")
-    print(f"Model Path:     {model_path}")
-    print(f"Output Dir:     {output_dir}")
-    print(f"Data Dir:       {data_dir}")
+    print(f"GPU Config:     CUDA_VISIBLE_DEVICES={config.gpu.cuda_visible_devices or 'all available'}")
+    print(f"GPU Status:")
+    print(f"  - CUDA available:    {cuda_available}")
+    print(f"  - Device count:      {cuda_device_count}")
+    print(f"  - Device name:       {cuda_device_name}")
     print("-" * 60)
-    print(f"Num Samples:    {config.feature_extraction.num_samples} (-1 = all)")
-    print(f"Docs per Chunk: {config.feature_extraction.docs_per_chunk}")
-    print(f"Batch Size:     {config.feature_extraction.batch_size}")
+    print("Paths:")
+    print(f"  Model Path:     {model_path}")
+    print(f"  Output Dir:     {output_dir}")
+    print(f"  Data Dir:       {data_dir}")
+    print("-" * 60)
+    print("Feature Extraction Parameters:")
+    print(f"  Num Samples:    {feat_cfg.num_samples} (-1 = all)")
+    print(f"  Docs per Chunk: {feat_cfg.docs_per_chunk}")
+    print(f"  Batch Size:     {feat_cfg.batch_size}")
     print("=" * 60)
 
     if args.dry_run:

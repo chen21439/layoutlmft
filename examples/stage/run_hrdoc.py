@@ -334,6 +334,19 @@ def main():
                 "accuracy": results["overall_accuracy"],
             }
 
+    # Setup callbacks for early stopping (optional)
+    callbacks = []
+    if training_args.load_best_model_at_end:
+        try:
+            from transformers import EarlyStoppingCallback
+            # Early stopping with patience of 5 evaluations
+            early_stopping_patience = int(os.environ.get("EARLY_STOPPING_PATIENCE", "5"))
+            if early_stopping_patience > 0:
+                callbacks.append(EarlyStoppingCallback(early_stopping_patience=early_stopping_patience))
+                logger.info(f"EarlyStoppingCallback enabled with patience={early_stopping_patience}")
+        except ImportError:
+            logger.warning("EarlyStoppingCallback not available in this transformers version")
+
     # Initialize our Trainer
     trainer = Trainer(
         model=model,
@@ -343,6 +356,7 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+        callbacks=callbacks if callbacks else None,
     )
 
     # Training
@@ -351,6 +365,14 @@ def main():
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         metrics = train_result.metrics
         trainer.save_model()  # Saves the tokenizer too for easy upload
+
+        # 确保 tokenizer.json 被复制到输出目录（LayoutXLM TokenizerFast 需要）
+        src_tokenizer_json = os.path.join(model_args.model_name_or_path, "tokenizer.json")
+        dst_tokenizer_json = os.path.join(training_args.output_dir, "tokenizer.json")
+        if os.path.exists(src_tokenizer_json) and not os.path.exists(dst_tokenizer_json):
+            import shutil
+            shutil.copy(src_tokenizer_json, dst_tokenizer_json)
+            logger.info(f"Copied tokenizer.json to {dst_tokenizer_json}")
 
         max_train_samples = (
             data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)

@@ -128,6 +128,9 @@ def main():
     cuda_device_count = torch.cuda.device_count() if cuda_available else 0
     cuda_device_name = torch.cuda.get_device_name(0) if cuda_available and cuda_device_count > 0 else "N/A"
 
+    # Get parent finder config
+    pf_cfg = config.parent_finder
+
     # Print configuration
     print("=" * 60)
     print("Stage 3: ParentFinder Training")
@@ -140,24 +143,30 @@ def main():
     print(f"  - CUDA available:    {cuda_available}")
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Device name:       {cuda_device_name}")
-    print(f"Features Dir:   {features_dir}")
-    print(f"Output Dir:     {output_dir}")
     print("-" * 60)
-    print(f"Mode:           {config.parent_finder.mode}")
-    print(f"Level:          {config.parent_finder.level}")
-    print(f"Num Epochs:     {config.parent_finder.num_epochs}")
-    print(f"Batch Size:     {config.parent_finder.batch_size}")
-    print(f"Learning Rate:  {config.parent_finder.learning_rate}")
-    print(f"Max Lines:      {config.parent_finder.max_lines_limit}")
-    print(f"Max Chunks:     {config.parent_finder.max_chunks} (-1 = all)")
+    print("Paths:")
+    print(f"  Features Dir:   {features_dir}")
+    print(f"  Output Dir:     {output_dir}")
     print("-" * 60)
+    print("Model Configuration:")
+    print(f"  Mode:           {pf_cfg.mode}")
+    print(f"  Level:          {pf_cfg.level}")
+    print(f"  Max Lines:      {pf_cfg.max_lines_limit}")
+    print("-" * 60)
+    print("Training Parameters:")
+    print(f"  Num Epochs:     {pf_cfg.num_epochs}")
+    print(f"  Batch Size:     {pf_cfg.batch_size}")
+    print(f"  Learning Rate:  {pf_cfg.learning_rate}")
+    print(f"  Max Chunks:     {pf_cfg.max_chunks} (-1 = all)")
+    print("-" * 60)
+    print("Checkpoint Status:")
     if existing_checkpoint:
-        print(f"Existing Model: {existing_checkpoint}")
-        print(f"Note:           Will overwrite if new model is better")
+        print(f"  Existing Model: {existing_checkpoint}")
+        print(f"  Note:           Will overwrite if new model is better")
     elif args.restart:
-        print(f"Mode:           RESTART (training from scratch)")
+        print(f"  Mode:           RESTART (training from scratch)")
     else:
-        print(f"Mode:           NEW (no existing checkpoint found)")
+        print(f"  Mode:           NEW (no existing checkpoint found)")
     print("=" * 60)
 
     if args.dry_run:

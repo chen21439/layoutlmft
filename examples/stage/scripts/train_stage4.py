@@ -133,6 +133,9 @@ def main():
     cuda_device_count = torch.cuda.device_count() if cuda_available else 0
     cuda_device_name = torch.cuda.get_device_name(0) if cuda_available and cuda_device_count > 0 else "N/A"
 
+    # Get relation classifier config
+    rc_cfg = config.relation_classifier
+
     # Print configuration
     print("=" * 60)
     print("Stage 4: Relation Classifier Training")
@@ -145,22 +148,26 @@ def main():
     print(f"  - CUDA available:    {cuda_available}")
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Device name:       {cuda_device_name}")
-    print(f"Features Dir:   {features_dir}")
-    print(f"Output Dir:     {output_dir}")
     print("-" * 60)
-    print(f"Max Steps:      {config.relation_classifier.max_steps}")
-    print(f"Batch Size:     {config.relation_classifier.batch_size}")
-    print(f"Learning Rate:  {config.relation_classifier.learning_rate}")
-    print(f"Neg Ratio:      {config.relation_classifier.neg_ratio}")
-    print(f"Max Chunks:     {config.relation_classifier.max_chunks} (-1 = all)")
+    print("Paths:")
+    print(f"  Features Dir:   {features_dir}")
+    print(f"  Output Dir:     {output_dir}")
     print("-" * 60)
+    print("Training Parameters:")
+    print(f"  Max Steps:      {rc_cfg.max_steps}")
+    print(f"  Batch Size:     {rc_cfg.batch_size}")
+    print(f"  Learning Rate:  {rc_cfg.learning_rate}")
+    print(f"  Neg Ratio:      {rc_cfg.neg_ratio}")
+    print(f"  Max Chunks:     {rc_cfg.max_chunks} (-1 = all)")
+    print("-" * 60)
+    print("Checkpoint Status:")
     if existing_checkpoint:
-        print(f"Existing Model: {existing_checkpoint}")
-        print(f"Note:           Will overwrite if new model is better")
+        print(f"  Existing Model: {existing_checkpoint}")
+        print(f"  Note:           Will overwrite if new model is better")
     elif args.restart:
-        print(f"Mode:           RESTART (training from scratch)")
+        print(f"  Mode:           RESTART (training from scratch)")
     else:
-        print(f"Mode:           NEW (no existing checkpoint found)")
+        print(f"  Mode:           NEW (no existing checkpoint found)")
     print("=" * 60)
 
     if args.dry_run:

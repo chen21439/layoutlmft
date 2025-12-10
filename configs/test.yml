@@ -40,19 +40,41 @@ metrics:
 
 # Stage 1: LayoutXLM fine-tuning parameters
 stage1_training:
+  # Training loop
   max_steps: 30000  # Full training
   per_device_train_batch_size: 3  # Aligned with paper (batch_size=3)
   per_device_eval_batch_size: 8
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 2  # Effective batch = 3 * 2 = 6
+
+  # Optimizer settings
   learning_rate: 2.0e-5  # Reduced from 5e-5 for stability
-  warmup_ratio: 0.1
-  weight_decay: 0.01
+  weight_decay: 0.01  # Standard for transformer models
+  max_grad_norm: 1.0  # Gradient clipping to prevent NaN
+  lr_scheduler_type: "linear"  # or "cosine"
+  warmup_steps: 500  # More direct than warmup_ratio for fixed step training
+  # warmup_ratio: 0.1  # Alternative: use ratio instead of steps
+
+  # Evaluation & checkpointing
+  evaluation_strategy: "steps"  # "steps" or "epoch" or "no"
+  eval_steps: 500  # Evaluate every N steps
+  save_strategy: "steps"
+  save_steps: 500  # Save checkpoint every N steps
+  save_total_limit: 3  # Keep only last N checkpoints
+  load_best_model_at_end: true  # Load best model when training ends
+  metric_for_best_model: "f1"  # Metric to determine best model
+  greater_is_better: true  # Higher f1 is better
+
+  # Logging
   logging_steps: 100
-  eval_steps: 1000
-  save_steps: 1000
-  save_total_limit: 3
+  logging_first_step: true  # Log first step to verify training starts correctly
+
+  # Stability settings
   fp16: false  # Disabled for stability (FP16 may cause NaN on new environment)
   dataloader_num_workers: 4
+  remove_unused_columns: false  # Important when using custom DataCollator
+  label_all_tokens: false  # Only label first token of each word
+
+  # Reproducibility
   seed: 42
 
 # Stage 2: Feature extraction parameters

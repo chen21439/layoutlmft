@@ -182,6 +182,10 @@ def main():
     cuda_current_device = torch.cuda.current_device() if cuda_available else None
     cuda_device_name = torch.cuda.get_device_name(0) if cuda_available and cuda_device_count > 0 else "N/A"
 
+    # Get training config with defaults
+    train_cfg = config.stage1_training
+    effective_batch = train_cfg.per_device_train_batch_size * train_cfg.gradient_accumulation_steps
+
     # Print configuration
     print("=" * 60)
     print("Stage 1: LayoutXLM Fine-tuning")
@@ -199,10 +203,32 @@ def main():
     print(f"Output Dir:   {output_dir}")
     print(f"Data Dir:     {data_dir}")
     print("-" * 60)
-    print(f"Max Steps:    {config.stage1_training.max_steps}")
-    print(f"Batch Size:   {config.stage1_training.per_device_train_batch_size}")
-    print(f"Learning Rate:{config.stage1_training.learning_rate}")
-    print(f"FP16:         {config.stage1_training.fp16}")
+    print("Training Loop:")
+    print(f"  Max Steps:            {train_cfg.max_steps}")
+    print(f"  Batch Size:           {train_cfg.per_device_train_batch_size}")
+    print(f"  Grad Accum Steps:     {train_cfg.gradient_accumulation_steps}")
+    print(f"  Effective Batch:      {effective_batch}")
+    print("-" * 60)
+    print("Optimizer:")
+    print(f"  Learning Rate:        {train_cfg.learning_rate}")
+    print(f"  Weight Decay:         {train_cfg.weight_decay}")
+    print(f"  Max Grad Norm:        {getattr(train_cfg, 'max_grad_norm', 1.0)}")
+    print(f"  LR Scheduler:         {getattr(train_cfg, 'lr_scheduler_type', 'linear')}")
+    print(f"  Warmup Steps:         {getattr(train_cfg, 'warmup_steps', 0)}")
+    print("-" * 60)
+    print("Evaluation & Checkpointing:")
+    print(f"  Eval Strategy:        {getattr(train_cfg, 'evaluation_strategy', 'no')}")
+    print(f"  Eval Steps:           {getattr(train_cfg, 'eval_steps', 'N/A')}")
+    print(f"  Save Strategy:        {getattr(train_cfg, 'save_strategy', 'steps')}")
+    print(f"  Save Steps:           {getattr(train_cfg, 'save_steps', 500)}")
+    print(f"  Save Total Limit:     {train_cfg.save_total_limit}")
+    print(f"  Load Best at End:     {getattr(train_cfg, 'load_best_model_at_end', False)}")
+    print(f"  Best Model Metric:    {getattr(train_cfg, 'metric_for_best_model', 'N/A')}")
+    print("-" * 60)
+    print("Stability & Other:")
+    print(f"  FP16:                 {train_cfg.fp16}")
+    print(f"  Seed:                 {train_cfg.seed}")
+    print(f"  Logging Steps:        {train_cfg.logging_steps}")
     print("-" * 60)
     if resume_checkpoint:
         print(f"Resume From:  {resume_checkpoint}")
@@ -227,19 +253,42 @@ def main():
         "--model_name_or_path", model_path,
         "--output_dir", output_dir,
         "--do_train",
-        "--max_steps", str(config.stage1_training.max_steps),
-        "--per_device_train_batch_size", str(config.stage1_training.per_device_train_batch_size),
-        "--per_device_eval_batch_size", str(config.stage1_training.per_device_eval_batch_size),
-        "--gradient_accumulation_steps", str(config.stage1_training.gradient_accumulation_steps),
-        "--learning_rate", str(config.stage1_training.learning_rate),
-        "--warmup_ratio", str(config.stage1_training.warmup_ratio),
-        "--weight_decay", str(config.stage1_training.weight_decay),
-        "--logging_steps", str(config.stage1_training.logging_steps),
-        "--save_steps", str(config.stage1_training.save_steps),
-        "--save_total_limit", str(config.stage1_training.save_total_limit),
-        "--seed", str(config.stage1_training.seed),
+        # Training loop
+        "--max_steps", str(train_cfg.max_steps),
+        "--per_device_train_batch_size", str(train_cfg.per_device_train_batch_size),
+        "--per_device_eval_batch_size", str(train_cfg.per_device_eval_batch_size),
+        "--gradient_accumulation_steps", str(train_cfg.gradient_accumulation_steps),
+        # Optimizer
+        "--learning_rate", str(train_cfg.learning_rate),
+        "--weight_decay", str(train_cfg.weight_decay),
+        "--max_grad_norm", str(getattr(train_cfg, 'max_grad_norm', 1.0)),
+        "--lr_scheduler_type", str(getattr(train_cfg, 'lr_scheduler_type', 'linear')),
+        "--warmup_steps", str(getattr(train_cfg, 'warmup_steps', 0)),
+        # Evaluation & checkpointing
+        "--evaluation_strategy", str(getattr(train_cfg, 'evaluation_strategy', 'no')),
+        "--save_strategy", str(getattr(train_cfg, 'save_strategy', 'steps')),
+        "--save_steps", str(getattr(train_cfg, 'save_steps', 500)),
+        "--save_total_limit", str(train_cfg.save_total_limit),
+        # Logging
+        "--logging_steps", str(train_cfg.logging_steps),
+        # Other
+        "--seed", str(train_cfg.seed),
         "--report_to", "none",  # Disable TensorBoard to avoid distutils.version issue
     ]
+
+    # Add eval_steps if evaluation is enabled
+    eval_strategy = getattr(train_cfg, 'evaluation_strategy', 'no')
+    if eval_strategy != 'no':
+        cmd_args.extend(["--do_eval"])
+        cmd_args.extend(["--eval_steps", str(getattr(train_cfg, 'eval_steps', 500))])
+        # Load best model at end
+        if getattr(train_cfg, 'load_best_model_at_end', False):
+            cmd_args.extend(["--load_best_model_at_end"])
+            metric = getattr(train_cfg, 'metric_for_best_model', None)
+            if metric:
+                cmd_args.extend(["--metric_for_best_model", metric])
+            if getattr(train_cfg, 'greater_is_better', True):
+                cmd_args.extend(["--greater_is_better", "True"])
 
     # Handle checkpoint resume/restart
     if args.restart:
