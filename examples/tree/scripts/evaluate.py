@@ -38,6 +38,10 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to use: hrds (HRDoc-Simple) or hrdh (HRDoc-Hard)")
 
+    # Experiment directory
+    parser.add_argument("--experiment", type=str, default=None,
+                        help="Experiment directory name (e.g., exp_20251210_201220). If not specified, uses output_dir directly.")
+
     # Override parameters
     parser.add_argument("--max_chunks", type=int, default=None,
                         help="Override max chunks to load (-1 for all)")
@@ -68,12 +72,11 @@ def main():
 
     # Determine paths based on experiment and dataset
     experiment_dir = config.paths.output_dir
-    if hasattr(config, 'experiment') and config.experiment.name:
-        experiment_dir = os.path.join(config.paths.output_dir, config.experiment.name)
+    if args.experiment:
+        experiment_dir = os.path.join(config.paths.output_dir, args.experiment)
 
-    # Features directory (dataset-specific)
-    base_features_dir = config.paths.features_dir
-    features_dir = args.features_dir or f"{base_features_dir}_{args.dataset}"
+    # Features directory (dataset-specific, inside experiment dir)
+    features_dir = args.features_dir or os.path.join(experiment_dir, f"features_{args.dataset}")
 
     # Model paths
     subtask2_model = os.path.join(experiment_dir, f"parent_finder_{args.dataset}", "best_model.pt")
@@ -104,8 +107,8 @@ def main():
     print(f"  - CUDA available:    {cuda_available}")
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Device name:       {cuda_device_name}")
-    if hasattr(config, 'experiment') and config.experiment.name:
-        print(f"Experiment:     {config.experiment.name}")
+    if args.experiment:
+        print(f"Experiment:     {args.experiment}")
     print("-" * 60)
     print(f"Paths:")
     print(f"  Features Dir: {features_dir}")

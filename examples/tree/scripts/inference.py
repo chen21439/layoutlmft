@@ -4,11 +4,11 @@
 Inference Script: Build Document Tree from trained models
 
 Usage:
-    # Auto-detect environment
-    python examples/tree/scripts/inference.py
-
-    # Specify environment
+    # Auto-detect environment (uses current/latest experiment)
     python examples/tree/scripts/inference.py --env test
+
+    # Specify experiment
+    python examples/tree/scripts/inference.py --env test --exp exp_20251210_201220
 
     # Quick test mode
     python examples/tree/scripts/inference.py --env test --quick
@@ -25,7 +25,12 @@ import argparse
 PROJECT_ROOT = os.getcwd()
 sys.path.insert(0, PROJECT_ROOT)
 
+# Add examples/stage to path for util imports
+STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
+sys.path.insert(0, STAGE_ROOT)
+
 from configs.config_loader import get_config, load_config
+from util.experiment_manager import ExperimentManager, get_experiment_manager
 
 
 def parse_args():
@@ -41,6 +46,10 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to use: hrds (HRDoc-Simple) or hrdh (HRDoc-Hard)")
 
+    # Experiment selection (same as training scripts)
+    parser.add_argument("--exp", type=str, default=None,
+                        help="Experiment ID (e.g., exp_20251210_201220). Default: current or latest.")
+
     # Override parameters
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Override max samples to process (-1 for all)")
@@ -50,6 +59,14 @@ def parse_args():
                         help="Dataset split to use")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override output directory")
+
+    # Manual model path overrides
+    parser.add_argument("--subtask1_model", type=str, default=None,
+                        help="Override SubTask 1 (LayoutXLM) model path")
+    parser.add_argument("--subtask2_model", type=str, default=None,
+                        help="Override SubTask 2 (ParentFinder) model path")
+    parser.add_argument("--subtask3_model", type=str, default=None,
+                        help="Override SubTask 3 (RelationClassifier) model path")
 
     # Output options
     parser.add_argument("--save_json", action="store_true", default=True,
@@ -81,21 +98,32 @@ def main():
         config.quick_test.enabled = True
         config = config.get_effective_config()
 
-    # Determine paths based on experiment and dataset
-    experiment_dir = config.paths.output_dir
-    if hasattr(config, 'experiment') and config.experiment.name:
-        experiment_dir = os.path.join(config.paths.output_dir, config.experiment.name)
+    # Get experiment manager and experiment directory
+    exp_manager = get_experiment_manager(config)
+    exp_dir = exp_manager.get_experiment_dir(args.exp)
 
-    # Model paths (dataset-specific)
-    subtask1_model = os.path.join(experiment_dir, f"layoutxlm_{args.dataset}")
-    subtask2_model = os.path.join(experiment_dir, f"parent_finder_{args.dataset}", "best_model.pt")
-    subtask3_model = os.path.join(experiment_dir, "multiclass_relation", "best_model.pt")
+    if not exp_dir:
+        print(f"\nError: No experiment found.")
+        print(f"Please run training first or specify --exp <experiment_id>")
+        print(f"\nAvailable experiments:")
+        for exp_info in exp_manager.list_experiments():
+            current_marker = " (current)" if exp_info.get('is_current') else ""
+            print(f"  - {exp_info['dirname']}: {exp_info.get('name', 'unnamed')}{current_marker}")
+        sys.exit(1)
+
+    exp_name = os.path.basename(exp_dir)
+
+    # Model paths using ExperimentManager (same as training scripts)
+    # Allow manual overrides via command line
+    subtask1_model = args.subtask1_model or exp_manager.get_stage_dir(args.exp, "stage1", args.dataset)
+    subtask2_model = args.subtask2_model or os.path.join(exp_manager.get_stage_dir(args.exp, "stage3", args.dataset), "best_model.pt")
+    subtask3_model = args.subtask3_model or os.path.join(exp_dir, "multiclass_relation", "best_model.pt")
 
     # Data directory
     data_dir = config.paths.hrdoc_data_dir
 
     # Output directory
-    output_dir = args.output_dir or os.path.join(experiment_dir, f"inference_{args.dataset}")
+    output_dir = args.output_dir or os.path.join(exp_dir, f"inference_{args.dataset}")
 
     # Inference level
     level = args.level or config.parent_finder.level
@@ -128,8 +156,7 @@ def main():
     print(f"  - CUDA available:    {cuda_available}")
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Device name:       {cuda_device_name}")
-    if hasattr(config, 'experiment') and config.experiment.name:
-        print(f"Experiment:     {config.experiment.name}")
+    print(f"Experiment:     {exp_name}")
     print("-" * 60)
     print(f"Model Paths:")
     print(f"  SubTask 1:    {subtask1_model}")

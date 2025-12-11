@@ -191,10 +191,11 @@ def main():
                 # 收集当前文档所有页的 line_features
                 all_line_features = []
                 all_line_masks = []
-                all_line_parent_ids = []
+                all_line_parent_ids_raw = []  # 原始的文档全局parent_id (修复前的bug数据)
                 all_line_relations = []
                 all_line_bboxes = []
                 all_line_labels = []
+                all_original_line_ids = []  # 记录每行的原始文档全局line_id，用于parent_id重映射
 
                 # 逐页提取特征
                 for page_info in pages:
@@ -280,11 +281,16 @@ def main():
                         # raw_sample["line_parent_ids"][i] 对应当前页第 i 个line (line_id = min_line_id + i)
                         page_line_parent_ids = raw_sample["line_parent_ids"]
                         page_line_relations = raw_sample["line_relations"]
+
+                        # 记录当前页每行的原始文档全局line_id (用于后续parent_id重映射)
+                        # line_id范围是 [min_line_id, max_line_id]
+                        page_original_line_ids = list(range(min_line_id, min_line_id + num_lines))
                     else:
                         line_bboxes = np.zeros((0, 4), dtype=np.float32)
                         line_labels = []
                         page_line_parent_ids = []
                         page_line_relations = []
+                        page_original_line_ids = []
 
                     # 准备模型输入
                     sample_dict = {
