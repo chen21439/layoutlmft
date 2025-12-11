@@ -308,8 +308,9 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
         logger.error(f"Predictions file not found: {predictions_file}")
         return None
 
-    # Cleanup temp directory
-    shutil.rmtree(temp_output, ignore_errors=True)
+    # Cleanup temp directory (commented for debugging)
+    # shutil.rmtree(temp_output, ignore_errors=True)
+    logger.info(f"Temp output kept at: {temp_output}")
 
     logger.info(f"Inference complete. Predictions saved to: {output_dir}")
     return output_dir

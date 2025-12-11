@@ -30,12 +30,10 @@ def load_config(env: str):
 
 
 def get_data_dir(config, dataset: str) -> str:
-    """Get data directory for dataset (same logic as train_stage1.py)."""
-    # Check if datasets config exists
+    """Get data directory for dataset."""
     if hasattr(config, 'datasets') and hasattr(config.datasets, dataset):
         return getattr(config.datasets, dataset).data_dir
 
-    # Fallback to legacy path
     data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
     if dataset == "hrds":
         return os.path.join(data_dir_base, "HRDS")
@@ -72,7 +70,6 @@ def main():
             gt_folder = os.path.join(data_dir, "test")
 
         if not pred_folder:
-            # Get infer folder name from config
             infer_folder = "test_infer_stage1"
             if hasattr(config, 'evaluation') and hasattr(config.evaluation, 'stage1_infer_folder'):
                 infer_folder = config.evaluation.stage1_infer_folder
