@@ -288,6 +288,7 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
         "--output_dir", temp_output,
         "--do_predict",
         "--per_device_eval_batch_size", "1",
+        "--report_to", "none",  # Disable TensorBoard to avoid distutils.version issue
     ]
 
     # Add max_test_samples if specified

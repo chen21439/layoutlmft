@@ -47,6 +47,30 @@ check_min_version("4.5.0")
 logger = logging.getLogger(__name__)
 
 
+class TokenizerCopyCallback(TrainerCallback):
+    """Callback to copy tokenizer.json to each checkpoint directory.
+
+    LayoutXLMTokenizerFast requires tokenizer.json, but HuggingFace Trainer
+    doesn't save it to checkpoint directories by default.
+    """
+
+    def __init__(self, src_tokenizer_json: str):
+        self.src_tokenizer_json = src_tokenizer_json
+
+    def on_save(self, args, state, control, **kwargs):
+        """Called after checkpoint is saved."""
+        if not os.path.exists(self.src_tokenizer_json):
+            return
+
+        # Find the latest checkpoint directory
+        checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        if os.path.isdir(checkpoint_dir):
+            dst_tokenizer_json = os.path.join(checkpoint_dir, "tokenizer.json")
+            if not os.path.exists(dst_tokenizer_json):
+                shutil.copy(self.src_tokenizer_json, dst_tokenizer_json)
+                logger.info(f"Copied tokenizer.json to {checkpoint_dir}")
+
+
 def main():
     # See all possible arguments in layoutlmft/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -354,8 +378,16 @@ def main():
                 "accuracy": results["overall_accuracy"],
             }
 
-    # Setup callbacks for early stopping (optional)
+    # Setup callbacks
     callbacks = []
+
+    # Add tokenizer copy callback for LayoutXLM (copies tokenizer.json to each checkpoint)
+    src_tokenizer_json = os.path.join(model_args.model_name_or_path, "tokenizer.json")
+    if os.path.exists(src_tokenizer_json):
+        callbacks.append(TokenizerCopyCallback(src_tokenizer_json))
+        logger.info(f"TokenizerCopyCallback enabled, will copy tokenizer.json to checkpoints")
+
+    # Early stopping (optional)
     if training_args.load_best_model_at_end:
         try:
             from transformers import EarlyStoppingCallback
@@ -390,7 +422,6 @@ def main():
         src_tokenizer_json = os.path.join(model_args.model_name_or_path, "tokenizer.json")
         dst_tokenizer_json = os.path.join(training_args.output_dir, "tokenizer.json")
         if os.path.exists(src_tokenizer_json) and not os.path.exists(dst_tokenizer_json):
-            import shutil
             shutil.copy(src_tokenizer_json, dst_tokenizer_json)
             logger.info(f"Copied tokenizer.json to {dst_tokenizer_json}")
 
