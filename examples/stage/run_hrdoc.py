@@ -4,6 +4,7 @@
 import logging
 import os
 import sys
+import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -25,8 +26,9 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers import TrainerCallback
 from layoutlmft.models.layoutxlm import LayoutXLMForTokenClassification, LayoutXLMConfig
-from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
+from layoutlmft.models.layoutxlm import LayoutXLMTokenizer, LayoutXLMTokenizerFast
 import layoutlmft
 from transformers import AutoConfig, AutoTokenizer
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
@@ -165,11 +167,21 @@ def main():
 
     if is_layoutxlm:
         # LayoutXLM uses XLMRoberta tokenizer (sentencepiece)
-        tokenizer = LayoutXLMTokenizerFast.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=model_args.cache_dir,
-        )
-        logger.info("Using LayoutXLM tokenizer (XLMRoberta/sentencepiece)")
+        # Try fast tokenizer first, fall back to slow tokenizer if tokenizer.json not found
+        tokenizer_json_path = os.path.join(model_path, "tokenizer.json")
+        if os.path.exists(tokenizer_json_path):
+            tokenizer = LayoutXLMTokenizerFast.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=model_args.cache_dir,
+            )
+            logger.info("Using LayoutXLM fast tokenizer (XLMRoberta/sentencepiece)")
+        else:
+            # Checkpoint doesn't have tokenizer.json, use slow tokenizer
+            tokenizer = LayoutXLMTokenizer.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=model_args.cache_dir,
+            )
+            logger.info("Using LayoutXLM slow tokenizer (tokenizer.json not found in checkpoint)")
     elif getattr(config, "model_type", None) == "layoutlmv2":
         # LayoutLMv2 uses BERT tokenizer (vocab.txt)
         tokenizer = BertTokenizerFast.from_pretrained(

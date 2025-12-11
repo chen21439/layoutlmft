@@ -267,6 +267,11 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
     # Set environment variables
     env = os.environ.copy()
     env["HRDOC_DATA_DIR"] = data_dir
+    # Set GPU from config (same as training scripts)
+    if config and hasattr(config, 'gpu') and hasattr(config.gpu, 'cuda_visible_devices'):
+        if config.gpu.cuda_visible_devices:
+            env["CUDA_VISIBLE_DEVICES"] = config.gpu.cuda_visible_devices
+            logger.info(f"GPU Config: CUDA_VISIBLE_DEVICES={config.gpu.cuda_visible_devices}")
     # Add project root to PYTHONPATH for subprocess
     pythonpath = env.get("PYTHONPATH", "")
     if pythonpath:
