@@ -338,21 +338,39 @@ def main():
                     num_valid_lines = page_line_mask.sum().item()
                     all_line_features.append(page_line_features[:num_valid_lines])  # [num_valid_lines, H]
                     all_line_masks.append(page_line_mask[:num_valid_lines])  # [num_valid_lines]
-                    all_line_parent_ids.extend(page_line_parent_ids[:num_valid_lines])  # 只取有效行的parent_ids
+                    all_line_parent_ids_raw.extend(page_line_parent_ids[:num_valid_lines])  # 原始的文档全局parent_ids
                     all_line_relations.extend(page_line_relations[:num_valid_lines])    # 只取有效行的relations
                     all_line_bboxes.append(line_bboxes[:num_valid_lines])  # 只取有效行的bboxes
                     all_line_labels.extend(line_labels[:num_valid_lines])  # 只取有效行的labels
+                    all_original_line_ids.extend(page_original_line_ids[:num_valid_lines])  # 记录原始line_id
 
                 # 拼接所有页的特征 - 关键步骤!
                 doc_line_features = torch.cat(all_line_features, dim=0)  # [total_lines, H]
                 doc_line_mask = torch.cat(all_line_masks, dim=0)  # [total_lines]
                 doc_line_bboxes = np.concatenate(all_line_bboxes, axis=0)  # [total_lines, 4]
 
+                # 关键修复: 将原始文档全局parent_id重映射为新的feature文件索引
+                # 建立映射: 原始line_id -> 新索引
+                original_to_new_idx = {orig_id: new_idx for new_idx, orig_id in enumerate(all_original_line_ids)}
+
+                # 重映射parent_ids
+                all_line_parent_ids = []
+                for raw_parent_id in all_line_parent_ids_raw:
+                    if raw_parent_id == -1:
+                        # 根节点保持-1
+                        all_line_parent_ids.append(-1)
+                    elif raw_parent_id in original_to_new_idx:
+                        # parent存在于保留的行中,映射到新索引
+                        all_line_parent_ids.append(original_to_new_idx[raw_parent_id])
+                    else:
+                        # parent被截断掉了,标记为根节点
+                        all_line_parent_ids.append(-1)
+
                 # 保存文档级别的特征
                 document_data = {
                     "line_features": doc_line_features.unsqueeze(0),  # [1, total_lines, H]
                     "line_mask": doc_line_mask.unsqueeze(0),  # [1, total_lines]
-                    "line_parent_ids": all_line_parent_ids,  # 全局 parent_id
+                    "line_parent_ids": all_line_parent_ids,  # 重映射后的parent_id (新索引)
                     "line_relations": all_line_relations,
                     "line_bboxes": doc_line_bboxes,
                     "line_labels": all_line_labels,

@@ -101,9 +101,17 @@ def main():
     if training_args.do_train:
         column_names = datasets["train"].column_names
         features = datasets["train"].features
-    else:
+    elif "validation" in datasets:
         column_names = datasets["validation"].column_names
         features = datasets["validation"].features
+    elif "test" in datasets:
+        column_names = datasets["test"].column_names
+        features = datasets["test"].features
+    else:
+        # Fallback to first available split
+        first_split = list(datasets.keys())[0]
+        column_names = datasets[first_split].column_names
+        features = datasets[first_split].features
     text_column_name = "tokens" if "tokens" in column_names else column_names[0]
     label_column_name = (
         f"{data_args.task_name}_tags" if f"{data_args.task_name}_tags" in column_names else column_names[1]
