@@ -75,6 +75,17 @@ relation_classifier:
   neg_ratio: 1.5
   max_chunks: -1
 
+# Evaluation configuration
+evaluation:
+  # Ground truth folder (test set)
+  gt_folder: "/mnt/e/models/data/Section/HRDS/test"
+  # Prediction output folder (inference results)
+  pred_folder: "/mnt/e/models/train_data/layoutlmft/predictions"
+  # Stage 1 predictions (class only)
+  stage1_pred_folder: "/mnt/e/models/train_data/layoutlmft/predictions/stage1"
+  # End-to-end predictions (class + parent_id + relation)
+  e2e_pred_folder: "/mnt/e/models/train_data/layoutlmft/predictions/e2e"
+
 # Quick test configuration (overrides above parameters)
 quick_test:
   enabled: false

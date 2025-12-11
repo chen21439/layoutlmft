@@ -117,6 +117,18 @@ relation_classifier:
   neg_ratio: 1.5
   max_chunks: -1
 
+# Evaluation configuration
+evaluation:
+  # Ground truth folder (test set) - uses current dataset's test folder
+  # Will be auto-resolved based on experiment's dataset
+  gt_folder: "${datasets.hrds.data_dir}/test"
+  # Prediction output folder (inference results)
+  pred_folder: "${paths.output_dir}/predictions"
+  # Stage 1 predictions (class only)
+  stage1_pred_folder: "${paths.output_dir}/predictions/stage1"
+  # End-to-end predictions (class + parent_id + relation)
+  e2e_pred_folder: "${paths.output_dir}/predictions/e2e"
+
 # Quick test configuration (overrides above parameters)
 quick_test:
   enabled: false  # Set to true for quick testing, false for full training
