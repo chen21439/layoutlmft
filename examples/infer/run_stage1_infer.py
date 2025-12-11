@@ -95,20 +95,21 @@ def get_latest_model(config, exp: str = None):
     return latest_model
 
 
-def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir: str):
+def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir: str, model_path: str):
     """
     Convert test_predictions.txt to HRDoc JSON format.
 
     Key insight:
-    - test_predictions.txt has one line per PAGE (not per document)
-    - Each line contains token-level predictions separated by space
-    - We need to aggregate token predictions to line-level predictions
-    - Then organize by document for HRDoc evaluation
+    - test_predictions.txt has one line per TOKENIZED CHUNK (not per original page)
+    - Due to 512 token limit, one page may be split into multiple chunks (overflow)
+    - We need to re-tokenize to get overflow_to_sample_mapping
+    - Then aggregate predictions back to original pages and lines
 
     Args:
         predictions_file: Path to test_predictions.txt from run_hrdoc.py
         data_dir: Dataset directory (contains test/ folder with GT JSON)
         output_dir: Output directory for predicted JSON files
+        model_path: Model path for loading tokenizer
     """
     logger.info("Converting predictions to JSON format...")
 
@@ -138,11 +139,11 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
         "fnote": "footnote",
     }
 
-    # Read predictions (one line per page, space-separated token labels)
+    # Read predictions (one line per TOKENIZED CHUNK, space-separated token labels)
     with open(predictions_file, 'r') as f:
-        all_page_predictions = [line.strip().split() for line in f.readlines()]
+        all_chunk_predictions = [line.strip().split() for line in f.readlines()]
 
-    logger.info(f"Loaded {len(all_page_predictions)} page predictions")
+    logger.info(f"Loaded {len(all_chunk_predictions)} chunk predictions")
 
     # Load test dataset to get document_name, page_number, line_ids mapping
     from datasets import load_dataset
@@ -153,7 +154,77 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
     datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
     test_dataset = datasets["test"]
 
-    logger.info(f"Test dataset has {len(test_dataset)} pages")
+    logger.info(f"Test dataset has {len(test_dataset)} original pages")
+
+    # Load tokenizer to re-tokenize and get overflow_to_sample_mapping
+    from layoutlmft.models.layoutxlm import LayoutXLMTokenizer, LayoutXLMTokenizerFast
+
+    tokenizer_json_path = os.path.join(model_path, "tokenizer.json")
+    if os.path.exists(tokenizer_json_path):
+        tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_path)
+        logger.info("Using LayoutXLM fast tokenizer")
+    else:
+        tokenizer = LayoutXLMTokenizer.from_pretrained(model_path)
+        logger.info("Using LayoutXLM slow tokenizer")
+
+    # Re-tokenize test dataset to get overflow_to_sample_mapping
+    # This mirrors the tokenization in run_hrdoc.py
+    def tokenize_for_mapping(examples):
+        tokenized_inputs = tokenizer(
+            examples["tokens"],
+            padding="max_length",
+            truncation=True,
+            max_length=512,
+            return_overflowing_tokens=True,
+            is_split_into_words=True,
+        )
+
+        # Build mapping: chunk_idx -> (original_sample_idx, word_ids, line_ids)
+        chunk_info = []
+        for batch_index in range(len(tokenized_inputs["input_ids"])):
+            org_batch_index = tokenized_inputs["overflow_to_sample_mapping"][batch_index]
+            word_ids = tokenized_inputs.word_ids(batch_index=batch_index)
+            chunk_info.append({
+                "org_sample_idx": org_batch_index,
+                "word_ids": word_ids,
+            })
+
+        return {"chunk_info": [chunk_info]}  # Wrap in list for batched processing
+
+    # Process in batches to get all chunk mappings
+    logger.info("Re-tokenizing to get overflow mapping...")
+
+    # Collect all chunk info
+    all_chunk_info = []
+    batch_size = 100
+
+    for start_idx in range(0, len(test_dataset), batch_size):
+        end_idx = min(start_idx + batch_size, len(test_dataset))
+        batch = test_dataset.select(range(start_idx, end_idx))
+
+        # Tokenize batch
+        tokenized = tokenizer(
+            batch["tokens"],
+            padding="max_length",
+            truncation=True,
+            max_length=512,
+            return_overflowing_tokens=True,
+            is_split_into_words=True,
+        )
+
+        # Extract chunk info
+        for batch_index in range(len(tokenized["input_ids"])):
+            org_batch_index = tokenized["overflow_to_sample_mapping"][batch_index]
+            word_ids = tokenized.word_ids(batch_index=batch_index)
+            all_chunk_info.append({
+                "org_sample_idx": start_idx + org_batch_index,  # Global index
+                "word_ids": word_ids,
+            })
+
+    logger.info(f"Total chunks after tokenization: {len(all_chunk_info)}")
+
+    if len(all_chunk_info) != len(all_chunk_predictions):
+        logger.warning(f"Chunk count mismatch! Tokenized: {len(all_chunk_info)}, Predictions: {len(all_chunk_predictions)}")
 
     # Clear and create output directory
     if os.path.exists(output_dir):
@@ -161,47 +232,60 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
     os.makedirs(output_dir)
 
     # Organize predictions by document
-    doc_predictions = {}  # {doc_name: {line_id: predicted_class}}
+    # {doc_name: {line_id: [labels]}} - collect all votes per line
+    doc_line_votes = {}
 
-    for page_idx, example in enumerate(test_dataset):
-        doc_name = example["document_name"]
-        line_ids = example["line_ids"]  # token -> line_id mapping
-
-        if doc_name not in doc_predictions:
-            doc_predictions[doc_name] = {}
-
-        # Get token predictions for this page
-        if page_idx < len(all_page_predictions):
-            token_preds = all_page_predictions[page_idx]
-        else:
-            logger.warning(f"No predictions for page {page_idx}")
+    for chunk_idx, chunk_info in enumerate(all_chunk_info):
+        if chunk_idx >= len(all_chunk_predictions):
+            logger.warning(f"No prediction for chunk {chunk_idx}")
             continue
 
-        # Aggregate token predictions to line predictions
-        # Use majority voting for tokens in the same line
-        line_votes = {}  # {line_id: [labels]}
+        org_sample_idx = chunk_info["org_sample_idx"]
+        word_ids = chunk_info["word_ids"]
 
-        for token_idx, line_id in enumerate(line_ids):
-            if token_idx < len(token_preds):
-                label = token_preds[token_idx]
-                # Remove B-/I- prefix
-                if label.startswith('B-') or label.startswith('I-'):
-                    label = label[2:].lower()
-                elif label == 'O':
-                    label = None  # Will use GT later
-                else:
-                    label = label.lower()
+        # Get original sample info
+        example = test_dataset[org_sample_idx]
+        doc_name = example["document_name"]
+        line_ids = example["line_ids"]  # word -> line_id mapping
 
-                if label:
-                    if line_id not in line_votes:
-                        line_votes[line_id] = []
-                    line_votes[line_id].append(label)
+        if doc_name not in doc_line_votes:
+            doc_line_votes[doc_name] = {}
 
-        # Determine final class per line (majority vote, prefer B- labels)
+        # Get predictions for this chunk
+        chunk_preds = all_chunk_predictions[chunk_idx]
+
+        # Map token predictions to line predictions
+        for token_idx, word_idx in enumerate(word_ids):
+            if word_idx is None:
+                continue  # Skip special tokens
+            if token_idx >= len(chunk_preds):
+                continue
+            if word_idx >= len(line_ids):
+                continue
+
+            line_id = line_ids[word_idx]
+            label = chunk_preds[token_idx]
+
+            # Remove B-/I- prefix
+            if label.startswith('B-') or label.startswith('I-'):
+                label = label[2:].lower()
+            elif label == 'O':
+                continue  # Skip O labels
+            else:
+                label = label.lower()
+
+            if line_id not in doc_line_votes[doc_name]:
+                doc_line_votes[doc_name][line_id] = []
+            doc_line_votes[doc_name][line_id].append(label)
+
+    # Aggregate votes to final predictions
+    doc_predictions = {}  # {doc_name: {line_id: predicted_class}}
+
+    for doc_name, line_votes in doc_line_votes.items():
+        doc_predictions[doc_name] = {}
         for line_id, votes in line_votes.items():
             if votes:
                 vote_counts = Counter(votes)
-                # Get the most common label
                 predicted_class = vote_counts.most_common(1)[0][0]
 
                 # Map to HRDoc evaluation label
@@ -309,7 +393,7 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
     # Convert predictions to JSON format
     predictions_file = os.path.join(temp_output, "test_predictions.txt")
     if os.path.exists(predictions_file):
-        convert_predictions_to_json(predictions_file, data_dir, output_dir)
+        convert_predictions_to_json(predictions_file, data_dir, output_dir, model_path)
     else:
         logger.error(f"Predictions file not found: {predictions_file}")
         return None
