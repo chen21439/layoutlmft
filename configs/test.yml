@@ -118,16 +118,13 @@ relation_classifier:
   max_chunks: -1
 
 # Evaluation configuration
+# Inference results are written to dataset directory (test_infer_stage1 / test_infer_e2e)
+# These folders are auto-created and cleared before each inference run
 evaluation:
-  # Ground truth folder (test set) - uses current dataset's test folder
-  # Will be auto-resolved based on experiment's dataset
-  gt_folder: "${datasets.hrds.data_dir}/test"
-  # Prediction output folder (inference results)
-  pred_folder: "${paths.output_dir}/predictions"
-  # Stage 1 predictions (class only)
-  stage1_pred_folder: "${paths.output_dir}/predictions/stage1"
-  # End-to-end predictions (class + parent_id + relation)
-  e2e_pred_folder: "${paths.output_dir}/predictions/e2e"
+  # Stage 1 inference output: {data_dir}/test_infer_stage1
+  stage1_infer_folder: "test_infer_stage1"
+  # End-to-end inference output: {data_dir}/test_infer_e2e
+  e2e_infer_folder: "test_infer_e2e"
 
 # Quick test configuration (overrides above parameters)
 quick_test:
