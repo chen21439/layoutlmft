@@ -28,6 +28,22 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config_loader import get_config, load_config
 
+# Add examples/stage to path for util imports
+STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
+sys.path.insert(0, STAGE_ROOT)
+
+from util.checkpoint_utils import (
+    get_latest_checkpoint,
+    get_dataset_path,
+    validate_model_path,
+    print_checkpoint_status,
+)
+from util.experiment_manager import (
+    ExperimentManager,
+    get_experiment_manager,
+    ensure_experiment,
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Stage 2: Feature Extraction")
@@ -41,6 +57,14 @@ def parse_args():
     # Dataset selection
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to use: hrds (HRDoc-Simple) or hrdh (HRDoc-Hard)")
+
+    # Experiment management
+    parser.add_argument("--exp", type=str, default=None,
+                        help="Experiment ID (default: current or latest)")
+    parser.add_argument("--new_exp", action="store_true",
+                        help="Create a new experiment")
+    parser.add_argument("--exp_name", type=str, default="",
+                        help="Name for new experiment")
 
     # Override parameters
     parser.add_argument("--num_samples", type=int, default=None,
@@ -84,24 +108,46 @@ def main():
     if args.batch_size is not None:
         config.feature_extraction.batch_size = args.batch_size
 
-    # Determine paths based on dataset
-    # Stage 1 model path (dataset-specific)
-    base_model_path = config.paths.stage1_model_path
-    model_path = args.model_path or f"{base_model_path}_{args.dataset}"
+    # Initialize experiment manager
+    exp_manager, exp_dir = ensure_experiment(
+        config,
+        exp=args.exp,
+        new_exp=args.new_exp,
+        name=args.exp_name or f"Stage2 {args.dataset.upper()}",
+    )
 
-    # Output directory (dataset-specific)
-    base_features_dir = config.paths.features_dir
-    output_dir = args.output_dir or f"{base_features_dir}_{args.dataset}"
+    # Determine paths based on experiment and dataset
+    if args.model_path:
+        # Override takes precedence
+        model_path = args.model_path
+    else:
+        # Get Stage 1 model from experiment
+        stage1_dir = exp_manager.get_stage_dir(args.exp, "stage1", args.dataset)
+        model_path = get_latest_checkpoint(stage1_dir)
+        if not model_path:
+            # Fallback to legacy path
+            base_model_path = config.paths.stage1_model_path
+            legacy_dir = f"{base_model_path}_{args.dataset}"
+            model_path = get_latest_checkpoint(legacy_dir) or legacy_dir
+
+    # Output directory (experiment-based)
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = exp_manager.get_stage_dir(args.exp, "stage2", args.dataset)
 
     # Data directory (dataset-specific)
-    data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
-    if args.dataset == "hrds":
-        data_dir = os.path.join(data_dir_base, "HRDS")
-    else:  # hrdh
-        data_dir = os.path.join(data_dir_base, "HRDH")
+    if hasattr(config, 'datasets') and args.dataset in config.datasets:
+        data_dir = config.datasets[args.dataset].get('data_dir')
+    else:
+        data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
+        if args.dataset == "hrds":
+            data_dir = os.path.join(data_dir_base, "HRDS")
+        else:  # hrdh
+            data_dir = os.path.join(data_dir_base, "HRDH")
 
     # Fallback to config path if dataset-specific path doesn't exist
-    if not os.path.exists(data_dir):
+    if not data_dir or not os.path.exists(data_dir):
         data_dir = config.paths.hrdoc_data_dir
         print(f"Warning: Dataset-specific path not found, using: {data_dir}")
 
@@ -143,6 +189,7 @@ def main():
     print(f"  - CUDA available:    {cuda_available}")
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Device name:       {cuda_device_name}")
+    print(f"Experiment:     {os.path.basename(exp_dir)}")
     print("-" * 60)
     print("Paths:")
     print(f"  Model Path:     {model_path}")
@@ -186,6 +233,9 @@ def main():
     print(" ".join(cmd_args))
     print()
 
+    # Mark stage as started
+    exp_manager.mark_stage_started(args.exp, "stage2", args.dataset)
+
     # Execute extraction
     import subprocess
 
@@ -200,14 +250,20 @@ def main():
     result = subprocess.run(cmd_args, cwd=PROJECT_ROOT, env=env)
 
     if result.returncode == 0:
+        # Mark stage as completed
+        exp_manager.mark_stage_completed(args.exp, "stage2", args.dataset)
+
         print("\n" + "=" * 60)
         print("Feature extraction completed successfully!")
         print(f"Features saved to: {output_dir}")
         print("=" * 60)
         print("\nNext steps:")
         print("  1. Check extracted features in output directory")
-        print(f"  2. Train ParentFinder: python scripts/train_stage3.py --env {args.env or 'test'} --dataset {args.dataset}")
+        print(f"  2. Train ParentFinder: python examples/stage/scripts/train_stage3.py --env {args.env or 'test'} --dataset {args.dataset}")
     else:
+        # Mark stage as failed
+        exp_manager.mark_stage_failed(args.exp, "stage2", args.dataset)
+
         print("\n" + "=" * 60)
         print("Feature extraction failed!")
         print("=" * 60)

@@ -28,16 +28,18 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config_loader import get_config, load_config
 
+# Add examples/stage to path for util imports
+STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
+sys.path.insert(0, STAGE_ROOT)
 
-def get_latest_checkpoint(output_dir):
-    """Get the latest checkpoint (best_model.pt) from output_dir"""
-    if not os.path.isdir(output_dir):
-        return None
-
-    best_model = os.path.join(output_dir, "best_model.pt")
-    if os.path.exists(best_model):
-        return best_model
-    return None
+from util.checkpoint_utils import (
+    get_best_model,
+)
+from util.experiment_manager import (
+    ExperimentManager,
+    get_experiment_manager,
+    ensure_experiment,
+)
 
 
 def parse_args():
@@ -52,6 +54,14 @@ def parse_args():
     # Dataset selection
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to use: hrds (HRDoc-Simple) or hrdh (HRDoc-Hard)")
+
+    # Experiment management
+    parser.add_argument("--exp", type=str, default=None,
+                        help="Experiment ID (default: current or latest)")
+    parser.add_argument("--new_exp", action="store_true",
+                        help="Create a new experiment")
+    parser.add_argument("--exp_name", type=str, default="",
+                        help="Name for new experiment")
 
     # Checkpoint control
     parser.add_argument("--restart", action="store_true",
@@ -103,19 +113,35 @@ def main():
     if args.max_chunks is not None:
         config.relation_classifier.max_chunks = args.max_chunks
 
-    # Determine paths based on dataset
-    # Features directory (dataset-specific, from Stage 2)
-    base_features_dir = config.paths.features_dir
-    features_dir = args.features_dir or f"{base_features_dir}_{args.dataset}"
+    # Initialize experiment manager
+    exp_manager, exp_dir = ensure_experiment(
+        config,
+        exp=args.exp,
+        new_exp=args.new_exp,
+        name=args.exp_name or f"Stage4 {args.dataset.upper()}",
+    )
 
-    # Output directory (dataset-specific)
-    base_output_dir = os.path.join(config.paths.output_dir, "relation_classifier")
-    output_dir = args.output_dir or f"{base_output_dir}_{args.dataset}"
+    # Determine paths based on experiment and dataset
+    # Features directory (from Stage 2)
+    if args.features_dir:
+        features_dir = args.features_dir
+    else:
+        features_dir = exp_manager.get_stage_dir(args.exp, "stage2", args.dataset)
+        if not os.path.exists(features_dir):
+            # Fallback to legacy path
+            base_features_dir = config.paths.features_dir
+            features_dir = f"{base_features_dir}_{args.dataset}"
+
+    # Output directory (experiment-based)
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        output_dir = exp_manager.get_stage_dir(args.exp, "stage4", args.dataset)
 
     # Check for existing checkpoint
     existing_checkpoint = None
     if not args.restart:
-        existing_checkpoint = get_latest_checkpoint(output_dir)
+        existing_checkpoint = get_best_model(output_dir)
 
     # Set GPU (CUDA_VISIBLE_DEVICES must be set before importing torch)
     if config.gpu.cuda_visible_devices:
@@ -148,6 +174,7 @@ def main():
     print(f"  - CUDA available:    {cuda_available}")
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Device name:       {cuda_device_name}")
+    print(f"Experiment:     {os.path.basename(exp_dir)}")
     print("-" * 60)
     print("Paths:")
     print(f"  Features Dir:   {features_dir}")
@@ -201,6 +228,9 @@ def main():
     print(f"  MAX_CHUNKS={config.relation_classifier.max_chunks}")
     print()
 
+    # Mark stage as started
+    exp_manager.mark_stage_started(args.exp, "stage4", args.dataset)
+
     # Execute training
     import subprocess
 
@@ -215,6 +245,13 @@ def main():
     result = subprocess.run(cmd_args, cwd=PROJECT_ROOT, env=env)
 
     if result.returncode == 0:
+        # Get best model path and update experiment state
+        best_model = get_best_model(output_dir)
+        exp_manager.mark_stage_completed(
+            args.exp, "stage4", args.dataset,
+            best_checkpoint=os.path.basename(best_model) if best_model else None,
+        )
+
         print("\n" + "=" * 60)
         print("Relation classifier training completed successfully!")
         print(f"Model saved to: {output_dir}")
@@ -222,8 +259,11 @@ def main():
         print(f"\nAll stages for {args.dataset.upper()} completed!")
         print("\nTo train on another dataset:")
         other_dataset = 'hrdh' if args.dataset == 'hrds' else 'hrds'
-        print(f"  python scripts/train_stage1.py --env {args.env or 'test'} --dataset {other_dataset}")
+        print(f"  python examples/stage/scripts/train_stage1.py --env {args.env or 'test'} --dataset {other_dataset}")
     else:
+        # Mark stage as failed
+        exp_manager.mark_stage_failed(args.exp, "stage4", args.dataset)
+
         print("\n" + "=" * 60)
         print("Relation classifier training failed!")
         print("=" * 60)

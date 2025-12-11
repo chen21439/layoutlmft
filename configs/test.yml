@@ -9,18 +9,34 @@ description: "Cloud Server Test - Ubuntu"
 gpu:
   cuda_visible_devices: "2"  # Specify which GPU to use (e.g., "0", "0,1", "2")
 
+# Experiment configuration
+experiment:
+  # auto_create: If true, automatically create new experiment when none exists
+  auto_create: true
+  # default_name: Default name for auto-created experiments
+  default_name: "LayoutXLM Training"
+
+# Dataset definitions
+datasets:
+  hrds:
+    data_dir: "/data/LLM_group/layoutlmft/data/HRDS"
+    description: "HRDoc-Simple dataset"
+  hrdh:
+    data_dir: "/data/LLM_group/layoutlmft/data/HRDH"
+    description: "HRDoc-Hard dataset"
+
 # Data paths
 paths:
-  # HRDoc dataset root directory
+  # HRDoc dataset root directory (legacy, for backward compatibility)
   hrdoc_data_dir: "/data/LLM_group/layoutlmft/data/HRDS"
 
-  # Stage 1: Fine-tuned LayoutLMv2 model checkpoint
+  # Stage 1: Fine-tuned LayoutLMv2 model checkpoint (legacy)
   stage1_model_path: "/data/LLM_group/layoutlmft/artifact/stage1"
 
-  # Feature files directory (Stage 2 input/output)
+  # Feature files directory (Stage 2 input/output) (legacy)
   features_dir: "/data/LLM_group/layoutlmft/artifact/line_features"
 
-  # Model output root directory
+  # Model output root directory (experiment root)
   output_dir: "/data/LLM_group/layoutlmft/artifact"
 
   # HuggingFace model cache

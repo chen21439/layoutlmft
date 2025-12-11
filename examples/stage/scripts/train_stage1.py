@@ -31,7 +31,6 @@ Usage:
 import os
 import sys
 import argparse
-import glob
 
 # Add project root to path (use current working directory)
 PROJECT_ROOT = os.getcwd()
@@ -39,25 +38,21 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from configs.config_loader import get_config, load_config, print_config
 
+# Add examples/stage to path for util imports
+STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
+sys.path.insert(0, STAGE_ROOT)
 
-def get_latest_checkpoint(output_dir):
-    """Get the latest checkpoint directory from output_dir"""
-    if not os.path.isdir(output_dir):
-        return None
-
-    checkpoint_dirs = glob.glob(os.path.join(output_dir, "checkpoint-*"))
-    if not checkpoint_dirs:
-        return None
-
-    # Sort by step number
-    def get_step(path):
-        try:
-            return int(os.path.basename(path).split("-")[1])
-        except:
-            return 0
-
-    checkpoint_dirs.sort(key=get_step, reverse=True)
-    return checkpoint_dirs[0]
+from util.checkpoint_utils import (
+    get_latest_checkpoint,
+    get_dataset_path,
+    validate_model_path,
+    print_checkpoint_status,
+)
+from util.experiment_manager import (
+    ExperimentManager,
+    get_experiment_manager,
+    ensure_experiment,
+)
 
 
 def parse_args():
@@ -80,6 +75,14 @@ def parse_args():
                         help="Initialize model weights from another dataset's checkpoint (e.g., --init_from hrds)")
     parser.add_argument("--resume_from", type=str, default=None,
                         help="Resume from specific checkpoint path")
+
+    # Experiment management
+    parser.add_argument("--exp", type=str, default=None,
+                        help="Experiment ID (default: current or latest)")
+    parser.add_argument("--new_exp", action="store_true",
+                        help="Create a new experiment")
+    parser.add_argument("--exp_name", type=str, default="",
+                        help="Name for new experiment")
 
     # Override parameters
     parser.add_argument("--max_steps", type=int, default=None,
@@ -120,16 +123,27 @@ def main():
     if args.batch_size is not None:
         config.stage1_training.per_device_train_batch_size = args.batch_size
 
-    # Determine output directory based on dataset
-    # Each dataset has its own output directory for independent checkpoint management
-    base_output_dir = args.output_dir or config.paths.stage1_model_path
-    output_dir = f"{base_output_dir}_{args.dataset}"
+    # Initialize experiment manager
+    exp_manager, exp_dir = ensure_experiment(
+        config,
+        exp=args.exp,
+        new_exp=args.new_exp,
+        name=args.exp_name or f"Stage1 {args.dataset.upper()}",
+    )
+
+    # Determine output directory based on experiment and dataset
+    if args.output_dir:
+        # Override takes precedence
+        output_dir = args.output_dir
+    else:
+        # Use experiment-based path
+        output_dir = exp_manager.get_stage_dir(args.exp, "stage1", args.dataset)
 
     # Determine model path (for initial weights)
     if args.init_from:
-        # Load weights from another dataset's checkpoint
-        init_output_dir = f"{base_output_dir}_{args.init_from}"
-        init_checkpoint = get_latest_checkpoint(init_output_dir)
+        # Load weights from another dataset's checkpoint within same experiment
+        init_stage_dir = exp_manager.get_stage_dir(args.exp, "stage1", args.init_from)
+        init_checkpoint = get_latest_checkpoint(init_stage_dir)
         if init_checkpoint:
             model_path = init_checkpoint
             print(f"Initializing weights from {args.init_from} checkpoint: {init_checkpoint}")
@@ -140,14 +154,19 @@ def main():
         model_path = args.model_path or config.model.local_path or config.model.name_or_path
 
     # Determine data directory based on dataset
-    data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
-    if args.dataset == "hrds":
-        data_dir = os.path.join(data_dir_base, "HRDS")
-    else:  # hrdh
-        data_dir = os.path.join(data_dir_base, "HRDH")
+    # First check if datasets config exists
+    if hasattr(config, 'datasets') and args.dataset in config.datasets:
+        data_dir = config.datasets[args.dataset].get('data_dir')
+    else:
+        # Fallback to legacy path structure
+        data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
+        if args.dataset == "hrds":
+            data_dir = os.path.join(data_dir_base, "HRDS")
+        else:  # hrdh
+            data_dir = os.path.join(data_dir_base, "HRDH")
 
     # Fallback to config path if dataset-specific path doesn't exist
-    if not os.path.exists(data_dir):
+    if not data_dir or not os.path.exists(data_dir):
         data_dir = config.paths.hrdoc_data_dir
         print(f"Warning: Dataset-specific path not found, using: {data_dir}")
 
@@ -199,6 +218,7 @@ def main():
     print(f"  - Device count:      {cuda_device_count}")
     print(f"  - Current device:    {cuda_current_device}")
     print(f"  - Device name:       {cuda_device_name}")
+    print(f"Experiment:   {os.path.basename(exp_dir)}")
     print(f"Model Path:   {model_path}")
     print(f"Output Dir:   {output_dir}")
     print(f"Data Dir:     {data_dir}")
@@ -304,6 +324,9 @@ def main():
     print(" ".join(cmd_args))
     print()
 
+    # Mark stage as started in experiment
+    exp_manager.mark_stage_started(args.exp, "stage1", args.dataset)
+
     # Execute training
     import subprocess
 
@@ -318,16 +341,28 @@ def main():
     result = subprocess.run(cmd_args, cwd=PROJECT_ROOT, env=env)
 
     if result.returncode == 0:
+        # Find best checkpoint and update experiment state
+        best_checkpoint = get_latest_checkpoint(output_dir)
+        exp_manager.mark_stage_completed(
+            args.exp, "stage1", args.dataset,
+            best_checkpoint=os.path.basename(best_checkpoint) if best_checkpoint else None,
+        )
+
         print("\n" + "=" * 60)
         print("Training completed successfully!")
         print(f"Model saved to: {output_dir}")
+        if best_checkpoint:
+            print(f"Best checkpoint: {best_checkpoint}")
         print("=" * 60)
         print("\nNext steps:")
         print(f"  1. Check training logs: tensorboard --logdir {output_dir}")
-        print(f"  2. Extract features: python scripts/train_stage2.py --dataset {args.dataset}")
+        print(f"  2. Extract features: python examples/stage/scripts/train_stage2.py --env {args.env or 'test'} --dataset {args.dataset}")
         print(f"\nTo continue training on another dataset:")
-        print(f"  python scripts/train_stage1.py --env {args.env or 'test'} --dataset {'hrdh' if args.dataset == 'hrds' else 'hrds'} --init_from {args.dataset}")
+        print(f"  python examples/stage/scripts/train_stage1.py --env {args.env or 'test'} --dataset {'hrdh' if args.dataset == 'hrds' else 'hrds'} --init_from {args.dataset}")
     else:
+        # Mark stage as failed
+        exp_manager.mark_stage_failed(args.exp, "stage1", args.dataset)
+
         print("\n" + "=" * 60)
         print("Training failed!")
         print("=" * 60)
