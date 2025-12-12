@@ -309,12 +309,20 @@ def main():
                     bbox_inputs.append([0, 0, 0, 0])
                 # We set the label for the first token of each word.
                 elif word_idx != previous_word_idx:
-                    label_ids.append(label_to_id[label[word_idx]])
+                    # label can be either a string (from raw data) or an int (from ClassLabel feature)
+                    lbl = label[word_idx]
+                    label_id = lbl if isinstance(lbl, int) else label_to_id[lbl]
+                    label_ids.append(label_id)
                     bbox_inputs.append(bbox[word_idx])
                 # For the other tokens in a word, we set the label to either the current label or -100, depending on
                 # the label_all_tokens flag.
                 else:
-                    label_ids.append(label_to_id[label[word_idx]] if data_args.label_all_tokens else -100)
+                    if data_args.label_all_tokens:
+                        lbl = label[word_idx]
+                        label_id = lbl if isinstance(lbl, int) else label_to_id[lbl]
+                        label_ids.append(label_id)
+                    else:
+                        label_ids.append(-100)
                     bbox_inputs.append(bbox[word_idx])
                 previous_word_idx = word_idx
             labels.append(label_ids)

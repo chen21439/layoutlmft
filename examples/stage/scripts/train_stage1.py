@@ -154,16 +154,7 @@ def main():
         model_path = args.model_path or config.model.local_path or config.model.name_or_path
 
     # Determine data directory based on dataset
-    # First check if datasets config exists
-    if hasattr(config, 'datasets') and args.dataset in config.datasets:
-        data_dir = config.datasets[args.dataset].get('data_dir')
-    else:
-        # Fallback to legacy path structure
-        data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
-        if args.dataset == "hrds":
-            data_dir = os.path.join(data_dir_base, "HRDS")
-        else:  # hrdh
-            data_dir = os.path.join(data_dir_base, "HRDH")
+    data_dir = config.dataset.get_data_dir(args.dataset)
 
     # Fallback to config path if dataset-specific path doesn't exist
     if not data_dir or not os.path.exists(data_dir):
@@ -189,6 +180,14 @@ def main():
 
     # Set data directory
     os.environ["HRDOC_DATA_DIR"] = data_dir
+
+    # Set covmatch directory for train/dev split
+    covmatch_dir = config.dataset.get_covmatch_dir(args.dataset)
+    if os.path.exists(covmatch_dir):
+        os.environ["HRDOC_SPLIT_DIR"] = covmatch_dir
+        print(f"Using covmatch split: {covmatch_dir}")
+    else:
+        print(f"Warning: Covmatch dir not found: {covmatch_dir}, using original train/test split")
 
     # Set seqeval metric path (for offline mode)
     if config.metrics.seqeval_path:

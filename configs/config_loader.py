@@ -120,10 +120,33 @@ class QuickTestConfig:
 
 
 @dataclass
-class DatasetConfig:
+class SingleDatasetConfig:
     """Single dataset configuration"""
     data_dir: str = ""
     description: str = ""
+
+
+@dataclass
+class DatasetConfig:
+    """Dataset configuration with default selection"""
+    name: str = "hrds"  # Which dataset to use by default
+    covmatch: str = "doc_covmatch_dev10_seed42"  # Which covmatch split to use
+    hrds: SingleDatasetConfig = field(default_factory=SingleDatasetConfig)
+    hrdh: SingleDatasetConfig = field(default_factory=SingleDatasetConfig)
+
+    def get_current(self) -> SingleDatasetConfig:
+        """Get the currently selected dataset config"""
+        return getattr(self, self.name)
+
+    def get_data_dir(self, dataset_name: str = None) -> str:
+        """Get data_dir for specified or current dataset"""
+        name = dataset_name or self.name
+        return getattr(self, name).data_dir
+
+    def get_covmatch_dir(self, dataset_name: str = None) -> str:
+        """Get covmatch split directory path for specified or current dataset"""
+        data_dir = self.get_data_dir(dataset_name)
+        return os.path.join(data_dir, "covmatch", self.covmatch)
 
 
 @dataclass
@@ -132,7 +155,7 @@ class Config:
     env: str = "dev"
     description: str = ""
     gpu: GpuConfig = field(default_factory=GpuConfig)
-    datasets: Dict[str, DatasetConfig] = field(default_factory=dict)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
@@ -212,21 +235,27 @@ def load_config(env: str = "dev") -> Config:
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f)
 
-    # Parse datasets config
-    datasets_data = data.get('datasets', {})
-    datasets = {}
-    for name, ds_config in datasets_data.items():
-        datasets[name] = DatasetConfig(
-            data_dir=ds_config.get('data_dir', ''),
-            description=ds_config.get('description', ''),
-        )
+    # Parse dataset config
+    dataset_data = data.get('dataset', {})
+    dataset_config = DatasetConfig(
+        name=dataset_data.get('name', 'hrds'),
+        covmatch=dataset_data.get('covmatch', 'doc_covmatch_dev10_seed42'),
+        hrds=SingleDatasetConfig(
+            data_dir=dataset_data.get('hrds', {}).get('data_dir', ''),
+            description=dataset_data.get('hrds', {}).get('description', ''),
+        ),
+        hrdh=SingleDatasetConfig(
+            data_dir=dataset_data.get('hrdh', {}).get('data_dir', ''),
+            description=dataset_data.get('hrdh', {}).get('description', ''),
+        ),
+    )
 
     # Build Config object
     config = Config(
         env=data.get('env', env),
         description=data.get('description', ''),
         gpu=_dict_to_dataclass(data.get('gpu'), GpuConfig),
-        datasets=datasets,
+        dataset=dataset_config,
         paths=_dict_to_dataclass(data.get('paths'), PathsConfig),
         model=_dict_to_dataclass(data.get('model'), ModelConfig),
         metrics=_dict_to_dataclass(data.get('metrics'), MetricsConfig),

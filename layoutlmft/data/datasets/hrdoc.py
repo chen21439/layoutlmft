@@ -108,41 +108,83 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             else:
                 data_dir = "/root/code/layoutlmft/data/hrdoc_funsd_format"
 
+        # 检查是否使用 covmatch split（从环境变量读取）
+        split_dir = os.getenv("HRDOC_SPLIT_DIR", None)
+        train_doc_ids = None
+        dev_doc_ids = None
+
+        if split_dir and os.path.exists(split_dir):
+            # 读取 split 文件
+            train_ids_file = os.path.join(split_dir, "train_doc_ids.json")
+            dev_ids_file = os.path.join(split_dir, "dev_doc_ids.json")
+
+            if os.path.exists(train_ids_file):
+                with open(train_ids_file, 'r') as f:
+                    train_doc_ids = set(json.load(f))
+                logger.info(f"Using covmatch split: {len(train_doc_ids)} train docs from {train_ids_file}")
+
+            if os.path.exists(dev_ids_file):
+                with open(dev_ids_file, 'r') as f:
+                    dev_doc_ids = set(json.load(f))
+                logger.info(f"Using covmatch split: {len(dev_doc_ids)} dev docs from {dev_ids_file}")
+
         splits = []
-        # 训练集
         train_path = os.path.join(data_dir, "train")
-        if os.path.exists(train_path):
-            splits.append(
-                datasets.SplitGenerator(
-                    name=datasets.Split.TRAIN,
-                    gen_kwargs={"filepath": train_path}
-                )
-            )
 
-        # 验证集（如果存在）
-        val_path = os.path.join(data_dir, "val")
-        if os.path.exists(val_path):
-            splits.append(
-                datasets.SplitGenerator(
-                    name=datasets.Split.VALIDATION,
-                    gen_kwargs={"filepath": val_path}
+        if train_doc_ids is not None and dev_doc_ids is not None:
+            # 使用 covmatch split：从 train 目录中按 doc_ids 分割
+            if os.path.exists(train_path):
+                # Train split
+                splits.append(
+                    datasets.SplitGenerator(
+                        name=datasets.Split.TRAIN,
+                        gen_kwargs={"filepath": train_path, "doc_ids": train_doc_ids}
+                    )
                 )
-            )
+                # Validation split (from dev_doc_ids)
+                splits.append(
+                    datasets.SplitGenerator(
+                        name=datasets.Split.VALIDATION,
+                        gen_kwargs={"filepath": train_path, "doc_ids": dev_doc_ids}
+                    )
+                )
+        else:
+            # 传统模式：使用目录结构
+            # 训练集
+            if os.path.exists(train_path):
+                splits.append(
+                    datasets.SplitGenerator(
+                        name=datasets.Split.TRAIN,
+                        gen_kwargs={"filepath": train_path, "doc_ids": None}
+                    )
+                )
 
-        # 测试集（如果存在）
+            # 验证集（如果存在）
+            val_path = os.path.join(data_dir, "val")
+            if os.path.exists(val_path):
+                splits.append(
+                    datasets.SplitGenerator(
+                        name=datasets.Split.VALIDATION,
+                        gen_kwargs={"filepath": val_path, "doc_ids": None}
+                    )
+                )
+
+        # 测试集（始终使用原始 test 目录）
         test_path = os.path.join(data_dir, "test")
         if os.path.exists(test_path):
             splits.append(
                 datasets.SplitGenerator(
                     name=datasets.Split.TEST,
-                    gen_kwargs={"filepath": test_path}
+                    gen_kwargs={"filepath": test_path, "doc_ids": None}
                 )
             )
 
         return splits
 
-    def _generate_examples(self, filepath):
+    def _generate_examples(self, filepath, doc_ids=None):
         logger.info("⏳ Generating examples from = %s", filepath)
+        if doc_ids is not None:
+            logger.info(f"  Filtering to {len(doc_ids)} docs")
 
         # 支持两种目录结构：
         # 1. FUNSD格式: train/annotations/, train/images/
@@ -160,12 +202,16 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             if not file.endswith('.json'):
                 continue
 
+            # 提取文档名称（不含扩展名）
+            document_name = os.path.splitext(file)[0]
+
+            # 如果指定了 doc_ids，只处理在列表中的文档
+            if doc_ids is not None and document_name not in doc_ids:
+                continue
+
             file_path = os.path.join(ann_dir, file)
             with open(file_path, "r", encoding="utf8") as f:
                 data = json.load(f)
-
-            # 提取文档名称（不含扩展名）
-            document_name = os.path.splitext(file)[0]
 
             # 支持两种数据格式：
             # 1. FUNSD格式：{"form": [...]} - 每个文件是一页

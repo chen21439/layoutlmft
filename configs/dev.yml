@@ -5,8 +5,13 @@
 env: dev
 description: "Local Development - Windows WSL"
 
-# Dataset definitions
-datasets:
+# Dataset configuration
+dataset:
+  # Which dataset to use: hrds or hrdh
+  name: "hrds"
+  # Covmatch split directory name
+  covmatch: "doc_covmatch_dev10_seed42"
+  # Dataset paths
   hrds:
     data_dir: "/mnt/e/models/data/Section/HRDS"
     description: "HRDoc-Simple dataset"
