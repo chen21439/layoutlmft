@@ -74,6 +74,27 @@ class DataTrainingArguments:
         metadata={"help": "Whether to return all the entity levels during evaluation or just the overall ones."},
     )
 
+    # Balanced loss settings for long-tailed classification
+    loss_type: str = field(
+        default="ce",
+        metadata={
+            "help": "Loss function type: 'ce' (CrossEntropy), 'class_balanced', 'logit_adjusted', "
+                    "'focal', 'balanced_focal'"
+        },
+    )
+    loss_beta: float = field(
+        default=0.9999,
+        metadata={"help": "Beta for Class-Balanced Loss (effective number). Higher = more balanced."},
+    )
+    loss_gamma: float = field(
+        default=2.0,
+        metadata={"help": "Gamma for Focal Loss. Higher = more focus on hard examples."},
+    )
+    loss_tau: float = field(
+        default=1.0,
+        metadata={"help": "Tau for Logit Adjustment. 1.0 = Balanced Softmax."},
+    )
+
 
 @dataclass
 class XFUNDataTrainingArguments(DataTrainingArguments):

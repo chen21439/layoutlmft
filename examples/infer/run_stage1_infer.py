@@ -255,28 +255,45 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
         chunk_preds = all_chunk_predictions[chunk_idx]
 
         # Map token predictions to line predictions
-        for token_idx, word_idx in enumerate(word_ids):
+        # IMPORTANT: chunk_preds only contains predictions for positions where label != -100
+        # These are the first subword of each word (where word_idx changes)
+        # We need to track pred_idx separately from token_idx
+        pred_idx = 0
+        prev_word_idx = None
+
+        for word_idx in word_ids:
             if word_idx is None:
-                continue  # Skip special tokens
-            if token_idx >= len(chunk_preds):
-                continue
-            if word_idx >= len(line_ids):
-                continue
+                continue  # Skip special tokens (CLS, SEP, PAD)
 
-            line_id = line_ids[word_idx]
-            label = chunk_preds[token_idx]
+            # Only the first occurrence of each word has a prediction
+            if word_idx != prev_word_idx:
+                if pred_idx >= len(chunk_preds):
+                    break  # No more predictions for this chunk
+                if word_idx >= len(line_ids):
+                    pred_idx += 1
+                    prev_word_idx = word_idx
+                    continue
 
-            # Remove B-/I- prefix
-            if label.startswith('B-') or label.startswith('I-'):
-                label = label[2:].lower()
-            elif label == 'O':
-                continue  # Skip O labels
-            else:
-                label = label.lower()
+                line_id = line_ids[word_idx]
+                label = chunk_preds[pred_idx]
 
-            if line_id not in doc_line_votes[doc_name]:
-                doc_line_votes[doc_name][line_id] = []
-            doc_line_votes[doc_name][line_id].append(label)
+                # Remove B-/I- prefix
+                if label.startswith('B-') or label.startswith('I-'):
+                    label = label[2:].lower()
+                elif label == 'O':
+                    pred_idx += 1
+                    prev_word_idx = word_idx
+                    continue  # Skip O labels
+                else:
+                    label = label.lower()
+
+                if line_id not in doc_line_votes[doc_name]:
+                    doc_line_votes[doc_name][line_id] = []
+                doc_line_votes[doc_name][line_id].append(label)
+
+                pred_idx += 1
+
+            prev_word_idx = word_idx
 
     # Aggregate votes to final predictions
     doc_predictions = {}  # {doc_name: {line_id: predicted_class}}

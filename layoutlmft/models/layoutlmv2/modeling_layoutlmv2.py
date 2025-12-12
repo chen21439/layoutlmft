@@ -830,7 +830,19 @@ class LayoutLMv2ForTokenClassification(LayoutLMv2PreTrainedModel):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
+        # Custom loss function (set via set_loss_function method)
+        self.custom_loss_fn = None
+
         self.init_weights()
+
+    def set_loss_function(self, loss_fn):
+        """Set a custom loss function for training.
+
+        Args:
+            loss_fn: A loss module that takes (logits, labels) and returns scalar loss.
+                     Should handle ignore_index=-100 internally.
+        """
+        self.custom_loss_fn = loss_fn
 
     def get_input_embeddings(self):
         return self.layoutlmv2.embeddings.word_embeddings
@@ -872,15 +884,20 @@ class LayoutLMv2ForTokenClassification(LayoutLMv2PreTrainedModel):
 
         loss = None
         if labels is not None:
-            loss_fct = CrossEntropyLoss()
-
-            if attention_mask is not None:
-                active_loss = attention_mask.view(-1) == 1
-                active_logits = logits.view(-1, self.num_labels)[active_loss]
-                active_labels = labels.view(-1)[active_loss]
-                loss = loss_fct(active_logits, active_labels)
+            # Use custom loss function if set, otherwise use standard CrossEntropyLoss
+            if self.custom_loss_fn is not None:
+                # Custom loss handles ignore_index internally
+                loss = self.custom_loss_fn(logits, labels)
             else:
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+                loss_fct = CrossEntropyLoss()
+
+                if attention_mask is not None:
+                    active_loss = attention_mask.view(-1) == 1
+                    active_logits = logits.view(-1, self.num_labels)[active_loss]
+                    active_labels = labels.view(-1)[active_loss]
+                    loss = loss_fct(active_logits, active_labels)
+                else:
+                    loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[2:]

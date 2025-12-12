@@ -164,6 +164,11 @@ def main():
         label_to_id = {l: i for i, l in enumerate(label_list)}
     num_labels = len(label_list)
 
+    # Build id2label and label2id for model config
+    # These are needed for proper label names in config.json (not LABEL_0, LABEL_1, ...)
+    id2label = {i: label for i, label in enumerate(label_list)}
+    label2id = {label: i for i, label in enumerate(label_list)}
+
     # Load pretrained model and tokenizer
     #
     # Distributed training:
@@ -172,6 +177,8 @@ def main():
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
+        id2label=id2label,
+        label2id=label2id,
         finetuning_task=data_args.task_name,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
@@ -229,6 +236,35 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+
+    # Setup balanced loss for long-tailed classification
+    if data_args.loss_type != "ce":
+        from layoutlmft.models.balanced_loss import get_balanced_loss
+
+        # Compute class counts from training data
+        logger.info("Computing class counts for balanced loss...")
+        class_counts = [0] * num_labels
+        for sample in datasets["train"]:
+            for label_id in sample[label_column_name]:
+                if 0 <= label_id < num_labels:
+                    class_counts[label_id] += 1
+
+        logger.info(f"Class counts (first 10): {class_counts[:10]}")
+        logger.info(f"Total samples: {sum(class_counts)}")
+
+        # Create balanced loss
+        balanced_loss = get_balanced_loss(
+            loss_type=data_args.loss_type,
+            class_counts=class_counts,
+            beta=data_args.loss_beta,
+            gamma=data_args.loss_gamma,
+            tau=data_args.loss_tau,
+            ignore_index=-100,
+        )
+        model.set_loss_function(balanced_loss)
+        logger.info(f"Using {data_args.loss_type} loss function")
+    else:
+        logger.info("Using standard CrossEntropyLoss")
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -345,38 +381,120 @@ def main():
     seqeval_path = os.environ.get("SEQEVAL_PATH", "seqeval")
     metric = load_metric(seqeval_path)
 
+    # Key class pairs to monitor for confusion
+    MONITOR_PAIRS = [
+        ("MAIL", "AFFILI"),
+        ("FIG", "TAB"),
+        ("FIGCAP", "TABCAP"),
+        ("SEC1", "PARA"),
+        ("SEC2", "PARA"),
+        ("SEC3", "PARA"),
+    ]
+
     def compute_metrics(p):
+        from collections import Counter, defaultdict
+
         predictions, labels = p
         predictions = np.argmax(predictions, axis=2)
 
         # Remove ignored index (special tokens)
         true_predictions = [
-            [label_list[p] for (p, l) in zip(prediction, label) if l != -100]
+            [label_list[pr] for (pr, l) in zip(prediction, label) if l != -100]
             for prediction, label in zip(predictions, labels)
         ]
         true_labels = [
-            [label_list[l] for (p, l) in zip(prediction, label) if l != -100]
+            [label_list[l] for (pr, l) in zip(prediction, label) if l != -100]
             for prediction, label in zip(predictions, labels)
         ]
 
         results = metric.compute(predictions=true_predictions, references=true_labels)
-        if data_args.return_entity_level_metrics:
-            # Unpack nested dictionaries
-            final_results = {}
-            for key, value in results.items():
-                if isinstance(value, dict):
-                    for n, v in value.items():
-                        final_results[f"{key}_{n}"] = v
+
+        # === Per-class diagnosis ===
+        # Count per-class: TP, FP, FN, predicted count, gt count
+        class_stats = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0, "pred_count": 0, "gt_count": 0})
+        confusion = defaultdict(Counter)  # {gt_class: {pred_class: count}}
+
+        for preds, gts in zip(true_predictions, true_labels):
+            for pred, gt in zip(preds, gts):
+                # Extract base class (remove B-/I- prefix)
+                pred_base = pred[2:] if pred.startswith(('B-', 'I-')) else pred
+                gt_base = gt[2:] if gt.startswith(('B-', 'I-')) else gt
+
+                class_stats[gt_base]["gt_count"] += 1
+                class_stats[pred_base]["pred_count"] += 1
+                confusion[gt_base][pred_base] += 1
+
+                if pred_base == gt_base:
+                    class_stats[gt_base]["tp"] += 1
                 else:
-                    final_results[key] = value
-            return final_results
-        else:
-            return {
-                "precision": results["overall_precision"],
-                "recall": results["overall_recall"],
-                "f1": results["overall_f1"],
-                "accuracy": results["overall_accuracy"],
-            }
+                    class_stats[gt_base]["fn"] += 1
+                    class_stats[pred_base]["fp"] += 1
+
+        # Build final results
+        final_results = {
+            "precision": results["overall_precision"],
+            "recall": results["overall_recall"],
+            "f1": results["overall_f1"],
+            "accuracy": results["overall_accuracy"],
+        }
+
+        # Add per-class metrics for key classes
+        key_classes = ["MAIL", "AFFILI", "FIG", "TAB", "FIGCAP", "TABCAP",
+                       "SEC1", "SEC2", "SEC3", "SECX", "PARA", "FSTLINE", "TITLE"]
+
+        for cls in key_classes:
+            stats = class_stats.get(cls, {"tp": 0, "fp": 0, "fn": 0, "pred_count": 0, "gt_count": 0})
+            tp, fp, fn = stats["tp"], stats["fp"], stats["fn"]
+
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            final_results[f"{cls}_precision"] = precision
+            final_results[f"{cls}_recall"] = recall
+            final_results[f"{cls}_f1"] = f1
+            final_results[f"{cls}_gt_count"] = stats["gt_count"]
+            final_results[f"{cls}_pred_count"] = stats["pred_count"]
+
+        # Add confusion metrics for monitored pairs
+        for cls_a, cls_b in MONITOR_PAIRS:
+            # How often cls_a is predicted as cls_b
+            a_to_b = confusion[cls_a].get(cls_b, 0)
+            a_total = class_stats[cls_a]["gt_count"]
+            a_to_b_rate = a_to_b / a_total if a_total > 0 else 0.0
+            final_results[f"confusion_{cls_a}_to_{cls_b}"] = a_to_b_rate
+
+            # How often cls_b is predicted as cls_a (reverse)
+            b_to_a = confusion[cls_b].get(cls_a, 0)
+            b_total = class_stats[cls_b]["gt_count"]
+            b_to_a_rate = b_to_a / b_total if b_total > 0 else 0.0
+            final_results[f"confusion_{cls_b}_to_{cls_a}"] = b_to_a_rate
+
+        # Log per-class summary (for visibility in training logs)
+        logger.info("=" * 60)
+        logger.info("Per-Class Metrics (key classes):")
+        logger.info(f"{'Class':<10} {'Prec':>7} {'Recall':>7} {'F1':>7} {'GT':>6} {'Pred':>6}")
+        logger.info("-" * 50)
+        for cls in key_classes:
+            if class_stats[cls]["gt_count"] > 0 or class_stats[cls]["pred_count"] > 0:
+                stats = class_stats[cls]
+                tp, fp, fn = stats["tp"], stats["fp"], stats["fn"]
+                prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+                logger.info(f"{cls:<10} {prec:>7.1%} {rec:>7.1%} {f1:>7.1%} {stats['gt_count']:>6} {stats['pred_count']:>6}")
+
+        logger.info("-" * 50)
+        logger.info("Confusion pairs (GT -> Pred rate):")
+        for cls_a, cls_b in MONITOR_PAIRS:
+            a_to_b = confusion[cls_a].get(cls_b, 0)
+            a_total = class_stats[cls_a]["gt_count"]
+            rate = a_to_b / a_total if a_total > 0 else 0.0
+            if a_total > 0:
+                logger.info(f"  {cls_a} -> {cls_b}: {rate:.1%} ({a_to_b}/{a_total})")
+        logger.info("=" * 60)
+
+        return final_results
 
     # Setup callbacks
     callbacks = []
@@ -399,13 +517,14 @@ def main():
         except ImportError:
             logger.warning("EarlyStoppingCallback not available in this transformers version")
 
-    # Initialize our Trainer
+    # Initialize our Trainer with label_list for per-class monitoring
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
+        label_list=label_list,  # Pass label_list for per-class loss monitoring
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks if callbacks else None,
