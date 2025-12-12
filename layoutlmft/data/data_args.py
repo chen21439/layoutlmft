@@ -76,10 +76,10 @@ class DataTrainingArguments:
 
     # Balanced loss settings for long-tailed classification
     loss_type: str = field(
-        default="ce",
+        default="class_balanced",  # Default to Class-Balanced Loss (Effective Number) for long-tailed classification
         metadata={
             "help": "Loss function type: 'ce' (CrossEntropy), 'class_balanced', 'logit_adjusted', "
-                    "'focal', 'balanced_focal'"
+                    "'focal', 'balanced_focal'. Recommended: 'class_balanced' or 'logit_adjusted'"
         },
     )
     loss_beta: float = field(
@@ -93,6 +93,16 @@ class DataTrainingArguments:
     loss_tau: float = field(
         default=1.0,
         metadata={"help": "Tau for Logit Adjustment. 1.0 = Balanced Softmax."},
+    )
+
+    # Class-balanced batch sampling (Step 3)
+    use_class_balanced_sampler: bool = field(
+        default=True,  # Default enabled for long-tailed classification
+        metadata={"help": "Use class-balanced batch sampler to ensure coverage of rare classes."},
+    )
+    rare_class_ratio: float = field(
+        default=0.3,
+        metadata={"help": "Fraction of each batch that should contain rare class samples."},
     )
 
 

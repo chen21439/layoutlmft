@@ -24,30 +24,90 @@ _DESCRIPTION = """\
 HRDoc dataset for hierarchical document structure analysis
 """
 
-# HRDS 数据集的类别（18个类别，支持多级章节）
+# HRDoc 论文定义的 14 个类别（与评估脚本 class2id_dict 一致）
+# 参考：HRDoc/utils/classify_eval.py
 _LABELS = [
     "O",
-    "B-AFFILI", "I-AFFILI",
-    "B-ALG", "I-ALG",
-    "B-AUTHOR", "I-AUTHOR",
-    "B-EQU", "I-EQU",                # equation
-    "B-FIG", "I-FIG",                # figure
-    "B-FIGCAP", "I-FIGCAP",          # figure caption
-    "B-FNOTE", "I-FNOTE",            # footnote
-    "B-FOOT", "I-FOOT",              # footer
-    "B-FSTLINE", "I-FSTLINE",        # first line
-    "B-MAIL", "I-MAIL",
-    "B-OPARA", "I-OPARA",            # other paragraph
-    "B-PARA", "I-PARA",              # paragraph
-    "B-SEC1", "I-SEC1",              # section level 1
-    "B-SEC2", "I-SEC2",              # section level 2
-    "B-SEC3", "I-SEC3",              # section level 3
-    "B-SEC4", "I-SEC4",              # section level 4
-    "B-SECX", "I-SECX",              # section level X (additional)
-    "B-TAB", "I-TAB",                # table
-    "B-TABCAP", "I-TABCAP",          # table caption
-    "B-TITLE", "I-TITLE",
+    "B-TITLE", "I-TITLE",           # 0: title
+    "B-AUTHOR", "I-AUTHOR",         # 1: author
+    "B-MAIL", "I-MAIL",             # 2: mail
+    "B-AFFILI", "I-AFFILI",         # 3: affili
+    "B-SECTION", "I-SECTION",       # 4: section (合并 sec1/sec2/sec3/sec4/secx)
+    "B-FSTLINE", "I-FSTLINE",       # 5: fstline
+    "B-PARALINE", "I-PARALINE",     # 6: paraline (合并 para/opara)
+    "B-TABLE", "I-TABLE",           # 7: table (原 tab)
+    "B-FIGURE", "I-FIGURE",         # 8: figure (原 fig)
+    "B-CAPTION", "I-CAPTION",       # 9: caption (合并 figcap/tabcap)
+    "B-EQUATION", "I-EQUATION",     # 10: equation (合并 equ/alg)
+    "B-FOOTER", "I-FOOTER",         # 11: footer (原 foot)
+    "B-HEADER", "I-HEADER",         # 12: header
+    "B-FOOTNOTE", "I-FOOTNOTE",     # 13: footnote (原 fnote)
 ]
+
+# 细粒度标签到论文14类的映射（来自 HRDoc/utils/utils.py 的 class2class）
+_CLASS2CLASS = {
+    "title": "TITLE",
+    "author": "AUTHOR",
+    "mail": "MAIL",
+    "affili": "AFFILI",
+    "sec1": "SECTION",
+    "sec2": "SECTION",
+    "sec3": "SECTION",
+    "sec4": "SECTION",
+    "secx": "SECTION",
+    "fstline": "FSTLINE",
+    "para": "PARALINE",
+    "opara": "PARALINE",
+    "tab": "TABLE",
+    "fig": "FIGURE",
+    "tabcap": "CAPTION",
+    "figcap": "CAPTION",
+    "equ": "EQUATION",
+    "alg": "EQUATION",
+    "foot": "FOOTER",
+    "header": "HEADER",
+    "fnote": "FOOTNOTE",
+    # 旧版标签（已经是论文类别，直接映射为大写）
+    "section": "SECTION",
+    "paraline": "PARALINE",
+    "table": "TABLE",
+    "figure": "FIGURE",
+    "caption": "CAPTION",
+    "equation": "EQUATION",
+    "footer": "FOOTER",
+    "footnote": "FOOTNOTE",
+}
+
+
+def trans_class(all_pg_lines, unit):
+    """
+    将细粒度标签转换为论文14类。
+
+    特殊处理 opara：根据 parent_id 递归查找父节点的类别。
+    参考：HRDoc/utils/utils.py 的 trans_class
+    """
+    class_name = unit.get("class", unit.get("label", "O")).lower()
+
+    if class_name != "opara":
+        return _CLASS2CLASS.get(class_name, class_name.upper())
+    else:
+        # opara 需要根据 parent_id 查找父节点的类别
+        parent_id = unit.get("parent_id", -1)
+        if parent_id < 0 or parent_id >= len(all_pg_lines):
+            return "PARALINE"  # 找不到父节点，默认为 PARALINE
+
+        parent_unit = all_pg_lines[parent_id]
+        parent_class = parent_unit.get("class", parent_unit.get("label", "O")).lower()
+
+        # 递归查找，直到找到非 opara 的父节点
+        while parent_class == "opara":
+            parent_id = parent_unit.get("parent_id", -1)
+            if parent_id < 0 or parent_id >= len(all_pg_lines):
+                return "PARALINE"
+            parent_unit = all_pg_lines[parent_id]
+            parent_class = parent_unit.get("class", parent_unit.get("label", "O")).lower()
+
+        return _CLASS2CLASS.get(parent_class, parent_class.upper())
 
 
 class HRDocConfig(datasets.BuilderConfig):
@@ -233,7 +293,11 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
                 for line_idx, item in enumerate(form_data):
                     # 支持两种字段名：label（FUNSD）或 class（HRDS）
-                    label = item.get("label") or item.get("class", "O")
+                    raw_label = item.get("label") or item.get("class", "O")
+
+                    # 使用 trans_class 将细粒度标签转换为论文14类
+                    # 传入 form_data 用于 opara 的 parent_id 查找
+                    label = trans_class(form_data, item)
 
                     # 支持两种格式：
                     # FUNSD格式：{"words": [{...}]}
@@ -250,8 +314,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     if len(words) == 0:
                         continue
 
-                    # 统一标签格式为大写
-                    label = label.upper()
+                    # label 已经是大写了（由 trans_class 返回）
 
                     # 获取层级关系信息
                     # HRDS格式有 line_id 字段，FUNSD格式用 id 字段

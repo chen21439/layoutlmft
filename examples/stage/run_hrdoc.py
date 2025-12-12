@@ -517,6 +517,29 @@ def main():
         except ImportError:
             logger.warning("EarlyStoppingCallback not available in this transformers version")
 
+    # Setup class-balanced batch sampler (Step 3) if enabled
+    train_sampler = None
+    if training_args.do_train and data_args.use_class_balanced_sampler:
+        from layoutlmft.data.class_balanced_sampler import (
+            ClassBalancedBatchSampler,
+            get_hrdoc_rare_classes,
+        )
+
+        # Get rare class IDs
+        rare_classes = get_hrdoc_rare_classes(label_list)
+        logger.info(f"Class-balanced sampling enabled with {len(rare_classes)} rare classes")
+
+        # Create sampler
+        train_sampler = ClassBalancedBatchSampler(
+            dataset=train_dataset,
+            label_column="labels",
+            batch_size=training_args.per_device_train_batch_size,
+            rare_classes=rare_classes,
+            rare_ratio=data_args.rare_class_ratio,
+            drop_last=training_args.dataloader_drop_last,
+            seed=training_args.seed,
+        )
+
     # Initialize our Trainer with label_list for per-class monitoring
     trainer = Trainer(
         model=model,
@@ -525,6 +548,7 @@ def main():
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         label_list=label_list,  # Pass label_list for per-class loss monitoring
+        train_sampler=train_sampler,  # Custom sampler for class-balanced batching
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks if callbacks else None,

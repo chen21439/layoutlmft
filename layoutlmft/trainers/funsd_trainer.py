@@ -4,6 +4,7 @@ import logging
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Sampler
 
 from transformers import Trainer
 
@@ -12,13 +13,36 @@ logger = logging.getLogger(__name__)
 
 
 class FunsdTrainer(Trainer):
-    """Extended Trainer with per-class loss monitoring."""
+    """Extended Trainer with per-class loss monitoring and custom sampler support."""
 
-    def __init__(self, *args, label_list: Optional[List[str]] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        label_list: Optional[List[str]] = None,
+        train_sampler: Optional[Sampler] = None,
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.label_list = label_list
         self.per_class_loss_accumulator = defaultdict(lambda: {"sum": 0.0, "count": 0})
         self._eval_step_count = 0
+        self._custom_train_sampler = train_sampler
+
+    def get_train_dataloader(self) -> DataLoader:
+        """Override to use custom sampler if provided."""
+        if self._custom_train_sampler is not None:
+            # Use custom sampler (e.g., ClassBalancedBatchSampler)
+            logger.info("Using custom train sampler for class-balanced batching")
+            return DataLoader(
+                self.train_dataset,
+                batch_sampler=self._custom_train_sampler,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+        else:
+            # Use default behavior
+            return super().get_train_dataloader()
 
     def _prepare_inputs(self, inputs: Dict[str, Union[torch.Tensor, Any]]) -> Dict[str, Union[torch.Tensor, Any]]:
         """

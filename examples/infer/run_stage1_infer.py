@@ -113,29 +113,40 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
     """
     logger.info("Converting predictions to JSON format...")
 
-    # Label mapping: our labels -> HRDoc evaluate labels
-    # Based on HRDoc/utils/utils.py class2class
+    # Label mapping: model output labels -> HRDoc evaluate labels
+    # 现在模型直接输出论文14类（大写），只需转为小写即可
+    # 参考：HRDoc/utils/classify_eval.py 的 class2id_dict
     label_mapping = {
+        # 模型输出的14类（大写）-> 评估脚本期望的格式（小写）
         "title": "title",
         "author": "author",
         "mail": "mail",
         "affili": "affili",
+        "section": "section",
+        "fstline": "fstline",
+        "paraline": "paraline",
+        "table": "table",
+        "figure": "figure",
+        "caption": "caption",
+        "equation": "equation",
+        "footer": "footer",
+        "header": "header",
+        "footnote": "footnote",
+        # 兼容旧版细粒度标签（以防使用旧模型）
         "sec1": "section",
         "sec2": "section",
         "sec3": "section",
         "sec4": "section",
         "secx": "section",
-        "fstline": "fstline",
         "para": "paraline",
-        "opara": "paraline",  # other paragraph -> paraline
+        "opara": "paraline",
         "tab": "table",
         "fig": "figure",
         "tabcap": "caption",
         "figcap": "caption",
         "equ": "equation",
-        "alg": "equation",  # algorithm -> equation
+        "alg": "equation",
         "foot": "footer",
-        "header": "header",
         "fnote": "footnote",
     }
 
