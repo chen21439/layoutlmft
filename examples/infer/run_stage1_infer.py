@@ -3,6 +3,9 @@
 """
 Stage 1 Inference - Predict semantic class using trained LayoutXLM model
 
+使用论文定义的 14 个语义类别（Line 级别标注，不使用 BIO）。
+标签定义统一使用 layoutlmft.data.labels 模块。
+
 Calls run_hrdoc.py with --do_predict, then converts output to HRDoc JSON format.
 
 Usage:
@@ -26,6 +29,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "configs"))
 sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
 sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage" / "util"))
+
+# Import unified label definitions
+from layoutlmft.data.labels import LABEL_LIST, id2label
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -113,42 +119,9 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
     """
     logger.info("Converting predictions to JSON format...")
 
-    # Label mapping: model output labels -> HRDoc evaluate labels
-    # 现在模型直接输出论文14类（大写），只需转为小写即可
-    # 参考：HRDoc/utils/classify_eval.py 的 class2id_dict
-    label_mapping = {
-        # 模型输出的14类（大写）-> 评估脚本期望的格式（小写）
-        "title": "title",
-        "author": "author",
-        "mail": "mail",
-        "affili": "affili",
-        "section": "section",
-        "fstline": "fstline",
-        "paraline": "paraline",
-        "table": "table",
-        "figure": "figure",
-        "caption": "caption",
-        "equation": "equation",
-        "footer": "footer",
-        "header": "header",
-        "footnote": "footnote",
-        # 兼容旧版细粒度标签（以防使用旧模型）
-        "sec1": "section",
-        "sec2": "section",
-        "sec3": "section",
-        "sec4": "section",
-        "secx": "section",
-        "para": "paraline",
-        "opara": "paraline",
-        "tab": "table",
-        "fig": "figure",
-        "tabcap": "caption",
-        "figcap": "caption",
-        "equ": "equation",
-        "alg": "equation",
-        "foot": "footer",
-        "fnote": "footnote",
-    }
+    # 使用统一的标签列表（从 labels.py 导入）
+    # 模型直接输出论文14类（小写），无需额外映射
+    logger.info(f"Using {len(LABEL_LIST)} labels: {LABEL_LIST}")
 
     # Read predictions (one line per TOKENIZED CHUNK, space-separated token labels)
     with open(predictions_file, 'r') as f:
@@ -288,15 +261,16 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
                 line_id = line_ids[word_idx]
                 label = chunk_preds[pred_idx]
 
-                # Remove B-/I- prefix
-                if label.startswith('B-') or label.startswith('I-'):
-                    label = label[2:].lower()
-                elif label == 'O':
+                # 直接使用标签（无 BIO 前缀，论文14类）
+                # 确保是小写格式
+                label = label.lower()
+
+                # 验证是否是有效标签
+                if label not in LABEL_LIST:
+                    logger.warning(f"Unknown label: {label}, skipping")
                     pred_idx += 1
                     prev_word_idx = word_idx
-                    continue  # Skip O labels
-                else:
-                    label = label.lower()
+                    continue
 
                 if line_id not in doc_line_votes[doc_name]:
                     doc_line_votes[doc_name][line_id] = []
@@ -315,11 +289,7 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
             if votes:
                 vote_counts = Counter(votes)
                 predicted_class = vote_counts.most_common(1)[0][0]
-
-                # Map to HRDoc evaluation label
-                if predicted_class in label_mapping:
-                    predicted_class = label_mapping[predicted_class]
-
+                # 直接使用标签（已经是论文14类）
                 doc_predictions[doc_name][line_id] = predicted_class
 
     # Write output JSON files
@@ -345,9 +315,10 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
                 pred_item["class"] = doc_predictions[doc_name][line_id]
             else:
                 # Keep original class if no prediction (shouldn't happen normally)
-                gt_class = item.get("class", "para").lower()
-                if gt_class in label_mapping:
-                    pred_item["class"] = label_mapping[gt_class]
+                # 使用 trans_class 转换原始标签
+                from layoutlmft.data.labels import trans_class
+                gt_class = item.get("class", "paraline")
+                pred_item["class"] = trans_class(gt_class)
 
             pred_data.append(pred_item)
 

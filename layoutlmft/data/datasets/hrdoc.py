@@ -1,4 +1,10 @@
 # coding=utf-8
+"""
+HRDoc Dataset for LayoutLMv2/LayoutXLM
+
+使用论文定义的 14 个语义类别（Line 级别标注，不使用 BIO）。
+标签定义统一使用 layoutlmft.data.labels 模块。
+"""
 
 import json
 import os
@@ -6,6 +12,14 @@ import os
 import datasets
 
 from layoutlmft.data.utils import load_image, normalize_bbox
+from layoutlmft.data.labels import (
+    LABEL_LIST,
+    NUM_LABELS,
+    ID2LABEL,
+    LABEL2ID,
+    trans_class,
+    get_label_list,
+)
 
 
 logger = datasets.logging.get_logger(__name__)
@@ -21,93 +35,12 @@ _CITATION = """\
 """
 
 _DESCRIPTION = """\
-HRDoc dataset for hierarchical document structure analysis
+HRDoc dataset for hierarchical document structure analysis.
+Uses 14 semantic classes at line level (no BIO tagging).
 """
 
-# HRDoc 论文定义的 14 个类别（与评估脚本 class2id_dict 一致）
-# 参考：HRDoc/utils/classify_eval.py
-_LABELS = [
-    "O",
-    "B-TITLE", "I-TITLE",           # 0: title
-    "B-AUTHOR", "I-AUTHOR",         # 1: author
-    "B-MAIL", "I-MAIL",             # 2: mail
-    "B-AFFILI", "I-AFFILI",         # 3: affili
-    "B-SECTION", "I-SECTION",       # 4: section (合并 sec1/sec2/sec3/sec4/secx)
-    "B-FSTLINE", "I-FSTLINE",       # 5: fstline
-    "B-PARALINE", "I-PARALINE",     # 6: paraline (合并 para/opara)
-    "B-TABLE", "I-TABLE",           # 7: table (原 tab)
-    "B-FIGURE", "I-FIGURE",         # 8: figure (原 fig)
-    "B-CAPTION", "I-CAPTION",       # 9: caption (合并 figcap/tabcap)
-    "B-EQUATION", "I-EQUATION",     # 10: equation (合并 equ/alg)
-    "B-FOOTER", "I-FOOTER",         # 11: footer (原 foot)
-    "B-HEADER", "I-HEADER",         # 12: header
-    "B-FOOTNOTE", "I-FOOTNOTE",     # 13: footnote (原 fnote)
-]
-
-# 细粒度标签到论文14类的映射（来自 HRDoc/utils/utils.py 的 class2class）
-_CLASS2CLASS = {
-    "title": "TITLE",
-    "author": "AUTHOR",
-    "mail": "MAIL",
-    "affili": "AFFILI",
-    "sec1": "SECTION",
-    "sec2": "SECTION",
-    "sec3": "SECTION",
-    "sec4": "SECTION",
-    "secx": "SECTION",
-    "fstline": "FSTLINE",
-    "para": "PARALINE",
-    "opara": "PARALINE",
-    "tab": "TABLE",
-    "fig": "FIGURE",
-    "tabcap": "CAPTION",
-    "figcap": "CAPTION",
-    "equ": "EQUATION",
-    "alg": "EQUATION",
-    "foot": "FOOTER",
-    "header": "HEADER",
-    "fnote": "FOOTNOTE",
-    # 旧版标签（已经是论文类别，直接映射为大写）
-    "section": "SECTION",
-    "paraline": "PARALINE",
-    "table": "TABLE",
-    "figure": "FIGURE",
-    "caption": "CAPTION",
-    "equation": "EQUATION",
-    "footer": "FOOTER",
-    "footnote": "FOOTNOTE",
-}
-
-
-def trans_class(all_pg_lines, unit):
-    """
-    将细粒度标签转换为论文14类。
-
-    特殊处理 opara：根据 parent_id 递归查找父节点的类别。
-    参考：HRDoc/utils/utils.py 的 trans_class
-    """
-    class_name = unit.get("class", unit.get("label", "O")).lower()
-
-    if class_name != "opara":
-        return _CLASS2CLASS.get(class_name, class_name.upper())
-    else:
-        # opara 需要根据 parent_id 查找父节点的类别
-        parent_id = unit.get("parent_id", -1)
-        if parent_id < 0 or parent_id >= len(all_pg_lines):
-            return "PARALINE"  # 找不到父节点，默认为 PARALINE
-
-        parent_unit = all_pg_lines[parent_id]
-        parent_class = parent_unit.get("class", parent_unit.get("label", "O")).lower()
-
-        # 递归查找，直到找到非 opara 的父节点
-        while parent_class == "opara":
-            parent_id = parent_unit.get("parent_id", -1)
-            if parent_id < 0 or parent_id >= len(all_pg_lines):
-                return "PARALINE"
-            parent_unit = all_pg_lines[parent_id]
-            parent_class = parent_unit.get("class", parent_unit.get("label", "O")).lower()
-
-        return _CLASS2CLASS.get(parent_class, parent_class.upper())
+# 兼容旧代码：_LABELS 指向 LABEL_LIST（从 labels.py 导入）
+_LABELS = LABEL_LIST
 
 
 class HRDocConfig(datasets.BuilderConfig):
@@ -292,12 +225,13 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 image, size = load_image(image_path)
 
                 for line_idx, item in enumerate(form_data):
-                    # 支持两种字段名：label（FUNSD）或 class（HRDS）
-                    raw_label = item.get("label") or item.get("class", "O")
-
                     # 使用 trans_class 将细粒度标签转换为论文14类
                     # 传入 form_data 用于 opara 的 parent_id 查找
-                    label = trans_class(form_data, item)
+                    label = trans_class(
+                        item.get("class", item.get("label", "paraline")),
+                        all_lines=form_data,
+                        unit=item
+                    )
 
                     # 支持两种格式：
                     # FUNSD格式：{"words": [{...}]}
@@ -314,8 +248,6 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     if len(words) == 0:
                         continue
 
-                    # label 已经是大写了（由 trans_class 返回）
-
                     # 获取层级关系信息
                     # HRDS格式有 line_id 字段，FUNSD格式用 id 字段
                     item_line_id = item.get("line_id", item.get("id", line_idx))
@@ -326,18 +258,12 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     line_parent_ids.append(parent_id)
                     line_relations.append(relation)
 
-                    # 处理第一个词（B-）
-                    tokens.append(words[0]["text"])
-                    ner_tags.append("B-" + label)
-                    bboxes.append(normalize_bbox(words[0]["box"], size))
-                    line_ids.append(item_line_id)  # 使用实际的line_id
-
-                    # 处理后续词（I-）
-                    for w in words[1:]:
+                    # Line级别标注：同一行的所有token使用相同的标签（无BIO前缀）
+                    for w in words:
                         tokens.append(w["text"])
-                        ner_tags.append("I-" + label)
+                        ner_tags.append(label)  # 直接使用标签，不加 B-/I- 前缀
                         bboxes.append(normalize_bbox(w["box"], size))
-                        line_ids.append(item_line_id)  # 使用实际的line_id
+                        line_ids.append(item_line_id)
 
                 yield guid, {
                     "id": str(guid),

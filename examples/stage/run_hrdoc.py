@@ -1,5 +1,11 @@
 #!/usr/bin/env python
 # coding=utf-8
+"""
+HRDoc 训练脚本
+
+使用论文定义的 14 个语义类别（Line 级别标注，不使用 BIO）。
+标签定义统一使用 layoutlmft.data.labels 模块。
+"""
 
 import logging
 import os
@@ -17,6 +23,12 @@ from layoutlmft.data import DataCollatorForKeyValueExtraction
 from layoutlmft.data.data_args import DataTrainingArguments
 from layoutlmft.models.model_args import ModelArguments
 from layoutlmft.trainers import FunsdTrainer as Trainer
+from layoutlmft.data.labels import (
+    LABEL_LIST,
+    NUM_LABELS,
+    get_id2label,
+    get_label2id,
+)
 from transformers import (
     AutoConfig,
     AutoTokenizer,
@@ -145,29 +157,15 @@ def main():
 
     remove_columns = column_names
 
-    # In the event the labels are not a `Sequence[ClassLabel]`, we will need to go through the dataset to get the
-    # unique labels.
-    def get_label_list(labels):
-        unique_labels = set()
-        for label in labels:
-            unique_labels = unique_labels | set(label)
-        label_list = list(unique_labels)
-        label_list.sort()
-        return label_list
+    # 使用统一的标签定义（从 labels.py 导入）
+    # 论文定义的 14 个语义类别（Line 级别标注，不使用 BIO）
+    label_list = LABEL_LIST
+    num_labels = NUM_LABELS
+    label_to_id = get_label2id()
+    id2label = get_id2label()
+    label2id = label_to_id  # 别名
 
-    if isinstance(features[label_column_name].feature, ClassLabel):
-        label_list = features[label_column_name].feature.names
-        # No need to convert the labels since they are already ints.
-        label_to_id = {i: i for i in range(len(label_list))}
-    else:
-        label_list = get_label_list(datasets["train"][label_column_name])
-        label_to_id = {l: i for i, l in enumerate(label_list)}
-    num_labels = len(label_list)
-
-    # Build id2label and label2id for model config
-    # These are needed for proper label names in config.json (not LABEL_0, LABEL_1, ...)
-    id2label = {i: label for i, label in enumerate(label_list)}
-    label2id = {label: i for i, label in enumerate(label_list)}
+    logger.info(f"Using {num_labels} labels from labels.py: {label_list}")
 
     # Load pretrained model and tokenizer
     #
@@ -342,9 +340,16 @@ def main():
         )
 
     if training_args.do_eval:
-        if "validation" not in datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = datasets["validation"]
+        # Try validation split first, fall back to test split
+        if "validation" in datasets:
+            eval_dataset = datasets["validation"]
+            logger.info("Using validation split for evaluation")
+        elif "test" in datasets:
+            eval_dataset = datasets["test"]
+            logger.warning("No validation split found, using test split for evaluation during training")
+        else:
+            raise ValueError("--do_eval requires a validation or test dataset")
+
         if data_args.max_val_samples is not None:
             eval_dataset = eval_dataset.select(range(data_args.max_val_samples))
         eval_dataset = eval_dataset.map(
@@ -381,14 +386,13 @@ def main():
     seqeval_path = os.environ.get("SEQEVAL_PATH", "seqeval")
     metric = load_metric(seqeval_path)
 
-    # Key class pairs to monitor for confusion
+    # Key class pairs to monitor for confusion (使用论文14类标签)
     MONITOR_PAIRS = [
-        ("MAIL", "AFFILI"),
-        ("FIG", "TAB"),
-        ("FIGCAP", "TABCAP"),
-        ("SEC1", "PARA"),
-        ("SEC2", "PARA"),
-        ("SEC3", "PARA"),
+        ("mail", "affili"),
+        ("figure", "table"),
+        ("caption", "caption"),  # 图表标题混淆
+        ("section", "paraline"),
+        ("fstline", "paraline"),
     ]
 
     def compute_metrics(p):
@@ -398,6 +402,7 @@ def main():
         predictions = np.argmax(predictions, axis=2)
 
         # Remove ignored index (special tokens)
+        # 直接使用标签，不需要 BIO 前缀处理
         true_predictions = [
             [label_list[pr] for (pr, l) in zip(prediction, label) if l != -100]
             for prediction, label in zip(predictions, labels)
@@ -407,7 +412,16 @@ def main():
             for prediction, label in zip(predictions, labels)
         ]
 
-        results = metric.compute(predictions=true_predictions, references=true_labels)
+        # 计算准确率（Line级别分类）
+        total_correct = 0
+        total_count = 0
+        for preds, gts in zip(true_predictions, true_labels):
+            for pred, gt in zip(preds, gts):
+                total_count += 1
+                if pred == gt:
+                    total_correct += 1
+
+        overall_accuracy = total_correct / total_count if total_count > 0 else 0.0
 
         # === Per-class diagnosis ===
         # Count per-class: TP, FP, FN, predicted count, gt count
@@ -416,33 +430,37 @@ def main():
 
         for preds, gts in zip(true_predictions, true_labels):
             for pred, gt in zip(preds, gts):
-                # Extract base class (remove B-/I- prefix)
-                pred_base = pred[2:] if pred.startswith(('B-', 'I-')) else pred
-                gt_base = gt[2:] if gt.startswith(('B-', 'I-')) else gt
+                # 直接使用标签（无 BIO 前缀）
+                class_stats[gt]["gt_count"] += 1
+                class_stats[pred]["pred_count"] += 1
+                confusion[gt][pred] += 1
 
-                class_stats[gt_base]["gt_count"] += 1
-                class_stats[pred_base]["pred_count"] += 1
-                confusion[gt_base][pred_base] += 1
-
-                if pred_base == gt_base:
-                    class_stats[gt_base]["tp"] += 1
+                if pred == gt:
+                    class_stats[gt]["tp"] += 1
                 else:
-                    class_stats[gt_base]["fn"] += 1
-                    class_stats[pred_base]["fp"] += 1
+                    class_stats[gt]["fn"] += 1
+                    class_stats[pred]["fp"] += 1
 
         # Build final results
+        # 计算 macro F1
+        f1_scores = []
+        for cls in label_list:
+            stats = class_stats[cls]
+            tp, fp, fn = stats["tp"], stats["fp"], stats["fn"]
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            f1_scores.append(f1)
+
+        macro_f1 = np.mean(f1_scores)
+
         final_results = {
-            "precision": results["overall_precision"],
-            "recall": results["overall_recall"],
-            "f1": results["overall_f1"],
-            "accuracy": results["overall_accuracy"],
+            "accuracy": overall_accuracy,
+            "macro_f1": macro_f1,
         }
 
-        # Add per-class metrics for key classes
-        key_classes = ["MAIL", "AFFILI", "FIG", "TAB", "FIGCAP", "TABCAP",
-                       "SEC1", "SEC2", "SEC3", "SECX", "PARA", "FSTLINE", "TITLE"]
-
-        for cls in key_classes:
+        # Add per-class metrics for all 14 classes
+        for cls in label_list:
             stats = class_stats.get(cls, {"tp": 0, "fp": 0, "fn": 0, "pred_count": 0, "gt_count": 0})
             tp, fp, fn = stats["tp"], stats["fp"], stats["fn"]
 
@@ -458,6 +476,8 @@ def main():
 
         # Add confusion metrics for monitored pairs
         for cls_a, cls_b in MONITOR_PAIRS:
+            if cls_a == cls_b:
+                continue
             # How often cls_a is predicted as cls_b
             a_to_b = confusion[cls_a].get(cls_b, 0)
             a_total = class_stats[cls_a]["gt_count"]
@@ -472,21 +492,26 @@ def main():
 
         # Log per-class summary (for visibility in training logs)
         logger.info("=" * 60)
-        logger.info("Per-Class Metrics (key classes):")
-        logger.info(f"{'Class':<10} {'Prec':>7} {'Recall':>7} {'F1':>7} {'GT':>6} {'Pred':>6}")
-        logger.info("-" * 50)
-        for cls in key_classes:
-            if class_stats[cls]["gt_count"] > 0 or class_stats[cls]["pred_count"] > 0:
-                stats = class_stats[cls]
+        logger.info("Per-Class Metrics (14 classes):")
+        logger.info(f"{'Class':<12} {'Prec':>7} {'Recall':>7} {'F1':>7} {'GT':>6} {'Pred':>6}")
+        logger.info("-" * 55)
+        for cls in label_list:
+            stats = class_stats[cls]
+            if stats["gt_count"] > 0 or stats["pred_count"] > 0:
                 tp, fp, fn = stats["tp"], stats["fp"], stats["fn"]
                 prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
                 rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
                 f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-                logger.info(f"{cls:<10} {prec:>7.1%} {rec:>7.1%} {f1:>7.1%} {stats['gt_count']:>6} {stats['pred_count']:>6}")
+                logger.info(f"{cls:<12} {prec:>7.1%} {rec:>7.1%} {f1:>7.1%} {stats['gt_count']:>6} {stats['pred_count']:>6}")
 
-        logger.info("-" * 50)
+        logger.info("-" * 55)
+        logger.info(f"Overall Accuracy: {overall_accuracy:.1%}")
+        logger.info(f"Macro F1: {macro_f1:.1%}")
+        logger.info("-" * 55)
         logger.info("Confusion pairs (GT -> Pred rate):")
         for cls_a, cls_b in MONITOR_PAIRS:
+            if cls_a == cls_b:
+                continue
             a_to_b = confusion[cls_a].get(cls_b, 0)
             a_total = class_stats[cls_a]["gt_count"]
             rate = a_to_b / a_total if a_total > 0 else 0.0

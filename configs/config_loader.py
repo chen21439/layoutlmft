@@ -120,11 +120,19 @@ class QuickTestConfig:
 
 
 @dataclass
+class DatasetConfig:
+    """Single dataset configuration"""
+    data_dir: str = ""
+    description: str = ""
+
+
+@dataclass
 class Config:
     """Main configuration class"""
     env: str = "dev"
     description: str = ""
     gpu: GpuConfig = field(default_factory=GpuConfig)
+    datasets: Dict[str, DatasetConfig] = field(default_factory=dict)
     paths: PathsConfig = field(default_factory=PathsConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
@@ -204,11 +212,21 @@ def load_config(env: str = "dev") -> Config:
     with open(config_path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f)
 
+    # Parse datasets config
+    datasets_data = data.get('datasets', {})
+    datasets = {}
+    for name, ds_config in datasets_data.items():
+        datasets[name] = DatasetConfig(
+            data_dir=ds_config.get('data_dir', ''),
+            description=ds_config.get('description', ''),
+        )
+
     # Build Config object
     config = Config(
         env=data.get('env', env),
         description=data.get('description', ''),
         gpu=_dict_to_dataclass(data.get('gpu'), GpuConfig),
+        datasets=datasets,
         paths=_dict_to_dataclass(data.get('paths'), PathsConfig),
         model=_dict_to_dataclass(data.get('model'), ModelConfig),
         metrics=_dict_to_dataclass(data.get('metrics'), MetricsConfig),

@@ -5,9 +5,18 @@
 env: dev
 description: "Local Development - Windows WSL"
 
+# Dataset definitions
+datasets:
+  hrds:
+    data_dir: "/mnt/e/models/data/Section/HRDS"
+    description: "HRDoc-Simple dataset"
+  hrdh:
+    data_dir: "/mnt/e/models/data/Section/HRDH"
+    description: "HRDoc-Hard dataset"
+
 # Data paths
 paths:
-  # HRDoc dataset root directory
+  # HRDoc dataset root directory (legacy, for backward compatibility)
   hrdoc_data_dir: "/mnt/e/models/data/Section/HRDS"
 
   # Stage 1: Fine-tuned LayoutLMv2 model checkpoint
