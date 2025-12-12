@@ -119,8 +119,11 @@ def main():
     subtask2_model = args.subtask2_model or os.path.join(exp_manager.get_stage_dir(args.exp, "stage3", args.dataset), "best_model.pt")
     subtask3_model = args.subtask3_model or os.path.join(exp_dir, "multiclass_relation", "best_model.pt")
 
-    # Data directory
-    data_dir = config.paths.hrdoc_data_dir
+    # Data directory (dataset-specific)
+    data_dir = config.dataset.get_data_dir(args.dataset)
+    if not data_dir or not os.path.exists(data_dir):
+        data_dir = config.paths.hrdoc_data_dir
+        print(f"Warning: Dataset-specific path not found, using: {data_dir}")
 
     # Output directory
     output_dir = args.output_dir or os.path.join(exp_dir, f"inference_{args.dataset}")

@@ -235,8 +235,8 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
 
-    # Setup balanced loss for long-tailed classification
-    if data_args.loss_type != "ce":
+    # Setup balanced loss for long-tailed classification (only for training)
+    if training_args.do_train and data_args.loss_type != "ce":
         from layoutlmft.models.balanced_loss import get_balanced_loss
 
         # Compute class counts from training data
@@ -261,7 +261,7 @@ def main():
         )
         model.set_loss_function(balanced_loss)
         logger.info(f"Using {data_args.loss_type} loss function")
-    else:
+    elif training_args.do_train:
         logger.info("Using standard CrossEntropyLoss")
 
     # Tokenizer check: this script requires a fast tokenizer.

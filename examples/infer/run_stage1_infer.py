@@ -49,16 +49,12 @@ def load_config(env: str):
 
 def get_data_dir(config, dataset: str) -> str:
     """Get data directory for dataset."""
-    if hasattr(config, 'datasets') and hasattr(config.datasets, dataset):
-        return getattr(config.datasets, dataset).data_dir
-
-    data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
-    if dataset == "hrds":
-        return os.path.join(data_dir_base, "HRDS")
-    elif dataset == "hrdh":
-        return os.path.join(data_dir_base, "HRDH")
-    else:
-        return config.paths.hrdoc_data_dir
+    # Use new config.dataset API
+    data_dir = config.dataset.get_data_dir(dataset)
+    if data_dir and os.path.exists(data_dir):
+        return data_dir
+    # Fallback to legacy path
+    return config.paths.hrdoc_data_dir
 
 
 def get_latest_model(config, exp: str = None):
@@ -130,11 +126,11 @@ def convert_predictions_to_json(predictions_file: str, data_dir: str, output_dir
     logger.info(f"Loaded {len(all_chunk_predictions)} chunk predictions")
 
     # Load test dataset to get document_name, page_number, line_ids mapping
+    # Note: Environment variables (HRDOC_DATA_DIR, HF_HOME, HF_DATASETS_CACHE)
+    # should be set by the caller (run_inference) before calling this function
     from datasets import load_dataset
     import layoutlmft.data.datasets.hrdoc
 
-    # Set environment variable for data directory
-    os.environ["HRDOC_DATA_DIR"] = data_dir
     datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
     test_dataset = datasets["test"]
 
@@ -350,6 +346,13 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
     # Set environment variables
     env = os.environ.copy()
     env["HRDOC_DATA_DIR"] = data_dir
+    # Set HuggingFace cache (same as training scripts, critical for avoiding re-download)
+    if config and hasattr(config, 'paths') and hasattr(config.paths, 'hf_cache_dir'):
+        if config.paths.hf_cache_dir:
+            env["HF_HOME"] = config.paths.hf_cache_dir
+            env["TRANSFORMERS_CACHE"] = config.paths.hf_cache_dir
+            env["HF_DATASETS_CACHE"] = os.path.join(config.paths.hf_cache_dir, "datasets")
+            logger.info(f"HF Cache: {config.paths.hf_cache_dir}")
     # Set GPU from config (same as training scripts)
     if config and hasattr(config, 'gpu') and hasattr(config.gpu, 'cuda_visible_devices'):
         if config.gpu.cuda_visible_devices:
@@ -392,6 +395,13 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
     # Convert predictions to JSON format
     predictions_file = os.path.join(temp_output, "test_predictions.txt")
     if os.path.exists(predictions_file):
+        # Apply environment variables to current process for convert_predictions_to_json
+        os.environ["HRDOC_DATA_DIR"] = data_dir
+        if config and hasattr(config, 'paths') and hasattr(config.paths, 'hf_cache_dir'):
+            if config.paths.hf_cache_dir:
+                os.environ["HF_HOME"] = config.paths.hf_cache_dir
+                os.environ["HF_DATASETS_CACHE"] = os.path.join(config.paths.hf_cache_dir, "datasets")
+
         convert_predictions_to_json(predictions_file, data_dir, output_dir, model_path)
     else:
         logger.error(f"Predictions file not found: {predictions_file}")
@@ -462,10 +472,40 @@ def main():
         logger.info("Quick mode enabled: processing only 10 samples")
 
     # Run inference
-    run_inference(model_path, data_dir, output_dir, config, max_test_samples)
+    result = run_inference(model_path, data_dir, output_dir, config, max_test_samples)
 
-    logger.info("\nNext step - run evaluation:")
-    logger.info(f"  python examples/evaluate/run_classify_eval.py --env {args.env} --dataset {args.dataset}")
+    if result is None:
+        logger.error("Inference failed, skipping evaluation")
+        return
+
+    # Auto-run HRDoc evaluation
+    logger.info("\n" + "=" * 60)
+    logger.info("Running HRDoc Classification Evaluation...")
+    logger.info("=" * 60)
+
+    gt_folder = os.path.join(data_dir, "test")
+    pred_folder = output_dir
+
+    # Import and run HRDoc's classify_eval
+    try:
+        hrdoc_utils_path = os.path.join(PROJECT_ROOT, "HRDoc", "utils")
+        sys.path.insert(0, str(hrdoc_utils_path))
+        from classify_eval import main as hrdoc_classify_eval
+
+        # Set sys.argv for classify_eval
+        original_argv = sys.argv
+        sys.argv = ['classify_eval.py', '--gt_folder', gt_folder, '--pred_folder', pred_folder]
+
+        logger.info(f"GT Folder:   {gt_folder}")
+        logger.info(f"Pred Folder: {pred_folder}")
+
+        hrdoc_classify_eval()
+
+        sys.argv = original_argv
+    except Exception as e:
+        logger.error(f"HRDoc evaluation failed: {e}")
+        logger.info("\nYou can run evaluation manually:")
+        logger.info(f"  python examples/evaluate/run_classify_eval.py --env {args.env} --dataset {args.dataset}")
 
 
 if __name__ == "__main__":

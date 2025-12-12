@@ -82,7 +82,7 @@ stage1_training:
   save_steps: 500  # Save checkpoint every N steps
   save_total_limit: 3  # Keep only last N checkpoints
   load_best_model_at_end: true  # Load best model when training ends
-  metric_for_best_model: "f1"  # Metric to determine best model
+  metric_for_best_model: "macro_f1"  # Metric to determine best model (matches compute_metrics return)
   greater_is_better: true  # Higher f1 is better
 
   # Logging

@@ -83,7 +83,7 @@ class Stage1TrainingConfig:
     save_steps: int = 500
     save_total_limit: int = 3
     load_best_model_at_end: bool = True
-    metric_for_best_model: str = "accuracy"
+    metric_for_best_model: str = "macro_f1"
     greater_is_better: bool = True
 
     # Logging
