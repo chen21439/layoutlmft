@@ -137,14 +137,7 @@ def main():
         output_dir = exp_manager.get_stage_dir(args.exp, "stage2", args.dataset)
 
     # Data directory (dataset-specific)
-    if hasattr(config, 'datasets') and args.dataset in config.datasets:
-        data_dir = config.datasets[args.dataset].get('data_dir')
-    else:
-        data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
-        if args.dataset == "hrds":
-            data_dir = os.path.join(data_dir_base, "HRDS")
-        else:  # hrdh
-            data_dir = os.path.join(data_dir_base, "HRDH")
+    data_dir = config.dataset.get_data_dir(args.dataset)
 
     # Fallback to config path if dataset-specific path doesn't exist
     if not data_dir or not os.path.exists(data_dir):

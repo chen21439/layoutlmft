@@ -62,18 +62,36 @@ class MetricsConfig:
 @dataclass
 class Stage1TrainingConfig:
     """Stage 1 LayoutXLM fine-tuning parameters"""
+    # Training loop
     max_steps: int = 500
     per_device_train_batch_size: int = 2
     per_device_eval_batch_size: int = 4
     gradient_accumulation_steps: int = 2
+
+    # Optimizer
     learning_rate: float = 5e-5
     warmup_ratio: float = 0.1
+    warmup_steps: int = 0
     weight_decay: float = 0.01
-    logging_steps: int = 20
-    eval_steps: int = 100
-    save_steps: int = 100
+    max_grad_norm: float = 1.0
+    lr_scheduler_type: str = "linear"
+
+    # Evaluation & checkpointing (默认开启评估)
+    evaluation_strategy: str = "steps"  # "steps", "epoch", or "no"
+    eval_steps: int = 500
+    save_strategy: str = "steps"
+    save_steps: int = 500
     save_total_limit: int = 3
-    fp16: bool = True
+    load_best_model_at_end: bool = True
+    metric_for_best_model: str = "accuracy"
+    greater_is_better: bool = True
+
+    # Logging
+    logging_steps: int = 100
+    logging_first_step: bool = True
+
+    # Stability & other
+    fp16: bool = False
     dataloader_num_workers: int = 2
     seed: int = 42
 
