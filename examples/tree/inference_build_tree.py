@@ -52,7 +52,8 @@ from pathlib import Path
 from collections import defaultdict, Counter
 
 # 添加项目路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
 
 # 数据加载相关（和训练一致）
 from datasets import load_dataset
@@ -69,7 +70,17 @@ from layoutlmft.models.relation_classifier import (
     compute_geometry_features,
 )
 
+# 标签定义
+from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST
+
+# 导入 ParentFinder 模型（避免代码重复）
+STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
+sys.path.insert(0, STAGE_ROOT)
+from train_parent_finder import ParentFinderGRU
+
 # 导入树结构
+TREE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, TREE_ROOT)
 from document_tree import DocumentTree, LABEL_MAP, RELATION_MAP
 
 # Register both layoutxlm and layoutlmv2 (LayoutXLM's config.json has model_type="layoutlmv2")
@@ -104,139 +115,6 @@ class SimpleParentFinder(torch.nn.Module):
         combined = torch.cat([child_feat_expanded, parent_feats, geom_feats], dim=-1)
         scores = self.score_head(combined).squeeze(-1)
         return scores
-
-
-# ==================== ParentFinderGRU 模型定义 ====================
-
-class ParentFinderGRU(nn.Module):
-    """
-    基于GRU的父节点查找器（论文方法，从训练代码复制）
-
-    对每个语义单元 u_i，预测其父节点索引 P̂_i ∈ {0, 1, ..., i-1}
-    其中 0 表示 ROOT，1到i-1表示之前的语义单元
-    """
-
-    def __init__(
-        self,
-        hidden_size=768,
-        gru_hidden_size=512,
-        num_classes=16,
-        dropout=0.1,
-        use_soft_mask=True
-    ):
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.gru_hidden_size = gru_hidden_size
-        self.num_classes = num_classes
-        self.use_soft_mask = use_soft_mask
-
-        # GRU decoder
-        self.gru = nn.GRU(
-            input_size=hidden_size,
-            hidden_size=gru_hidden_size,
-            num_layers=1,
-            batch_first=True,
-            dropout=0 if dropout == 0 else dropout
-        )
-
-        # 查询向量投影（用于注意力计算）
-        self.query_proj = nn.Linear(gru_hidden_size, gru_hidden_size)
-
-        # 键向量投影
-        self.key_proj = nn.Linear(gru_hidden_size, gru_hidden_size)
-
-        # 类别预测头（用于预测每个单元的语义类别概率）
-        self.cls_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, num_classes)
-        )
-
-        # Soft-mask 矩阵（可选）
-        self.register_buffer('M_cp', torch.ones(num_classes + 1, num_classes))
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, line_features, line_mask):
-        """
-        Args:
-            line_features: 行级特征 [B, L, H]
-            line_mask: 有效行mask [B, L]
-
-        Returns:
-            parent_logits: [B, L+1, L+1] - 每个位置i的父节点logits（包括ROOT）
-            cls_logits: [B, L, num_classes] - 类别预测logits
-        """
-        batch_size, max_lines, hidden_size = line_features.shape
-        device = line_features.device
-
-        # 1. 构建 ROOT 节点
-        valid_sum = (line_features * line_mask.unsqueeze(-1)).sum(dim=1)
-        valid_count = line_mask.sum(dim=1, keepdim=True).clamp(min=1)
-        root_feat = (valid_sum / valid_count).unsqueeze(1)
-
-        # 2. 将 ROOT 拼接到序列最前面
-        line_features_with_root = torch.cat([root_feat, line_features], dim=1)
-        line_mask_with_root = torch.cat(
-            [torch.ones(batch_size, 1, dtype=torch.bool, device=device), line_mask],
-            dim=1
-        )
-
-        # 3. 通过 GRU 获取隐藏状态
-        gru_output, _ = self.gru(line_features_with_root)
-
-        # 4. 预测语义类别概率
-        cls_logits = self.cls_head(line_features)
-        cls_probs = F.softmax(cls_logits, dim=-1)
-
-        # 为 ROOT 添加类别概率
-        root_cls_prob = torch.zeros(batch_size, 1, self.num_classes + 1, device=device)
-        root_cls_prob[:, :, -1] = 1.0
-
-        cls_probs_extended = torch.cat([
-            cls_probs,
-            torch.zeros(batch_size, max_lines, 1, device=device)
-        ], dim=-1)
-
-        cls_probs_with_root = torch.cat([root_cls_prob, cls_probs_extended], dim=1)
-
-        # 5. 计算父节点概率
-        query = self.query_proj(gru_output)
-        key = self.key_proj(gru_output)
-
-        attention_scores = torch.bmm(
-            query,
-            key.transpose(1, 2)
-        ) / (self.gru_hidden_size ** 0.5)
-
-        # 6. Soft-mask 操作
-        if self.use_soft_mask and self.M_cp is not None:
-            cls_probs_for_child = torch.cat([
-                torch.ones(batch_size, 1, self.num_classes, device=device) / self.num_classes,
-                cls_probs
-            ], dim=1)
-
-            soft_mask = torch.einsum('bjc,cp,bip->bij',
-                                     cls_probs_with_root,
-                                     self.M_cp,
-                                     cls_probs_for_child)
-
-            attention_scores = attention_scores + torch.log(soft_mask.clamp(min=1e-10))
-
-        # 7. 因果mask
-        seq_len = max_lines + 1
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
-        attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0), float('-inf'))
-
-        # 8. 应用 line_mask
-        parent_mask = ~line_mask_with_root.unsqueeze(1)
-        child_mask = ~line_mask_with_root.unsqueeze(2)
-        combined_mask = parent_mask | child_mask
-        attention_scores = attention_scores.masked_fill(combined_mask, float('-inf'))
-
-        return attention_scores, cls_logits
 
 
 # ==================== 工具函数 ====================
@@ -364,7 +242,7 @@ def load_models(
         subtask2_model = ParentFinderGRU(
             hidden_size=768,
             gru_hidden_size=512,
-            num_classes=16,
+            num_classes=NUM_LABELS,  # 使用统一标签定义
             dropout=0.1,
             use_soft_mask=True
         )

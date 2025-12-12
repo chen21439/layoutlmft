@@ -3,13 +3,32 @@
 """
 HRDoc 联合训练的数据整理器 (Data Collator)
 处理三个任务的标签：语义分类、父节点查找、关系分类
+
+更新：使用统一的 14 类标签定义（无 BIO 前缀）
 """
 
+import os
+import sys
 import torch
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from transformers.file_utils import PaddingStrategy
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+# 添加项目根目录到路径
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+
+from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST, LABEL2ID
+
+# 关系类型映射（与 train_multiclass_relation.py 一致）
+RELATION_LABELS = {
+    "none": 0,
+    "connect": 1,
+    "contain": 2,
+    "equality": 3,
+}
+RELATION_NAMES = ["none", "connect", "contain", "equality"]
 
 
 @dataclass
@@ -19,7 +38,7 @@ class HRDocJointDataCollator:
 
     处理的字段：
     1. input_ids, bbox, image, attention_mask - 模型输入
-    2. labels - SubTask1 语义标签（token-level）
+    2. labels - SubTask1 语义标签（token-level，14 类，无 BIO）
     3. line_ids - token到line的映射
     4. line_parent_ids - SubTask2 父节点标签（line-level）
     5. line_relations - SubTask3 关系标签（line-level）
@@ -36,15 +55,9 @@ class HRDocJointDataCollator:
     relation2id: Dict[str, int] = None
 
     def __post_init__(self):
-        # 默认的关系映射
+        # 使用统一的关系映射
         if self.relation2id is None:
-            self.relation2id = {
-                "none": 0,
-                "child": 1,
-                "sibling": 2,
-                "next": 3,
-                "other": 4,
-            }
+            self.relation2id = RELATION_LABELS
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         """
@@ -153,14 +166,13 @@ class HRDocJointDataCollator:
                 # relations: 转换为索引
                 if len(line_relations[i]) > 0:
                     rel_indices = [
-                        self.relation2id.get(rel, 0) for rel in line_relations[i]
+                        self.relation2id.get(rel.lower(), 0) for rel in line_relations[i]
                     ]
                     padded_line_relations.append(
                         rel_indices + [0] * padding_len
                     )
 
-                # semantic_labels: 从labels中提取（需要转换BIO -> 语义类别）
-                # 这里简化处理，实际需要根据line_ids聚合token的标签
+                # semantic_labels: 从 features 中直接获取（已经是 14 类索引）
                 if "line_semantic_labels" in features[i]:
                     sem_labels = features[i]["line_semantic_labels"]
                     padded_line_semantic_labels.append(
@@ -178,59 +190,26 @@ class HRDocJointDataCollator:
         return batch
 
 
-def convert_bio_to_semantic_label(bio_labels: List[int], label_list: List[str]) -> int:
+def get_line_semantic_label(token_labels: List[int], line_ids: List[int], target_line_id: int) -> int:
     """
-    将BIO标签列表转换为语义类别
+    从 token-level 标签中提取指定行的语义标签
+
+    当前使用 14 类标签（无 BIO 前缀），直接取第一个 token 的标签
 
     Args:
-        bio_labels: BIO标签索引列表
-        label_list: 标签名称列表
+        token_labels: token-level 标签列表
+        line_ids: 每个 token 对应的 line_id
+        target_line_id: 目标行 ID
 
     Returns:
-        semantic_label: 语义类别索引（去掉BIO前缀）
-
-    Example:
-        bio_labels = [26, 27]  # B-TITLE, I-TITLE
-        label_list = ["O", "B-TITLE", "I-TITLE", ...]
-        -> 返回 TITLE 的类别索引
+        语义类别索引（0-13）
     """
-    # 找到第一个非O标签
-    for label_idx in bio_labels:
-        label_name = label_list[label_idx]
-        if label_name != "O":
-            # 去掉 B- 或 I- 前缀
-            if label_name.startswith("B-") or label_name.startswith("I-"):
-                semantic_name = label_name[2:]
-            else:
-                semantic_name = label_name
-            return semantic_name
-
-    return "O"
+    for label, line_id in zip(token_labels, line_ids):
+        if line_id == target_line_id and label >= 0:
+            return label
+    return 0  # 默认返回第一个类别
 
 
-# 语义类别映射（line-level，去掉BIO前缀）
-SEMANTIC_CLASSES = [
-    "O",
-    "AFFILI",
-    "ALG",
-    "AUTHOR",
-    "EQU",
-    "FIG",
-    "FIGCAP",
-    "FNOTE",
-    "FOOT",
-    "FSTLINE",
-    "MAIL",
-    "OPARA",
-    "PARA",
-    "SEC1",
-    "SEC2",
-    "SEC3",
-    "SEC4",
-    "SECX",
-    "TAB",
-    "TABCAP",
-    "TITLE",
-]
-
-SEMANTIC_CLASS2ID = {cls: i for i, cls in enumerate(SEMANTIC_CLASSES)}
+# 使用统一的标签定义
+SEMANTIC_CLASSES = LABEL_LIST
+SEMANTIC_CLASS2ID = LABEL2ID

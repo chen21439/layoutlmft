@@ -117,7 +117,7 @@ evaluation:
 
 # Quick test configuration (overrides above parameters)
 quick_test:
-  enabled: false
+  enabled: true
   num_samples: 10
   docs_per_chunk: 5
   stage1_max_steps: 10

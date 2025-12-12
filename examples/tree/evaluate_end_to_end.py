@@ -17,155 +17,23 @@ from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score, classification_report, confusion_matrix
 from transformers import set_seed
 
-# 添加父目录到路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 添加项目根目录到路径
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+
 from layoutlmft.models.relation_classifier import MultiClassRelationClassifier, compute_geometry_features
+from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST
+
+# 从 train_parent_finder 导入模型类（避免代码重复）
+STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
+sys.path.insert(0, STAGE_ROOT)
+from train_parent_finder import ParentFinderGRU
 
 logger = logging.getLogger(__name__)
 
-
-# ParentFinderGRU模型定义（Full模式 - 论文方法）
-class ParentFinderGRU(nn.Module):
-    """
-    基于GRU的父节点查找器（论文完整方法）
-    包含：GRU解码器 + 注意力机制 + Soft-mask + 语义分类头
-    """
-
-    def __init__(
-        self,
-        hidden_size=768,
-        gru_hidden_size=512,
-        num_classes=16,
-        dropout=0.1,
-        use_soft_mask=True
-    ):
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.gru_hidden_size = gru_hidden_size
-        self.num_classes = num_classes
-        self.use_soft_mask = use_soft_mask
-
-        # GRU decoder
-        self.gru = nn.GRU(
-            input_size=hidden_size,
-            hidden_size=gru_hidden_size,
-            num_layers=1,
-            batch_first=True,
-            dropout=0 if dropout == 0 else dropout
-        )
-
-        # 查询向量投影（用于注意力计算）
-        self.query_proj = nn.Linear(gru_hidden_size, gru_hidden_size)
-
-        # 键向量投影
-        self.key_proj = nn.Linear(gru_hidden_size, gru_hidden_size)
-
-        # 类别预测头（用于预测每个单元的语义类别概率）
-        self.cls_head = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, num_classes)
-        )
-
-        # Soft-mask 矩阵（可选）
-        # M_cp: [num_classes+1, num_classes]
-        self.register_buffer('M_cp', torch.ones(num_classes + 1, num_classes))
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, line_features, line_mask):
-        """
-        Args:
-            line_features: [B, L, H] - 行特征
-            line_mask: [B, L] - 有效行mask
-
-        Returns:
-            parent_logits: [B, L+1, L+1] - 每个位置对候选父节点的logits
-            cls_logits: [B, L, num_classes] - 每个位置的语义类别logits（Task 1）
-        """
-        batch_size, max_lines, hidden_size = line_features.shape
-        device = line_features.device
-
-        # 1. 构建 ROOT 节点（论文方法：所有单元表示的平均）
-        valid_sum = (line_features * line_mask.unsqueeze(-1)).sum(dim=1)  # [B, H]
-        valid_count = line_mask.sum(dim=1, keepdim=True).clamp(min=1)
-        root_feat = valid_sum / valid_count  # [B, H]
-        root_feat = root_feat.unsqueeze(1)  # [B, 1, H]
-
-        # 2. 预测每个单元的语义类别概率（用于 soft-mask 和 Task 1评估）
-        cls_logits = self.cls_head(line_features)  # [B, L, num_classes]
-        cls_probs = F.softmax(cls_logits, dim=-1)  # [B, L, num_classes]
-
-        # 为 ROOT 添加一个虚拟的类别概率分布
-        root_cls_prob = torch.zeros(batch_size, 1, self.num_classes + 1, device=device)
-        root_cls_prob[:, :, -1] = 1.0  # ROOT 类别（最后一个）
-
-        # 原始类别概率需要扩展到 num_classes+1
-        cls_probs_extended = torch.cat([
-            cls_probs,
-            torch.zeros(batch_size, max_lines, 1, device=device)
-        ], dim=-1)  # [B, L, num_classes+1]
-
-        # 将 ROOT 和行的类别概率拼接
-        cls_probs_with_root = torch.cat([root_cls_prob, cls_probs_extended], dim=1)  # [B, L+1, num_classes+1]
-
-        # 3. 将 ROOT 节点拼接到序列最前面
-        line_features_with_root = torch.cat([root_feat, line_features], dim=1)  # [B, L+1, H]
-
-        # 为 ROOT 创建 mask（ROOT 始终有效）
-        root_mask = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
-        line_mask_with_root = torch.cat([root_mask, line_mask], dim=1)  # [B, L+1]
-
-        # 4. GRU 编码
-        gru_out, _ = self.gru(line_features_with_root)  # [B, L+1, gru_hidden]
-        gru_out = self.dropout(gru_out)
-
-        # 5. 注意力机制：每个位置 i 计算对之前位置的注意力分数
-        queries = self.query_proj(gru_out)  # [B, L+1, gru_hidden]
-        keys = self.key_proj(gru_out)  # [B, L+1, gru_hidden]
-
-        # 计算注意力分数 [B, L+1, L+1]
-        attention_scores = torch.bmm(queries, keys.transpose(1, 2))  # [B, L+1, L+1]
-        attention_scores = attention_scores / (self.gru_hidden_size ** 0.5)
-
-        # 6. Causal Masking：位置 i 只能看到 0 到 i-1
-        seq_len = max_lines + 1
-        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
-        attention_scores = attention_scores.masked_fill(causal_mask.unsqueeze(0), float('-inf'))
-
-        # 7. Soft-mask 操作（根据语义类别约束）
-        if self.use_soft_mask and self.M_cp is not None:
-            # cls_probs 只包含原始行（不包括 ROOT），形状是 [B, L, C]
-            cls_probs_for_child = torch.cat([
-                torch.ones(batch_size, 1, self.num_classes, device=device) / self.num_classes,
-                cls_probs
-            ], dim=1)  # [B, L+1, C]
-
-            # 计算 soft_mask: P_dom(i,j) = P_cls_j · M_cp · P_cls_i^T
-            soft_mask = torch.einsum('bjc,cp,bip->bij',
-                                     cls_probs_with_root,  # [B, L+1, C+1] - parent 类别概率
-                                     self.M_cp,            # [C+1, C] - 分布矩阵
-                                     cls_probs_for_child)  # [B, L+1, C] - child 类别概率
-
-            # 将 soft-mask 与注意力分数相乘
-            attention_scores = attention_scores + torch.log(soft_mask.clamp(min=1e-10))
-
-        # 8. Mask掉无效位置
-        attention_scores = attention_scores.masked_fill(~line_mask_with_root.unsqueeze(1), float('-inf'))
-
-        return attention_scores, cls_logits
-
-
-# 语义标签映射（16个类别）
-SEMANTIC_LABELS = {
-    "title": 0, "author": 1, "abstract": 2, "keywords": 3,
-    "section": 4, "paragraph": 5, "list": 6, "table": 7,
-    "figure": 8, "caption": 9, "equation": 10, "algorithm": 11,
-    "footer": 12, "header": 13, "reference": 14, "other": 15
-}
-SEMANTIC_NAMES = list(SEMANTIC_LABELS.keys())
+# 使用统一的标签定义
+SEMANTIC_LABELS = {label: i for i, label in enumerate(LABEL_LIST)}
+SEMANTIC_NAMES = LABEL_LIST
 
 # 关系标签映射（4个类别）
 RELATION_LABELS = {
@@ -187,7 +55,7 @@ def load_models(subtask2_path, subtask3_path, device):
     subtask2_model = ParentFinderGRU(
         hidden_size=768,
         gru_hidden_size=512,
-        num_classes=16,
+        num_classes=NUM_LABELS,  # 使用统一标签定义
         dropout=0.1,
         use_soft_mask=True
     )

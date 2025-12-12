@@ -23,6 +23,12 @@ from sklearn.metrics import accuracy_score
 from collections import defaultdict
 from functools import partial
 
+# 添加项目根目录到路径
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, PROJECT_ROOT)
+
+from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST, get_num_labels
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,12 +38,14 @@ class ChildParentDistributionMatrix:
     根据训练数据统计不同语义类别的父子关系分布
     """
 
-    def __init__(self, num_classes=16, pseudo_count=5):
+    def __init__(self, num_classes=None, pseudo_count=5):
         """
         Args:
-            num_classes: 语义类别数（不包含ROOT）
+            num_classes: 语义类别数（不包含ROOT），默认使用 NUM_LABELS
             pseudo_count: 加性平滑的伪计数
         """
+        if num_classes is None:
+            num_classes = NUM_LABELS
         self.num_classes = num_classes
         self.pseudo_count = pseudo_count
 
@@ -109,11 +117,14 @@ class ParentFinderGRU(nn.Module):
         self,
         hidden_size=768,
         gru_hidden_size=512,
-        num_classes=16,
+        num_classes=None,
         dropout=0.1,
         use_soft_mask=True
     ):
         super().__init__()
+
+        if num_classes is None:
+            num_classes = NUM_LABELS
 
         self.hidden_size = hidden_size
         self.gru_hidden_size = gru_hidden_size
@@ -946,8 +957,10 @@ def evaluate(model, dataloader, device):
     return accuracy
 
 
-def build_child_parent_matrix(features_dir, split="train", num_classes=16):
+def build_child_parent_matrix(features_dir, split="train", num_classes=None):
     """构建 Child-Parent Distribution Matrix"""
+    if num_classes is None:
+        num_classes = NUM_LABELS
 
     logger.info("构建 Child-Parent Distribution Matrix...")
 
@@ -1090,7 +1103,7 @@ def main():
         logger.info("=" * 60)
 
     num_epochs = args.num_epochs
-    num_classes = 16
+    num_classes = NUM_LABELS  # 使用统一标签定义
     max_chunks = args.max_chunks if args.max_chunks > 0 else None
     gradient_checkpointing = args.gradient_checkpointing
 
