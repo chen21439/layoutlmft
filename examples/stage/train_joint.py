@@ -77,9 +77,10 @@ from layoutlmft.models.relation_classifier import (
     LineFeatureExtractor,
     MultiClassRelationClassifier,
     compute_geometry_features,
+    FocalLoss,
     RELATION_LABELS,
     RELATION_NAMES,
-    FocalLoss,
+    NUM_RELATIONS,
 )
 
 from joint_data_collator import HRDocJointDataCollator
@@ -209,6 +210,36 @@ class JointModel(nn.Module):
         device = input_ids.device
         batch_size = input_ids.shape[0]
 
+        # ==================== 诊断检查点 1: 输入检查 ====================
+        def check_tensor(name, t):
+            """检查 tensor 是否包含 NaN/Inf，返回诊断信息"""
+            if t is None:
+                return None
+            if not isinstance(t, torch.Tensor):
+                return None
+            nan_count = torch.isnan(t).sum().item()
+            inf_count = torch.isinf(t).sum().item()
+            if nan_count > 0 or inf_count > 0:
+                return f"{name}: nan={nan_count}, inf={inf_count}, dtype={t.dtype}, shape={list(t.shape)}, min={t[torch.isfinite(t)].min().item() if torch.isfinite(t).any() else 'N/A'}, max={t[torch.isfinite(t)].max().item() if torch.isfinite(t).any() else 'N/A'}"
+            return None
+
+        # 检查输入
+        input_issues = []
+        for name, tensor in [("input_ids", input_ids), ("bbox", bbox),
+                              ("attention_mask", attention_mask), ("image", image)]:
+            issue = check_tensor(name, tensor)
+            if issue:
+                input_issues.append(issue)
+
+        if input_issues:
+            logger.warning(f"[DIAG] Input issues detected:\n  " + "\n  ".join(input_issues))
+
+        # 额外检查 image 的数值范围（即使没有 NaN/Inf）
+        if image is not None and torch.isfinite(image).all():
+            img_min, img_max = image.min().item(), image.max().item()
+            if img_max > 300 or img_min < -10:  # 异常范围检测
+                logger.warning(f"[DIAG] image range suspicious: min={img_min:.2f}, max={img_max:.2f}")
+
         # ==================== Stage 1: Classification ====================
         stage1_outputs = self.stage1(
             input_ids=input_ids,
@@ -222,6 +253,15 @@ class JointModel(nn.Module):
         cls_loss = stage1_outputs.loss
         logits = stage1_outputs.logits
         hidden_states = stage1_outputs.hidden_states[-1]
+
+        # ==================== 诊断检查点 2: Stage1 输出检查 ====================
+        hs_issue = check_tensor("hidden_states", hidden_states)
+        if hs_issue:
+            logger.warning(f"[DIAG] Stage1 output issue: {hs_issue}")
+
+        loss_issue = check_tensor("cls_loss", cls_loss)
+        if loss_issue:
+            logger.warning(f"[DIAG] cls_loss issue: {loss_issue}")
 
         outputs = {
             "loss": cls_loss * self.lambda_cls,
@@ -242,6 +282,11 @@ class JointModel(nn.Module):
             text_hidden, line_ids, pooling="mean"
         )
 
+        # ==================== 诊断检查点 3: line_features 检查 ====================
+        lf_issue = check_tensor("line_features", line_features)
+        if lf_issue:
+            logger.warning(f"[DIAG] line_features issue: {lf_issue}")
+
         # ==================== Stage 3: Parent Finding ====================
         parent_loss = torch.tensor(0.0, device=device)
         parent_correct = 0
@@ -251,9 +296,11 @@ class JointModel(nn.Module):
             if self.use_gru:
                 parent_logits = self.stage3(line_features, line_mask)
 
-                num_nan = torch.isnan(parent_logits).sum().item()
-                if num_nan > 0:
-                    logger.warning(f"[DEBUG] parent_logits has NaN: {num_nan}")
+                # ==================== 诊断检查点 4: parent_logits 检查 ====================
+                pl_issue = check_tensor("parent_logits", parent_logits)
+                if pl_issue:
+                    logger.warning(f"[DIAG] parent_logits issue: {pl_issue}")
+                    # 跳过本批次的 parent loss 计算，避免 NaN 传播
                 else:
                     for b in range(batch_size):
                         sample_parent_ids = line_parent_ids[b]
@@ -346,9 +393,10 @@ class JointModel(nn.Module):
                     parent_idx = sample_parent_ids[child_idx].item()
                     rel_label = sample_relations[child_idx].item()
 
+                    # 跳过无效样本：parent_id 无效 或 rel_label 是 padding (-100)
                     if parent_idx < 0 or parent_idx >= num_lines:
                         continue
-                    if rel_label <= 0 or rel_label >= 4:
+                    if rel_label == -100:  # padding
                         continue
 
                     parent_feat = sample_features[parent_idx]
@@ -493,6 +541,52 @@ class JointTrainer(Trainer):
 
 
 # ==================== Callback 定义 ====================
+
+class AMPDiagnosticCallback(TrainerCallback):
+    """
+    监控 AMP GradScaler 状态，用于诊断 fp16 溢出问题
+
+    工业实践：当 scale 下降时，通常意味着检测到了 overflow 并跳过了该步更新
+    """
+
+    def __init__(self):
+        self.prev_scale = None
+        self.overflow_count = 0
+        self.scaler = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        """训练开始时尝试获取 scaler 引用"""
+        # 尝试通过 gc 获取 GradScaler 实例
+        import gc
+        for obj in gc.get_objects():
+            if isinstance(obj, torch.cuda.amp.GradScaler):
+                self.scaler = obj
+                logger.info(f"[AMP-DIAG] Found GradScaler, initial scale={self.scaler.get_scale():.1f}")
+                break
+
+    def on_step_end(self, args, state, control, **kwargs):
+        """每步结束后检查 GradScaler 状态"""
+        if self.scaler is None:
+            return
+
+        try:
+            current_scale = self.scaler.get_scale()
+            if self.prev_scale is not None:
+                if current_scale < self.prev_scale:
+                    self.overflow_count += 1
+                    logger.warning(
+                        f"[AMP-DIAG] Step {state.global_step}: "
+                        f"Scale decreased {self.prev_scale:.1f} -> {current_scale:.1f} "
+                        f"(overflow detected, total overflows: {self.overflow_count})"
+                    )
+            self.prev_scale = current_scale
+
+            # 每 500 步打印一次 scale 状态
+            if state.global_step % 500 == 0:
+                logger.info(f"[AMP-DIAG] Step {state.global_step}: scale={current_scale:.1f}, total_overflows={self.overflow_count}")
+        except Exception as e:
+            pass  # scaler 可能不可用
+
 
 class JointLoggingCallback(TrainerCallback):
     """记录联合训练的详细日志"""
@@ -1185,10 +1279,10 @@ def main():
         logger.info("Using SimpleParentFinder")
         stage3_model = SimpleParentFinder(hidden_size=768, dropout=0.1)
 
-    # Stage 4: RelationClassifier
+    # Stage 4: RelationClassifier (只有3类: connect, contain, equality)
     stage4_model = MultiClassRelationClassifier(
         hidden_size=768,
-        num_relations=4,
+        num_relations=NUM_RELATIONS,  # 3类
         use_geometry=True,
         dropout=0.1,
     )
@@ -1225,7 +1319,7 @@ def main():
         )
 
     # 创建 callbacks
-    callbacks = [JointLoggingCallback()]
+    callbacks = [JointLoggingCallback(), AMPDiagnosticCallback()]
     if eval_dataloader is not None:
         # 添加端到端评估 callback（评估 Parent 和 Relation 准确率）
         callbacks.append(E2EEvaluationCallback(

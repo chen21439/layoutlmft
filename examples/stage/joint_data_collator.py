@@ -20,15 +20,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, PROJECT_ROOT)
 
 from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST, LABEL2ID
-
-# 关系类型映射（与 train_multiclass_relation.py 一致）
-RELATION_LABELS = {
-    "none": 0,
-    "connect": 1,
-    "contain": 2,
-    "equality": 3,
-}
-RELATION_NAMES = ["none", "connect", "contain", "equality"]
+from layoutlmft.models.relation_classifier import (
+    RELATION_LABELS,
+    RELATION_NAMES,
+    NUM_RELATIONS,
+)
 
 
 @dataclass
@@ -168,10 +164,10 @@ class HRDocJointDataCollator:
                 # relations: 转换为索引
                 if len(line_relations[i]) > 0:
                     rel_indices = [
-                        self.relation2id.get(rel.lower(), 0) for rel in line_relations[i]
+                        self.relation2id.get(rel.lower(), -100) for rel in line_relations[i]
                     ]
                     padded_line_relations.append(
-                        rel_indices + [0] * padding_len
+                        rel_indices + [-100] * padding_len  # -100 会被 loss 忽略
                     )
 
                 # semantic_labels: 从 features 中直接获取（已经是 14 类索引）

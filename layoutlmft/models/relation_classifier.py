@@ -279,16 +279,14 @@ def compute_geometry_features(
     return features
 
 
-# 关系类型映射
+# 关系类型映射（只有3类，不含none/meta）
 RELATION_LABELS = {
-    "none": 0,
-    "connect": 1,
-    "contain": 2,
-    "equality": 3,
-    "meta": 0  # meta也当作none处理
+    "connect": 0,
+    "contain": 1,
+    "equality": 2,
 }
-
-RELATION_NAMES = ["none", "connect", "contain", "equality"]
+NUM_RELATIONS = 3
+RELATION_NAMES = ["connect", "contain", "equality"]
 
 
 class FocalLoss(nn.Module):

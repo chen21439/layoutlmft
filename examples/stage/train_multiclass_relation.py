@@ -31,6 +31,7 @@ from layoutlmft.models.relation_classifier import (
     FocalLoss,
     RELATION_LABELS,
     RELATION_NAMES,
+    NUM_RELATIONS,
     compute_geometry_features
 )
 from util.covmatch_utils import CovmatchFeatureLoader
@@ -46,18 +47,15 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
     - 页面级别: 每个样本是一页，关系仅限页内
     - 文档级别: 每个样本是整个文档，支持跨页关系
 
-    标签：0=none, 1=connect, 2=contain, 3=equality
+    标签：0=connect, 1=contain, 2=equality
     """
 
     def __init__(
         self,
         features_dir: str,
         split: str = "train",
-        neg_ratio: float = 1.0,  # 负样本比例（相对于正样本）
         max_chunks: int = None  # 最多加载多少个chunk（用于测试）
     ):
-        self.neg_ratio = neg_ratio
-
         # 加载缓存的特征（支持单个文件或chunk文件）
         import glob
 
@@ -103,8 +101,7 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
 
             num_lines = len(line_parent_ids)
 
-            # 1. 收集所有正样本（有标注的关系）
-            positive_pairs = []
+            # 收集所有有效样本
             for child_idx in range(num_lines):
                 parent_idx = line_parent_ids[child_idx]
                 relation = line_relations[child_idx]
@@ -113,8 +110,6 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
                 if parent_idx < 0 or parent_idx >= num_lines:
                     continue
                 if relation not in RELATION_LABELS:
-                    continue
-                if relation == "none" or relation == "meta":
                     continue
 
                 # 检查mask和bbox有效性
@@ -141,43 +136,6 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
                     "label": label,
                     "relation": relation
                 })
-
-                positive_pairs.append((parent_idx, child_idx))
-
-            # 2. 负采样（标记为none=0）
-            if self.neg_ratio > 0:
-                num_neg_samples = int(len(positive_pairs) * self.neg_ratio)
-
-                for _ in range(num_neg_samples):
-                    # 随机选择两个不同的行
-                    child_idx = random.randint(0, num_lines - 1)
-                    parent_idx = random.randint(0, child_idx) if child_idx > 0 else 0
-
-                    # 跳过已有的正样本对
-                    if (parent_idx, child_idx) in positive_pairs:
-                        continue
-
-                    # 检查有效性
-                    max_idx = line_mask.shape[0]
-                    if parent_idx >= max_idx or child_idx >= max_idx:
-                        continue
-                    if not line_mask[parent_idx] or not line_mask[child_idx]:
-                        continue
-                    if parent_idx >= len(line_bboxes) or child_idx >= len(line_bboxes):
-                        continue
-
-                    # 计算几何特征
-                    parent_bbox = torch.tensor(line_bboxes[parent_idx], dtype=torch.float32)
-                    child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
-                    geom_feat = compute_geometry_features(parent_bbox, child_bbox)
-
-                    self.samples.append({
-                        "parent_feat": line_features[parent_idx],
-                        "child_feat": line_features[child_idx],
-                        "geom_feat": geom_feat,
-                        "label": 0,  # none
-                        "relation": "none"
-                    })
 
         logger.info(f"总样本数: {len(self.samples)}")
 
@@ -209,15 +167,14 @@ class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
     """
     多分类关系数据集：从已加载的特征列表构造
     支持 Covmatch 分割
+
+    标签：0=connect, 1=contain, 2=equality
     """
 
     def __init__(
         self,
-        features_list: list,
-        neg_ratio: float = 1.0
+        features_list: list
     ):
-        self.neg_ratio = neg_ratio
-
         logger.info(f"从 {len(features_list)} 个文档构造多分类训练样本...")
         self.samples = []
 
@@ -230,8 +187,7 @@ class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
 
             num_lines = len(line_parent_ids)
 
-            # 1. 收集所有正样本（有标注的关系）
-            positive_pairs = []
+            # 收集所有有效样本
             for child_idx in range(num_lines):
                 parent_idx = line_parent_ids[child_idx]
                 relation = line_relations[child_idx]
@@ -240,8 +196,6 @@ class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
                 if parent_idx < 0 or parent_idx >= num_lines:
                     continue
                 if relation not in RELATION_LABELS:
-                    continue
-                if relation == "none" or relation == "meta":
                     continue
 
                 # 检查mask和bbox有效性
@@ -268,43 +222,6 @@ class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
                     "label": label,
                     "relation": relation
                 })
-
-                positive_pairs.append((parent_idx, child_idx))
-
-            # 2. 负采样（标记为none=0）
-            if self.neg_ratio > 0:
-                num_neg_samples = int(len(positive_pairs) * self.neg_ratio)
-
-                for _ in range(num_neg_samples):
-                    # 随机选择两个不同的行
-                    child_idx = random.randint(0, num_lines - 1)
-                    parent_idx = random.randint(0, child_idx) if child_idx > 0 else 0
-
-                    # 跳过已有的正样本对
-                    if (parent_idx, child_idx) in positive_pairs:
-                        continue
-
-                    # 检查有效性
-                    max_idx = line_mask.shape[0]
-                    if parent_idx >= max_idx or child_idx >= max_idx:
-                        continue
-                    if not line_mask[parent_idx] or not line_mask[child_idx]:
-                        continue
-                    if parent_idx >= len(line_bboxes) or child_idx >= len(line_bboxes):
-                        continue
-
-                    # 计算几何特征
-                    parent_bbox = torch.tensor(line_bboxes[parent_idx], dtype=torch.float32)
-                    child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
-                    geom_feat = compute_geometry_features(parent_bbox, child_bbox)
-
-                    self.samples.append({
-                        "parent_feat": line_features[parent_idx],
-                        "child_feat": line_features[child_idx],
-                        "geom_feat": geom_feat,
-                        "label": 0,  # none
-                        "relation": "none"
-                    })
 
         logger.info(f"总样本数: {len(self.samples)}")
 
@@ -445,8 +362,6 @@ def main():
                         help="批大小")
     parser.add_argument("--learning_rate", type=float, default=5e-4,
                         help="学习率")
-    parser.add_argument("--neg_ratio", type=float, default=1.5,
-                        help="负样本比例")
     parser.add_argument("--max_chunks", type=int, default=-1,
                         help="加载的chunk数量（-1=全部）")
 
@@ -458,7 +373,6 @@ def main():
     max_steps = args.max_steps or int(os.getenv("MAX_STEPS", "300"))
     batch_size = args.batch_size
     learning_rate = args.learning_rate
-    neg_ratio = args.neg_ratio
     max_chunks = args.max_chunks if args.max_chunks > 0 else int(os.getenv("MAX_CHUNKS", "-1"))
     if max_chunks == -1:
         max_chunks = None
@@ -502,13 +416,11 @@ def main():
 
     # 创建数据集
     train_dataset = MultiClassRelationDatasetFromFeatures(
-        features_list=train_features,
-        neg_ratio=neg_ratio
+        features_list=train_features
     )
 
     val_dataset = MultiClassRelationDatasetFromFeatures(
-        features_list=val_features,
-        neg_ratio=neg_ratio
+        features_list=val_features
     )
 
     logger.info(f"训练集大小: {len(train_dataset)}")
@@ -532,7 +444,7 @@ def main():
     # 创建模型
     model = MultiClassRelationClassifier(
         hidden_size=768,
-        num_relations=4,  # none, connect, contain, equality
+        num_relations=NUM_RELATIONS,  # connect, contain, equality
         use_geometry=True,  # 使用几何特征
         dropout=0.1
     ).to(device)
