@@ -291,10 +291,15 @@ class JointModel(nn.Module):
         parent_loss = torch.tensor(0.0, device=device)
         parent_correct = 0
         parent_total = 0
+        gru_hidden = None  # GRU 隐状态，用于 Stage 4
 
         if self.lambda_parent > 0:
             if self.use_gru:
-                parent_logits = self.stage3(line_features, line_mask)
+                # 论文对齐：获取 GRU 隐状态用于 Stage 4
+                parent_logits, gru_hidden = self.stage3(
+                    line_features, line_mask, return_gru_hidden=True
+                )
+                # gru_hidden: [B, L+1, gru_hidden_size]，包括 ROOT
 
                 # ==================== 诊断检查点 4: parent_logits 检查 ====================
                 pl_issue = check_tensor("parent_logits", parent_logits)
@@ -375,41 +380,56 @@ class JointModel(nn.Module):
             outputs["loss"] = outputs["loss"] + parent_loss * self.lambda_parent
 
         # ==================== Stage 4: Relation Classification ====================
+        # 论文对齐：使用 GRU 隐状态 h_i, h_j 作为输入
+        # P_rel_(i,j) = softmax(LinearProj(Concat(h_i, h_j)))
         rel_loss = torch.tensor(0.0, device=device)
         rel_correct = 0
         rel_total = 0
 
-        if self.lambda_rel > 0 and line_relations is not None and line_bboxes is not None:
+        if self.lambda_rel > 0 and line_relations is not None:
+            # 检查是否有 GRU 隐状态（只有使用 GRU 时才有）
+            if gru_hidden is None:
+                # 如果没有 GRU 隐状态，则使用 line_features（兼容非 GRU 模式）
+                gru_hidden = line_features  # [B, L, H]
+                use_gru_offset = False
+            else:
+                # gru_hidden 包含 ROOT，形状是 [B, L+1, gru_hidden_size]
+                # 位置 0 是 ROOT，位置 1~L 是原始行
+                use_gru_offset = True
+
             for b in range(batch_size):
-                sample_features = line_features[b]
                 sample_mask = line_mask[b]
                 sample_parent_ids = line_parent_ids[b]
                 sample_relations = line_relations[b]
-                sample_bboxes = line_bboxes[b]
 
-                num_lines = sample_mask.sum().item()
+                num_lines = int(sample_mask.sum().item())
 
-                for child_idx in range(int(num_lines)):
+                for child_idx in range(num_lines):
                     parent_idx = sample_parent_ids[child_idx].item()
                     rel_label = sample_relations[child_idx].item()
 
                     # 跳过无效样本：parent_id 无效 或 rel_label 是 padding (-100)
                     if parent_idx < 0 or parent_idx >= num_lines:
                         continue
-                    if rel_label == -100:  # padding
+                    if rel_label == -100:  # padding / none
                         continue
 
-                    parent_feat = sample_features[parent_idx]
-                    child_feat = sample_features[child_idx]
-
-                    parent_bbox = sample_bboxes[parent_idx]
-                    child_bbox = sample_bboxes[child_idx]
-                    geom_feat = compute_geometry_features(parent_bbox, child_bbox)
+                    # 获取 GRU 隐状态
+                    if use_gru_offset:
+                        # gru_hidden 索引需要 +1（因为位置 0 是 ROOT）
+                        # parent_idx=-1 (ROOT) 对应 gru_hidden 索引 0
+                        # parent_idx=0 对应 gru_hidden 索引 1
+                        parent_gru_idx = parent_idx + 1
+                        child_gru_idx = child_idx + 1
+                        parent_feat = gru_hidden[b, parent_gru_idx]
+                        child_feat = gru_hidden[b, child_gru_idx]
+                    else:
+                        parent_feat = gru_hidden[b, parent_idx]
+                        child_feat = gru_hidden[b, child_idx]
 
                     rel_logits = self.stage4(
                         parent_feat.unsqueeze(0),
                         child_feat.unsqueeze(0),
-                        geom_feat.unsqueeze(0).to(device),
                     )
 
                     target = torch.tensor([rel_label], device=device)
@@ -761,12 +781,17 @@ class E2EEvaluationCallback(TrainerCallback):
 
                     # Stage 3: 预测父节点
                     pred_parents = [-1] * actual_num_lines
+                    gru_hidden = None  # 用于 Stage 4
 
                     if hasattr(model, 'use_gru') and model.use_gru:
-                        parent_logits = model.stage3(
+                        # 论文对齐：获取 GRU 隐状态用于 Stage 4
+                        parent_logits, gru_hidden = model.stage3(
                             line_features.unsqueeze(0),
-                            line_mask.unsqueeze(0)
+                            line_mask.unsqueeze(0),
+                            return_gru_hidden=True
                         )
+                        # gru_hidden: [1, L+1, gru_hidden_size]，包括 ROOT
+                        gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
                         for child_idx in range(actual_num_lines):
                             child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]
                             pred_parent_idx = child_logits.argmax().item()
@@ -778,31 +803,31 @@ class E2EEvaluationCallback(TrainerCallback):
                             scores = model.stage3(parent_candidates, child_feat)
                             pred_parents[child_idx] = scores.argmax().item()
 
-                    # Stage 4: 预测关系
+                    # Stage 4: 预测关系（论文对齐：使用 GRU 隐状态，不使用几何特征）
                     pred_relations = [0] * actual_num_lines
 
-                    line_bboxes = batch.get("line_bboxes")
-                    if line_bboxes is not None:
-                        sample_bboxes = line_bboxes[b]
+                    for child_idx in range(actual_num_lines):
+                        parent_idx = pred_parents[child_idx]
+                        if parent_idx < 0 or parent_idx >= actual_num_lines:
+                            continue
 
-                        for child_idx in range(actual_num_lines):
-                            parent_idx = pred_parents[child_idx]
-                            if parent_idx < 0 or parent_idx >= actual_num_lines:
-                                continue
-
+                        if gru_hidden is not None:
+                            # 论文对齐：使用 GRU 隐状态
+                            # gru_hidden 包含 ROOT，所以需要 +1 偏移
+                            parent_gru_idx = parent_idx + 1
+                            child_gru_idx = child_idx + 1
+                            parent_feat = gru_hidden[parent_gru_idx]
+                            child_feat = gru_hidden[child_gru_idx]
+                        else:
+                            # 非 GRU 模式：使用 encoder 输出
                             parent_feat = line_features[parent_idx]
                             child_feat = line_features[child_idx]
-                            parent_bbox = sample_bboxes[parent_idx]
-                            child_bbox = sample_bboxes[child_idx]
 
-                            geom_feat = compute_geometry_features(parent_bbox, child_bbox)
-
-                            rel_logits = model.stage4(
-                                parent_feat.unsqueeze(0),
-                                child_feat.unsqueeze(0),
-                                geom_feat.unsqueeze(0).to(device),
-                            )
-                            pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
+                        rel_logits = model.stage4(
+                            parent_feat.unsqueeze(0),
+                            child_feat.unsqueeze(0),
+                        )
+                        pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
 
                     # 收集结果
                     for line_idx in range(min(actual_num_lines, len(gt_doc))):
@@ -1279,11 +1304,14 @@ def main():
         logger.info("Using SimpleParentFinder")
         stage3_model = SimpleParentFinder(hidden_size=768, dropout=0.1)
 
-    # Stage 4: RelationClassifier (只有3类: connect, contain, equality)
+    # Stage 4: RelationClassifier (论文对齐：使用 GRU 隐状态，只有3类，不使用几何特征)
+    # 公式：P_rel_(i,j) = softmax(LinearProj(Concat(h_i, h_j)))
+    # h_i, h_j 是 GRU 隐状态，维度是 gru_hidden_size=512
+    gru_hidden_size = 512 if model_args.use_gru else 768
     stage4_model = MultiClassRelationClassifier(
-        hidden_size=768,
-        num_relations=NUM_RELATIONS,  # 3类
-        use_geometry=True,
+        hidden_size=gru_hidden_size,  # GRU hidden size（论文对齐）
+        num_relations=NUM_RELATIONS,  # 3类: connect, contain, equality
+        use_geometry=False,  # 论文不使用几何特征
         dropout=0.1,
     )
 

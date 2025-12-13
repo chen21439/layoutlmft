@@ -172,15 +172,18 @@ class ParentFinderGRU(nn.Module):
     def forward(
         self,
         line_features,     # [batch_size, max_lines, hidden_size]
-        line_mask          # [batch_size, max_lines] - 有效行的mask
+        line_mask,         # [batch_size, max_lines] - 有效行的mask
+        return_gru_hidden=False  # 是否返回 GRU 隐状态（用于 Stage 4）
     ):
         """
         Args:
             line_features: 行级特征 [B, L, H]
             line_mask: 有效行mask [B, L]
+            return_gru_hidden: 是否返回 GRU 隐状态
 
         Returns:
             parent_logits: [B, L+1, L+1] - 每个位置i的父节点logits（包括ROOT）
+            gru_hidden (可选): [B, L+1, gru_hidden_size] - GRU 隐状态（用于关系分类）
         """
         batch_size, max_lines, hidden_size = line_features.shape
         device = line_features.device
@@ -313,7 +316,12 @@ class ParentFinderGRU(nn.Module):
 
         attention_scores = attention_scores.masked_fill(combined_mask, float('-inf'))
 
-        return attention_scores  # [B, L+1, L+1] - 父节点logits（包括ROOT）
+        if return_gru_hidden:
+            # 返回 GRU 隐状态（用于 Stage 4 关系分类）
+            # gru_output: [B, L+1, gru_hidden_size]，包括 ROOT
+            return attention_scores, gru_output
+        else:
+            return attention_scores  # [B, L+1, L+1] - 父节点logits（包括ROOT）
 
 
 def collate_fn_simple(batch):

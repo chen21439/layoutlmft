@@ -112,11 +112,13 @@ class HRDocJointDataCollator:
                     labels[i] + [self.label_pad_token_id] * padding_len
                 )
 
-            # line_ids
+            # line_ids (即使为空也要添加，保持 batch 一致性)
             if len(line_ids[i]) > 0:
                 padded_line_ids.append(
                     line_ids[i] + [-1] * padding_len
                 )
+            else:
+                padded_line_ids.append([-1] * max_length)
 
             # attention_mask
             attention_mask.append(
@@ -132,7 +134,9 @@ class HRDocJointDataCollator:
         if labels[0] is not None:
             batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
 
-        if len(line_ids[0]) > 0:
+        # 检查是否有任何样本包含 line_ids（不只是第一个样本）
+        has_line_ids = any(len(lid) > 0 for lid in line_ids)
+        if has_line_ids:
             batch["line_ids"] = torch.tensor(padded_line_ids, dtype=torch.long)
 
         # image
@@ -143,7 +147,9 @@ class HRDocJointDataCollator:
             ])
 
         # ==================== 2. Line-level数据 ====================
-        if len(line_parent_ids[0]) > 0:
+        # 检查是否有任何样本包含 line_parent_ids（不只是第一个样本）
+        has_line_parent_ids = any(len(lp) > 0 for lp in line_parent_ids)
+        if has_line_parent_ids:
             # 找出最大line数
             max_lines = max(len(lp) for lp in line_parent_ids)
 
@@ -163,6 +169,8 @@ class HRDocJointDataCollator:
 
                 # relations: 转换为索引
                 if len(line_relations[i]) > 0:
+                    # 论文只有 3 类关系：connect=0, contain=1, equality=2
+                    # none/meta 关系映射为 -100，会被 loss 忽略
                     rel_indices = [
                         self.relation2id.get(rel.lower(), -100) for rel in line_relations[i]
                     ]
@@ -179,14 +187,18 @@ class HRDocJointDataCollator:
 
             batch["line_parent_ids"] = torch.tensor(padded_line_parent_ids, dtype=torch.long)
 
-            if len(line_relations[0]) > 0:
+            # 检查是否有任何样本包含 line_relations
+            has_line_relations = any(len(lr) > 0 for lr in line_relations)
+            if has_line_relations and len(padded_line_relations) > 0:
                 batch["line_relations"] = torch.tensor(padded_line_relations, dtype=torch.long)
 
             if len(padded_line_semantic_labels) > 0:
                 batch["line_semantic_labels"] = torch.tensor(padded_line_semantic_labels, dtype=torch.long)
 
         # ==================== 3. Line bboxes ====================
-        if len(line_bboxes[0]) > 0:
+        # 检查是否有任何样本包含 line_bboxes
+        has_line_bboxes = any(len(lb) > 0 for lb in line_bboxes)
+        if has_line_bboxes:
             # 找出最大line数（与 line_parent_ids 一致）
             max_lines = max(len(lb) for lb in line_bboxes)
 

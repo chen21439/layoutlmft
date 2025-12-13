@@ -193,15 +193,19 @@ class SimpleRelationClassifier(nn.Module):
 class MultiClassRelationClassifier(nn.Module):
     """
     多类别关系分类器（论文对齐版本）
-    严格按照 HRDoc 论文实现：单层线性投影
+    严格按照 HRDoc 论文实现：单层线性投影，不使用几何特征
     公式：P_rel_(i,j) = softmax(LinearProj(Concat(h_i, h_j)))
+
+    注意：
+    - 论文中只有 3 类关系 (connect, contain, equality)，不含 none
+    - 输入是 GRU 隐状态 h_i, h_j，维度是 gru_hidden_size（默认 512）
     """
 
     def __init__(
         self,
-        hidden_size: int = 768,
-        num_relations: int = 4,  # Connect, Contain, Equality, None
-        use_geometry: bool = False,
+        hidden_size: int = 512,  # GRU hidden size（论文对齐）
+        num_relations: int = 3,  # connect=0, contain=1, equality=2（论文对齐）
+        use_geometry: bool = False,  # 论文不使用几何特征
         dropout: float = 0.1
     ):
         super().__init__()

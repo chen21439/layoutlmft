@@ -38,8 +38,9 @@ CLASS2ID = {
 }
 ID2CLASS = {v: k for k, v in CLASS2ID.items()}
 
-# 关系映射
-RELATION2ID = {"none": 0, "connect": 1, "contain": 2, "equality": 3}
+# 关系映射（论文对齐：只有3类，不含none）
+# connect=0, contain=1, equality=2
+RELATION2ID = {"connect": 0, "contain": 1, "equality": 2}
 ID2RELATION = {v: k for k, v in RELATION2ID.items()}
 
 
@@ -352,12 +353,17 @@ def evaluate_e2e(
 
                 # Stage 3: 预测父节点
                 pred_parents = [-1] * actual_num_lines
+                gru_hidden = None  # 用于 Stage 4
 
                 if hasattr(model, 'use_gru') and model.use_gru:
-                    parent_logits = model.stage3(
+                    # 论文对齐：获取 GRU 隐状态用于 Stage 4
+                    parent_logits, gru_hidden = model.stage3(
                         line_features.unsqueeze(0),
-                        line_mask.unsqueeze(0)
+                        line_mask.unsqueeze(0),
+                        return_gru_hidden=True
                     )
+                    # gru_hidden: [1, L+1, gru_hidden_size]，包括 ROOT
+                    gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
 
                     for child_idx in range(actual_num_lines):
                         child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]
@@ -371,31 +377,32 @@ def evaluate_e2e(
                         scores = model.stage3(parent_candidates, child_feat)
                         pred_parents[child_idx] = scores.argmax().item()
 
-                # Stage 4: 预测关系
-                pred_relations = [0] * actual_num_lines  # 默认 none
+                # Stage 4: 预测关系（论文对齐：使用 GRU 隐状态，不使用几何特征）
+                pred_relations = [0] * actual_num_lines
 
-                line_bboxes = batch.get("line_bboxes")
-                if line_bboxes is not None:
-                    sample_bboxes = line_bboxes[b]
+                for child_idx in range(actual_num_lines):
+                    parent_idx = pred_parents[child_idx]
+                    if parent_idx < 0 or parent_idx >= actual_num_lines:
+                        continue
 
-                    for child_idx in range(actual_num_lines):
-                        parent_idx = pred_parents[child_idx]
-                        if parent_idx < 0 or parent_idx >= actual_num_lines:
-                            continue
-
+                    if gru_hidden is not None:
+                        # 论文对齐：使用 GRU 隐状态
+                        # gru_hidden 包含 ROOT，所以需要 +1 偏移
+                        parent_gru_idx = parent_idx + 1
+                        child_gru_idx = child_idx + 1
+                        parent_feat = gru_hidden[parent_gru_idx]
+                        child_feat = gru_hidden[child_gru_idx]
+                    else:
+                        # 非 GRU 模式：使用 encoder 输出
                         parent_feat = line_features[parent_idx]
                         child_feat = line_features[child_idx]
-                        parent_bbox = sample_bboxes[parent_idx]
-                        child_bbox = sample_bboxes[child_idx]
 
-                        geom_feat = compute_geometry_features(parent_bbox, child_bbox)
-
-                        rel_logits = model.stage4(
-                            parent_feat.unsqueeze(0),
-                            child_feat.unsqueeze(0),
-                            geom_feat.unsqueeze(0).to(device),
-                        )
-                        pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
+                    # 论文对齐：不使用几何特征
+                    rel_logits = model.stage4(
+                        parent_feat.unsqueeze(0),
+                        child_feat.unsqueeze(0),
+                    )
+                    pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
 
                 # 收集分类结果
                 for line_idx in range(min(actual_num_lines, len(gt_doc))):

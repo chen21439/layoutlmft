@@ -118,21 +118,12 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
                     continue
                 if not line_mask[parent_idx] or not line_mask[child_idx]:
                     continue
-                if parent_idx >= len(line_bboxes) or child_idx >= len(line_bboxes):
-                    continue
-
-                # 计算几何特征
-                parent_bbox = torch.tensor(line_bboxes[parent_idx], dtype=torch.float32)
-                child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
-                geom_feat = compute_geometry_features(parent_bbox, child_bbox)
-
-                # 获取关系标签
+                # 获取关系标签（论文对齐：不使用几何特征）
                 label = RELATION_LABELS[relation]
 
                 self.samples.append({
                     "parent_feat": line_features[parent_idx],
                     "child_feat": line_features[child_idx],
-                    "geom_feat": geom_feat,
                     "label": label,
                     "relation": relation
                 })
@@ -155,10 +146,10 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        # 论文对齐：不使用几何特征
         return {
             "parent_feat": sample["parent_feat"],
             "child_feat": sample["child_feat"],
-            "geom_feat": sample["geom_feat"],
             "label": torch.tensor(sample["label"], dtype=torch.long),
         }
 
@@ -204,21 +195,12 @@ class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
                     continue
                 if not line_mask[parent_idx] or not line_mask[child_idx]:
                     continue
-                if parent_idx >= len(line_bboxes) or child_idx >= len(line_bboxes):
-                    continue
-
-                # 计算几何特征
-                parent_bbox = torch.tensor(line_bboxes[parent_idx], dtype=torch.float32)
-                child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
-                geom_feat = compute_geometry_features(parent_bbox, child_bbox)
-
-                # 获取关系标签
+                # 获取关系标签（论文对齐：不使用几何特征）
                 label = RELATION_LABELS[relation]
 
                 self.samples.append({
                     "parent_feat": line_features[parent_idx],
                     "child_feat": line_features[child_idx],
-                    "geom_feat": geom_feat,
                     "label": label,
                     "relation": relation
                 })
@@ -241,10 +223,10 @@ class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        # 论文对齐：不使用几何特征
         return {
             "parent_feat": sample["parent_feat"],
             "child_feat": sample["child_feat"],
-            "geom_feat": sample["geom_feat"],
             "label": torch.tensor(sample["label"], dtype=torch.long),
         }
 
@@ -263,13 +245,12 @@ def train_epoch(model, dataloader, optimizer, criterion, device, log_interval=10
     for batch_idx, batch in enumerate(tqdm(dataloader, desc="训练")):
         parent_feat = batch["parent_feat"].to(device)
         child_feat = batch["child_feat"].to(device)
-        geom_feat = batch["geom_feat"].to(device)
         labels = batch["label"].to(device)
 
         optimizer.zero_grad()
 
-        # 前向传播
-        logits = model(parent_feat, child_feat, geom_feat)
+        # 前向传播（论文对齐：不使用几何特征）
+        logits = model(parent_feat, child_feat)
         loss = criterion(logits, labels)
 
         # 反向传播
@@ -319,10 +300,10 @@ def evaluate(model, dataloader, criterion, device):
         for batch in tqdm(dataloader, desc="评估"):
             parent_feat = batch["parent_feat"].to(device)
             child_feat = batch["child_feat"].to(device)
-            geom_feat = batch["geom_feat"].to(device)
             labels = batch["label"].to(device)
 
-            logits = model(parent_feat, child_feat, geom_feat)
+            # 论文对齐：不使用几何特征
+            logits = model(parent_feat, child_feat)
             loss = criterion(logits, labels)
 
             total_loss += loss.item()
@@ -441,11 +422,12 @@ def main():
         num_workers=0
     )
 
-    # 创建模型
+    # 创建模型（论文对齐：不使用几何特征）
+    # 公式：P_rel_(i,j) = softmax(LinearProj(Concat(h_i, h_j)))
     model = MultiClassRelationClassifier(
         hidden_size=768,
-        num_relations=NUM_RELATIONS,  # connect, contain, equality
-        use_geometry=True,  # 使用几何特征
+        num_relations=NUM_RELATIONS,  # 3类: connect, contain, equality
+        use_geometry=False,  # 论文不使用几何特征
         dropout=0.1
     ).to(device)
 
