@@ -25,7 +25,7 @@ paths:
   hrdoc_data_dir: "/mnt/e/models/data/Section/HRDS"
 
   # Stage 1: Fine-tuned LayoutLMv2 model checkpoint
-  stage1_model_path: "/mnt/e/models/train_data/layoutlmft/hrdoc_train/checkpoint-5000"
+  stage1_model_path: "/mnt/e/models/train_data/layoutlmft/exp_20251212_172343/stage1_hrdh/checkpoint-5500"
 
   # Feature files directory (Stage 2 input/output)
   features_dir: "/mnt/e/models/train_data/layoutlmft/line_features_doc"

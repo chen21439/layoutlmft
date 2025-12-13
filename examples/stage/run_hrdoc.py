@@ -450,21 +450,30 @@ def main():
                     class_stats[pred]["fp"] += 1
 
         # Build final results
-        # 计算 macro F1
+        # 计算 macro F1（只计算有样本的类别，避免无样本类别拉低分数）
         f1_scores = []
+        f1_scores_all = []  # 包含所有类别（用于兼容性）
         for cls in label_list:
             stats = class_stats[cls]
             tp, fp, fn = stats["tp"], stats["fp"], stats["fn"]
+            gt_count = stats["gt_count"]
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            f1_scores.append(f1)
+            f1_scores_all.append(f1)
+            # 只有当该类别在 GT 或 Pred 中出现过时才计入 macro F1
+            if gt_count > 0 or stats["pred_count"] > 0:
+                f1_scores.append(f1)
 
-        macro_f1 = np.mean(f1_scores)
+        # 使用有样本类别的 macro F1（更合理的评估）
+        macro_f1 = np.mean(f1_scores) if f1_scores else 0.0
+        # 也计算包含所有类别的 macro F1（用于对比）
+        macro_f1_all = np.mean(f1_scores_all)
 
         final_results = {
             "accuracy": overall_accuracy,
             "macro_f1": macro_f1,
+            "macro_f1_all": macro_f1_all,  # 包含所有14类（用于对比）
         }
 
         # Add per-class metrics for all 14 classes
@@ -514,7 +523,8 @@ def main():
 
         logger.info("-" * 55)
         logger.info(f"Overall Accuracy: {overall_accuracy:.1%}")
-        logger.info(f"Macro F1: {macro_f1:.1%}")
+        logger.info(f"Macro F1: {macro_f1:.1%} (only classes with samples)")
+        logger.info(f"Macro F1 (all 14): {macro_f1_all:.1%} (includes zero-sample classes)")
         logger.info("-" * 55)
         logger.info("Confusion pairs (GT -> Pred rate):")
         for cls_a, cls_b in MONITOR_PAIRS:

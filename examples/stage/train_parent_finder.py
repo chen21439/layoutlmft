@@ -27,7 +27,12 @@ from functools import partial
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
+# 添加 stage 目录到路径
+STAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, STAGE_ROOT)
+
 from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST, get_num_labels
+from util.covmatch_utils import CovmatchFeatureLoader
 
 logger = logging.getLogger(__name__)
 
@@ -556,6 +561,123 @@ class ParentFinderDatasetSimple(torch.utils.data.Dataset):
         return self.samples[idx]
 
 
+class ParentFinderDatasetSimpleFromFeatures(torch.utils.data.Dataset):
+    """
+    简化版数据集：从已加载的特征列表构造样本对
+    与 ParentFinderDatasetSimple 功能相同，但接受已加载的特征列表作为输入
+    支持 Covmatch 分割
+    """
+
+    def __init__(
+        self,
+        features_list: list,
+        max_samples_per_page: int = 10,
+        max_candidates: int = 20
+    ):
+        self.max_samples_per_page = max_samples_per_page
+        self.max_candidates = max_candidates
+
+        from layoutlmft.models.relation_classifier import compute_geometry_features
+
+        logger.info(f"从 {len(features_list)} 个文档构造训练样本...")
+        self.samples = []
+
+        for page_data in tqdm(features_list, desc="构造样本"):
+            line_features = page_data["line_features"].squeeze(0)
+            line_mask = page_data["line_mask"].squeeze(0)
+            line_parent_ids = page_data["line_parent_ids"]
+            line_bboxes = page_data["line_bboxes"]
+
+            num_lines = line_mask.sum().item()
+
+            # 随机采样一些 child
+            valid_child_indices = []
+            for child_idx in range(1, num_lines):
+                parent_idx = line_parent_ids[child_idx]
+                if parent_idx >= 0 and parent_idx < num_lines:
+                    valid_child_indices.append(child_idx)
+
+            if len(valid_child_indices) > self.max_samples_per_page:
+                sampled_indices = random.sample(valid_child_indices, self.max_samples_per_page)
+            else:
+                sampled_indices = valid_child_indices
+
+            for child_idx in sampled_indices:
+                parent_idx_gt = line_parent_ids[child_idx]
+
+                if parent_idx_gt < 0 or parent_idx_gt >= child_idx:
+                    continue
+
+                # 候选父节点
+                max_cands = min(self.max_candidates, child_idx)
+                candidate_start = max(0, child_idx - max_cands)
+                candidate_indices = list(range(candidate_start, child_idx))
+
+                if len(candidate_indices) == 0:
+                    continue
+
+                # 提取特征
+                child_feat = line_features[child_idx]
+                parent_feats = line_features[candidate_indices]
+
+                # 几何特征
+                child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
+                geom_feats = []
+                for cand_idx in candidate_indices:
+                    cand_bbox = torch.tensor(line_bboxes[cand_idx], dtype=torch.float32)
+                    geom_feat = compute_geometry_features(cand_bbox, child_bbox)
+                    geom_feats.append(geom_feat)
+                geom_feats = torch.stack(geom_feats, dim=0)
+
+                # 找到 ground truth 在候选列表中的索引
+                if parent_idx_gt in candidate_indices:
+                    label = candidate_indices.index(parent_idx_gt)
+                else:
+                    continue
+
+                self.samples.append({
+                    "child_feat": child_feat,
+                    "parent_feats": parent_feats,
+                    "geom_feats": geom_feats,
+                    "label": label
+                })
+
+        logger.info(f"总样本数: {len(self.samples)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+class ParentFinderDatasetFromFeatures(torch.utils.data.Dataset):
+    """
+    完整版数据集：从已加载的特征列表构造
+    支持 Covmatch 分割
+    """
+
+    def __init__(self, features_list: list):
+        self.page_features = features_list
+        logger.info(f"从 {len(self.page_features)} 个文档创建数据集")
+
+    def __len__(self):
+        return len(self.page_features)
+
+    def __getitem__(self, idx):
+        page_data = self.page_features[idx]
+
+        line_features = page_data["line_features"].squeeze(0)  # [max_lines, H]
+        line_mask = page_data["line_mask"].squeeze(0)  # [max_lines]
+        line_parent_ids = torch.tensor(page_data["line_parent_ids"], dtype=torch.long)
+
+        return {
+            "line_features": line_features,
+            "line_mask": line_mask,
+            "line_parent_ids": line_parent_ids
+        }
+
+
 class ParentFinderDataset(torch.utils.data.Dataset):
     """
     完整版数据集：支持页面级别和文档级别（全量加载，适合小数据集）
@@ -761,6 +883,11 @@ def train_epoch_simple(model, dataloader, optimizer, criterion, device):
 
 def evaluate_simple(model, dataloader, device):
     """简化版评估"""
+    # 处理空数据集的情况
+    if len(dataloader) == 0:
+        logger.warning("验证集为空，跳过评估")
+        return 0.0
+
     model.eval()
     all_preds = []
     all_labels = []
@@ -897,6 +1024,11 @@ def train_epoch(model, dataloader, optimizer, criterion, device):
 
 def evaluate(model, dataloader, device):
     """评估模型"""
+    # 处理空数据集的情况
+    if len(dataloader.dataset) == 0:
+        logger.warning("验证集为空，跳过评估")
+        return 0.0
+
     model.eval()
     total_parent_correct = 0
     total_parent_count = 0
@@ -1033,10 +1165,6 @@ def main():
     parser = argparse.ArgumentParser(description="训练父节点查找器（任务2）")
     parser.add_argument("--mode", type=str, default="simple", choices=["simple", "full"],
                         help="训练模式：simple=简化版（内存友好），full=完整论文方法（需要大显存）")
-    parser.add_argument("--features_dir", type=str, default=None,
-                        help="特征文件目录（默认：本机=/mnt/e/models/train_data/layoutlmft/line_features）")
-    parser.add_argument("--output_dir", type=str, default=None,
-                        help="输出目录（默认：本机=/mnt/e/models/train_data/layoutlmft）")
     parser.add_argument("--batch_size", type=int, default=None,
                         help="批大小（simple默认128，full默认2）")
     parser.add_argument("--num_epochs", type=int, default=20,
@@ -1062,19 +1190,9 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
 
-    # 路径配置：优先级 命令行参数 > 环境变量 > 默认值
-    # 默认使用文档级别特征目录 (line_features_doc)
-    if args.features_dir:
-        features_dir = args.features_dir
-    else:
-        features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
-
-    if args.output_dir:
-        output_dir_base = args.output_dir
-    else:
-        output_dir_base = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft")
-
-    output_dir = os.path.join(output_dir_base, f"parent_finder_{args.mode}")
+    # 路径配置：从环境变量读取（由 wrapper 脚本设置）
+    features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
+    output_dir = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft/parent_finder")
 
     # 根据训练级别设置 max_lines_limit
     if args.max_lines_limit is not None:
@@ -1125,21 +1243,29 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用设备: {device}")
 
-    # 构建 Child-Parent Distribution Matrix（已禁用）
-    # cp_matrix_path = os.path.join(output_dir, "child_parent_matrix.npy")
-    # if os.path.exists(cp_matrix_path):
-    #     logger.info(f"加载已有的 M_cp: {cp_matrix_path}")
-    #     cp_matrix = ChildParentDistributionMatrix(num_classes=num_classes)
-    #     cp_matrix.load(cp_matrix_path)
-    # else:
-    #     cp_matrix = build_child_parent_matrix(features_dir, split="train", num_classes=num_classes)
-    #     cp_matrix.save(cp_matrix_path)
+    # Covmatch 配置（从环境变量读取）
+    covmatch_dir = os.getenv("HRDOC_SPLIT_DIR", None)
+    if covmatch_dir:
+        logger.info(f"使用 Covmatch 分割: {covmatch_dir}")
+    else:
+        logger.info("未使用 Covmatch，将使用原始 train/validation 分割")
+
+    # 创建特征加载器
+    feature_loader = CovmatchFeatureLoader(
+        features_dir=features_dir,
+        covmatch_dir=covmatch_dir,
+        max_chunks=max_chunks,
+        doc_name_key="document_name"
+    )
 
     # 根据模式创建数据集和模型
     if args.mode == "simple":
-        # 简化版
-        train_dataset = ParentFinderDatasetSimple(features_dir, split="train", max_chunks=max_chunks)
-        val_dataset = ParentFinderDatasetSimple(features_dir, split="validation", max_chunks=max_chunks)
+        # 简化版 - 使用 CovmatchFeatureLoader 加载特征
+        train_features = feature_loader.get_train_features()
+        val_features = feature_loader.get_validation_features()
+
+        train_dataset = ParentFinderDatasetSimpleFromFeatures(train_features, max_samples_per_page=10, max_candidates=20)
+        val_dataset = ParentFinderDatasetSimpleFromFeatures(val_features, max_samples_per_page=10, max_candidates=20)
 
         logger.info(f"训练集: {len(train_dataset)} 样本")
         logger.info(f"验证集: {len(val_dataset)} 样本")
@@ -1160,24 +1286,15 @@ def main():
         eval_fn = evaluate_simple
 
     else:  # full
-        # 完整版 - 使用流式加载（内存友好）
-        train_dataset = ChunkIterableDataset(
-            features_dir,
-            split="train",
-            max_chunks=max_chunks,
-            shuffle=True,  # 在 Dataset 内部打乱
-            seed=42
-        )
-        val_dataset = ChunkIterableDataset(
-            features_dir,
-            split="validation",
-            max_chunks=max_chunks,
-            shuffle=False,  # 验证集不打乱
-            seed=42
-        )
+        # 完整版 - 使用 CovmatchFeatureLoader 加载特征
+        train_features = feature_loader.get_train_features()
+        val_features = feature_loader.get_validation_features()
 
-        logger.info(f"训练集: {train_dataset.total_pages} 页（流式加载）")
-        logger.info(f"验证集: {val_dataset.total_pages} 页（流式加载）")
+        train_dataset = ParentFinderDatasetFromFeatures(train_features)
+        val_dataset = ParentFinderDatasetFromFeatures(val_features)
+
+        logger.info(f"训练集: {len(train_dataset)} 文档")
+        logger.info(f"验证集: {len(val_dataset)} 文档")
 
         # 创建dataloader（IterableDataset 不支持 shuffle 参数）
         # 使用 partial 设置最大行数限制（防止极端情况导致显存爆炸）

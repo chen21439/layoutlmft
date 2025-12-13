@@ -43,6 +43,7 @@ class HRDocJointDataCollator:
     4. line_parent_ids - SubTask2 父节点标签（line-level）
     5. line_relations - SubTask3 关系标签（line-level）
     6. line_semantic_labels - line的语义类别（用于soft-mask）
+    7. line_bboxes - line的边界框坐标（用于几何特征计算）
     """
 
     tokenizer: PreTrainedTokenizerBase
@@ -79,6 +80,7 @@ class HRDocJointDataCollator:
         line_ids = [f.get("line_ids", []) for f in features]
         line_parent_ids = [f.get("line_parent_ids", []) for f in features]
         line_relations = [f.get("line_relations", []) for f in features]
+        line_bboxes = [f.get("line_bboxes", []) for f in features]
 
         batch_size = len(features)
 
@@ -186,6 +188,31 @@ class HRDocJointDataCollator:
 
             if len(padded_line_semantic_labels) > 0:
                 batch["line_semantic_labels"] = torch.tensor(padded_line_semantic_labels, dtype=torch.long)
+
+        # ==================== 3. Line bboxes ====================
+        if len(line_bboxes[0]) > 0:
+            # 找出最大line数（与 line_parent_ids 一致）
+            max_lines = max(len(lb) for lb in line_bboxes)
+
+            padded_line_bboxes = []
+            for i in range(batch_size):
+                num_lines = len(line_bboxes[i])
+                padding_len = max_lines - num_lines
+
+                # 将每个 bbox 转换为 list（如果是 dict 或其他格式）
+                bboxes = []
+                for bb in line_bboxes[i]:
+                    if isinstance(bb, (list, tuple)):
+                        bboxes.append(list(bb))
+                    else:
+                        bboxes.append([0, 0, 0, 0])
+
+                # padding
+                padded_line_bboxes.append(
+                    bboxes + [[0, 0, 0, 0]] * padding_len
+                )
+
+            batch["line_bboxes"] = torch.tensor(padded_line_bboxes, dtype=torch.float)
 
         return batch
 

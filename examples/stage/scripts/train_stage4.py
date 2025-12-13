@@ -211,21 +211,29 @@ def main():
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
+    # Get covmatch directory for train/validation split
+    covmatch_dir = config.dataset.get_covmatch_dir(args.dataset)
+    if os.path.exists(covmatch_dir):
+        print(f"Using covmatch split: {covmatch_dir}")
+    else:
+        covmatch_dir = None
+        print(f"Warning: Covmatch dir not found, using original train/test split")
+
     # Build training command
     train_script = os.path.join(PROJECT_ROOT, "examples", "stage", "train_multiclass_relation.py")
 
     cmd_args = [
         sys.executable, train_script,
+        "--max_steps", str(config.relation_classifier.max_steps),
+        "--max_chunks", str(config.relation_classifier.max_chunks),
+        "--batch_size", str(config.relation_classifier.batch_size),
+        "--learning_rate", str(config.relation_classifier.learning_rate),
+        "--neg_ratio", str(config.relation_classifier.neg_ratio),
     ]
 
     # Print command
     print("\nRunning command:")
     print(" ".join(cmd_args))
-    print(f"Environment variables:")
-    print(f"  LAYOUTLMFT_FEATURES_DIR={features_dir}")
-    print(f"  LAYOUTLMFT_OUTPUT_DIR={os.path.dirname(output_dir)}")
-    print(f"  MAX_STEPS={config.relation_classifier.max_steps}")
-    print(f"  MAX_CHUNKS={config.relation_classifier.max_chunks}")
     print()
 
     # Mark stage as started
@@ -234,13 +242,19 @@ def main():
     # Execute training
     import subprocess
 
-    # Set PYTHONPATH to include project root
+    # Set PYTHONPATH and environment variables
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH", "")
     if pythonpath:
         env["PYTHONPATH"] = f"{PROJECT_ROOT}:{pythonpath}"
     else:
         env["PYTHONPATH"] = PROJECT_ROOT
+
+    # Set paths via environment variables (consistent with Stage 1/2/3)
+    env["LAYOUTLMFT_FEATURES_DIR"] = features_dir
+    env["LAYOUTLMFT_OUTPUT_DIR"] = output_dir
+    if covmatch_dir:
+        env["HRDOC_SPLIT_DIR"] = covmatch_dir
 
     result = subprocess.run(cmd_args, cwd=PROJECT_ROOT, env=env)
 

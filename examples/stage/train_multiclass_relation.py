@@ -22,6 +22,10 @@ from sklearn.metrics import (
     classification_report
 )
 
+# 添加 stage 目录到路径
+STAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, STAGE_ROOT)
+
 from layoutlmft.models.relation_classifier import (
     MultiClassRelationClassifier,
     FocalLoss,
@@ -29,6 +33,7 @@ from layoutlmft.models.relation_classifier import (
     RELATION_NAMES,
     compute_geometry_features
 )
+from util.covmatch_utils import CovmatchFeatureLoader
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +205,133 @@ class MultiClassRelationDataset(torch.utils.data.Dataset):
         }
 
 
+class MultiClassRelationDatasetFromFeatures(torch.utils.data.Dataset):
+    """
+    多分类关系数据集：从已加载的特征列表构造
+    支持 Covmatch 分割
+    """
+
+    def __init__(
+        self,
+        features_list: list,
+        neg_ratio: float = 1.0
+    ):
+        self.neg_ratio = neg_ratio
+
+        logger.info(f"从 {len(features_list)} 个文档构造多分类训练样本...")
+        self.samples = []
+
+        for page_data in tqdm(features_list, desc="构造样本"):
+            line_features = page_data["line_features"].squeeze(0)  # [max_lines, H]
+            line_mask = page_data["line_mask"].squeeze(0)  # [max_lines]
+            line_parent_ids = page_data["line_parent_ids"]
+            line_relations = page_data["line_relations"]
+            line_bboxes = page_data["line_bboxes"]  # numpy array [num_lines, 4]
+
+            num_lines = len(line_parent_ids)
+
+            # 1. 收集所有正样本（有标注的关系）
+            positive_pairs = []
+            for child_idx in range(num_lines):
+                parent_idx = line_parent_ids[child_idx]
+                relation = line_relations[child_idx]
+
+                # 跳过无效样本
+                if parent_idx < 0 or parent_idx >= num_lines:
+                    continue
+                if relation not in RELATION_LABELS:
+                    continue
+                if relation == "none" or relation == "meta":
+                    continue
+
+                # 检查mask和bbox有效性
+                max_idx = line_mask.shape[0]
+                if parent_idx >= max_idx or child_idx >= max_idx:
+                    continue
+                if not line_mask[parent_idx] or not line_mask[child_idx]:
+                    continue
+                if parent_idx >= len(line_bboxes) or child_idx >= len(line_bboxes):
+                    continue
+
+                # 计算几何特征
+                parent_bbox = torch.tensor(line_bboxes[parent_idx], dtype=torch.float32)
+                child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
+                geom_feat = compute_geometry_features(parent_bbox, child_bbox)
+
+                # 获取关系标签
+                label = RELATION_LABELS[relation]
+
+                self.samples.append({
+                    "parent_feat": line_features[parent_idx],
+                    "child_feat": line_features[child_idx],
+                    "geom_feat": geom_feat,
+                    "label": label,
+                    "relation": relation
+                })
+
+                positive_pairs.append((parent_idx, child_idx))
+
+            # 2. 负采样（标记为none=0）
+            if self.neg_ratio > 0:
+                num_neg_samples = int(len(positive_pairs) * self.neg_ratio)
+
+                for _ in range(num_neg_samples):
+                    # 随机选择两个不同的行
+                    child_idx = random.randint(0, num_lines - 1)
+                    parent_idx = random.randint(0, child_idx) if child_idx > 0 else 0
+
+                    # 跳过已有的正样本对
+                    if (parent_idx, child_idx) in positive_pairs:
+                        continue
+
+                    # 检查有效性
+                    max_idx = line_mask.shape[0]
+                    if parent_idx >= max_idx or child_idx >= max_idx:
+                        continue
+                    if not line_mask[parent_idx] or not line_mask[child_idx]:
+                        continue
+                    if parent_idx >= len(line_bboxes) or child_idx >= len(line_bboxes):
+                        continue
+
+                    # 计算几何特征
+                    parent_bbox = torch.tensor(line_bboxes[parent_idx], dtype=torch.float32)
+                    child_bbox = torch.tensor(line_bboxes[child_idx], dtype=torch.float32)
+                    geom_feat = compute_geometry_features(parent_bbox, child_bbox)
+
+                    self.samples.append({
+                        "parent_feat": line_features[parent_idx],
+                        "child_feat": line_features[child_idx],
+                        "geom_feat": geom_feat,
+                        "label": 0,  # none
+                        "relation": "none"
+                    })
+
+        logger.info(f"总样本数: {len(self.samples)}")
+
+        # 统计各类别样本数
+        label_counts = {}
+        for s in self.samples:
+            label = s["label"]
+            label_counts[label] = label_counts.get(label, 0) + 1
+
+        for label_id, count in sorted(label_counts.items()):
+            label_name = RELATION_NAMES[label_id]
+            percentage = count / len(self.samples) * 100
+            logger.info(f"  {label_name} (id={label_id}): {count} ({percentage:.1f}%)")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        return {
+            "parent_feat": sample["parent_feat"],
+            "child_feat": sample["child_feat"],
+            "geom_feat": sample["geom_feat"],
+            "label": torch.tensor(sample["label"], dtype=torch.long),
+        }
+
+
 def train_epoch(model, dataloader, optimizer, criterion, device, log_interval=100):
     """训练一个epoch"""
     model.train()
@@ -256,6 +388,11 @@ def train_epoch(model, dataloader, optimizer, criterion, device, log_interval=10
 
 def evaluate(model, dataloader, criterion, device):
     """评估模型"""
+    # 处理空数据集的情况
+    if len(dataloader) == 0:
+        logger.warning("验证集为空，跳过评估")
+        return 0.0, 0.0, 0.0, 0.0, 0.0, None, "No validation data"
+
     model.eval()
     total_loss = 0
     all_preds = []
@@ -299,22 +436,30 @@ def evaluate(model, dataloader, criterion, device):
 
 
 def main():
-    # 配置
-    # 获取项目根目录（脚本在 examples/ 下，根目录是上一级）
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)
+    import argparse
 
-    # 从特征文件目录读取（支持页面级别和文档级别）
-    # 默认使用文档级别特征目录 (line_features_doc)
-    # 页面级别: LAYOUTLMFT_FEATURES_DIR=/path/to/line_features
-    # 文档级别: LAYOUTLMFT_FEATURES_DIR=/path/to/line_features_doc (默认)
+    parser = argparse.ArgumentParser(description="训练多分类关系分类器（Stage 4）")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="最大训练步数")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="批大小")
+    parser.add_argument("--learning_rate", type=float, default=5e-4,
+                        help="学习率")
+    parser.add_argument("--neg_ratio", type=float, default=1.5,
+                        help="负样本比例")
+    parser.add_argument("--max_chunks", type=int, default=-1,
+                        help="加载的chunk数量（-1=全部）")
+
+    args = parser.parse_args()
+
+    # 配置（从环境变量读取，由 wrapper 脚本设置）
     features_dir = os.getenv("LAYOUTLMFT_FEATURES_DIR", "/mnt/e/models/train_data/layoutlmft/line_features_doc")
-    output_dir = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft") + "/multiclass_relation"
-    max_steps = int(os.getenv("MAX_STEPS", "300"))  # 训练步数（可通过环境变量MAX_STEPS设置）
-    batch_size = 32
-    learning_rate = 5e-4
-    neg_ratio = 1.5  # 负样本比例
-    max_chunks = int(os.getenv("MAX_CHUNKS", "-1"))  # 限制chunk数量（-1表示加载全部）
+    output_dir = os.getenv("LAYOUTLMFT_OUTPUT_DIR", "/mnt/e/models/train_data/layoutlmft/multiclass_relation")
+    max_steps = args.max_steps or int(os.getenv("MAX_STEPS", "300"))
+    batch_size = args.batch_size
+    learning_rate = args.learning_rate
+    neg_ratio = args.neg_ratio
+    max_chunks = args.max_chunks if args.max_chunks > 0 else int(os.getenv("MAX_CHUNKS", "-1"))
     if max_chunks == -1:
         max_chunks = None
 
@@ -336,20 +481,34 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"使用设备: {device}")
 
-    # 创建训练集（使用train chunk）
-    train_dataset = MultiClassRelationDataset(
+    # Covmatch 配置（从环境变量读取）
+    covmatch_dir = os.getenv("HRDOC_SPLIT_DIR", None)
+    if covmatch_dir:
+        logger.info(f"使用 Covmatch 分割: {covmatch_dir}")
+    else:
+        logger.info("未使用 Covmatch，将使用原始 train/validation 分割")
+
+    # 创建特征加载器
+    feature_loader = CovmatchFeatureLoader(
         features_dir=features_dir,
-        split="train",
-        neg_ratio=neg_ratio,
-        max_chunks=max_chunks
+        covmatch_dir=covmatch_dir,
+        max_chunks=max_chunks,
+        doc_name_key="document_name"
     )
 
-    # 创建验证集（使用validation chunk，独立数据）
-    val_dataset = MultiClassRelationDataset(
-        features_dir=features_dir,
-        split="validation",
-        neg_ratio=neg_ratio,
-        max_chunks=max_chunks
+    # 使用 CovmatchFeatureLoader 加载特征
+    train_features = feature_loader.get_train_features()
+    val_features = feature_loader.get_validation_features()
+
+    # 创建数据集
+    train_dataset = MultiClassRelationDatasetFromFeatures(
+        features_list=train_features,
+        neg_ratio=neg_ratio
+    )
+
+    val_dataset = MultiClassRelationDatasetFromFeatures(
+        features_list=val_features,
+        neg_ratio=neg_ratio
     )
 
     logger.info(f"训练集大小: {len(train_dataset)}")

@@ -210,6 +210,14 @@ def main():
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
+    # Get covmatch directory for train/validation split
+    covmatch_dir = config.dataset.get_covmatch_dir(args.dataset)
+    if os.path.exists(covmatch_dir):
+        print(f"Using covmatch split: {covmatch_dir}")
+    else:
+        covmatch_dir = None
+        print(f"Warning: Covmatch dir not found, using original train/test split")
+
     # Build training command
     train_script = os.path.join(PROJECT_ROOT, "examples", "stage", "train_parent_finder.py")
 
@@ -217,8 +225,6 @@ def main():
         sys.executable, train_script,
         "--mode", config.parent_finder.mode,
         "--level", config.parent_finder.level,
-        "--features_dir", features_dir,
-        "--output_dir", output_dir,
         "--batch_size", str(config.parent_finder.batch_size),
         "--num_epochs", str(config.parent_finder.num_epochs),
         "--learning_rate", str(config.parent_finder.learning_rate),
@@ -237,13 +243,19 @@ def main():
     # Execute training
     import subprocess
 
-    # Set PYTHONPATH to include project root
+    # Set PYTHONPATH and environment variables
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH", "")
     if pythonpath:
         env["PYTHONPATH"] = f"{PROJECT_ROOT}:{pythonpath}"
     else:
         env["PYTHONPATH"] = PROJECT_ROOT
+
+    # Set paths via environment variables (consistent with Stage 1/2)
+    env["LAYOUTLMFT_FEATURES_DIR"] = features_dir
+    env["LAYOUTLMFT_OUTPUT_DIR"] = output_dir
+    if covmatch_dir:
+        env["HRDOC_SPLIT_DIR"] = covmatch_dir
 
     result = subprocess.run(cmd_args, cwd=PROJECT_ROOT, env=env)
 

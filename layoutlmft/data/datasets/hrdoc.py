@@ -252,9 +252,8 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 if not os.path.exists(image_path):
                     image_path = os.path.join(img_dir, f"{base_name}.jpg")
 
-                # 再尝试 HRDS 格式
+                # 再尝试 HRDS 格式: images/{doc_name}/{doc_name}_{page}.jpg
                 if not os.path.exists(image_path):
-                    # HRDS: images/{doc_name}/{doc_name}_{page}.jpg
                     hrds_img_path = os.path.join(img_dir, base_name, f"{base_name}_{page_num}.jpg")
                     if os.path.exists(hrds_img_path):
                         image_path = hrds_img_path
@@ -263,6 +262,17 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         hrds_img_path = os.path.join(img_dir, base_name, f"{base_name}_{page_num}.png")
                         if os.path.exists(hrds_img_path):
                             image_path = hrds_img_path
+
+                # 再尝试 HRDH 格式: images/{doc_name}/{page}.png (页码无前缀)
+                if not os.path.exists(image_path):
+                    hrdh_img_path = os.path.join(img_dir, base_name, f"{page_num}.png")
+                    if os.path.exists(hrdh_img_path):
+                        image_path = hrdh_img_path
+                    else:
+                        # 尝试 jpg
+                        hrdh_img_path = os.path.join(img_dir, base_name, f"{page_num}.jpg")
+                        if os.path.exists(hrdh_img_path):
+                            image_path = hrdh_img_path
 
                 if not os.path.exists(image_path):
                     logger.warning(f"Image not found for {file} page {page_num}, skipping...")
