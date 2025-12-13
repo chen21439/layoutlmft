@@ -113,6 +113,13 @@ class HRDoc(datasets.GeneratorBasedBuilder):
         train_doc_ids = None
         dev_doc_ids = None
 
+        # 快速模式：限制每个 split 生成的样本数（用于快速调试）
+        # 设置 HRDOC_MAX_SAMPLES=100 则每个 split 最多生成 100 条
+        max_samples_str = os.getenv("HRDOC_MAX_SAMPLES", None)
+        max_samples = int(max_samples_str) if max_samples_str else None
+        if max_samples:
+            logger.info(f"Quick mode enabled: max_samples={max_samples}")
+
         if split_dir and os.path.exists(split_dir):
             # 读取 split 文件
             train_ids_file = os.path.join(split_dir, "train_doc_ids.json")
@@ -138,14 +145,14 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.TRAIN,
-                        gen_kwargs={"filepath": train_path, "doc_ids": train_doc_ids}
+                        gen_kwargs={"filepath": train_path, "doc_ids": train_doc_ids, "max_samples": max_samples}
                     )
                 )
                 # Validation split (from dev_doc_ids)
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.VALIDATION,
-                        gen_kwargs={"filepath": train_path, "doc_ids": dev_doc_ids}
+                        gen_kwargs={"filepath": train_path, "doc_ids": dev_doc_ids, "max_samples": max_samples}
                     )
                 )
         else:
@@ -155,7 +162,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.TRAIN,
-                        gen_kwargs={"filepath": train_path, "doc_ids": None}
+                        gen_kwargs={"filepath": train_path, "doc_ids": None, "max_samples": max_samples}
                     )
                 )
 
@@ -165,7 +172,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.VALIDATION,
-                        gen_kwargs={"filepath": val_path, "doc_ids": None}
+                        gen_kwargs={"filepath": val_path, "doc_ids": None, "max_samples": max_samples}
                     )
                 )
 
@@ -175,16 +182,18 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             splits.append(
                 datasets.SplitGenerator(
                     name=datasets.Split.TEST,
-                    gen_kwargs={"filepath": test_path, "doc_ids": None}
+                    gen_kwargs={"filepath": test_path, "doc_ids": None, "max_samples": max_samples}
                 )
             )
 
         return splits
 
-    def _generate_examples(self, filepath, doc_ids=None):
+    def _generate_examples(self, filepath, doc_ids=None, max_samples=None):
         logger.info("⏳ Generating examples from = %s", filepath)
         if doc_ids is not None:
             logger.info(f"  Filtering to {len(doc_ids)} docs")
+        if max_samples is not None:
+            logger.info(f"  Limiting to {max_samples} samples (quick mode)")
 
         # 支持两种目录结构：
         # 1. FUNSD格式: train/annotations/, train/images/
@@ -334,3 +343,8 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     "page_number": page_num,         # 页码
                 }
                 guid += 1
+
+                # 快速模式：达到 max_samples 后停止生成
+                if max_samples is not None and guid >= max_samples:
+                    logger.info(f"  Reached max_samples={max_samples}, stopping generation")
+                    return
