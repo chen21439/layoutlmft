@@ -114,11 +114,16 @@ class HRDoc(datasets.GeneratorBasedBuilder):
         dev_doc_ids = None
 
         # 快速模式：限制每个 split 生成的样本数（用于快速调试）
-        # 设置 HRDOC_MAX_SAMPLES=100 则每个 split 最多生成 100 条
+        # HRDOC_MAX_SAMPLES=100 限制最多生成 100 个页面
+        # HRDOC_MAX_DOCS=10 限制最多处理 10 个文档（推荐，保证文档完整性）
         max_samples_str = os.getenv("HRDOC_MAX_SAMPLES", None)
         max_samples = int(max_samples_str) if max_samples_str else None
+        max_docs_str = os.getenv("HRDOC_MAX_DOCS", None)
+        max_docs = int(max_docs_str) if max_docs_str else None
         if max_samples:
             logger.info(f"Quick mode enabled: max_samples={max_samples}")
+        if max_docs:
+            logger.info(f"Quick mode enabled: max_docs={max_docs}")
 
         if split_dir and os.path.exists(split_dir):
             # 读取 split 文件
@@ -145,14 +150,14 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.TRAIN,
-                        gen_kwargs={"filepath": train_path, "doc_ids": train_doc_ids, "max_samples": max_samples}
+                        gen_kwargs={"filepath": train_path, "doc_ids": train_doc_ids, "max_samples": max_samples, "max_docs": max_docs}
                     )
                 )
                 # Validation split (from dev_doc_ids)
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.VALIDATION,
-                        gen_kwargs={"filepath": train_path, "doc_ids": dev_doc_ids, "max_samples": max_samples}
+                        gen_kwargs={"filepath": train_path, "doc_ids": dev_doc_ids, "max_samples": max_samples, "max_docs": max_docs}
                     )
                 )
         else:
@@ -162,7 +167,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.TRAIN,
-                        gen_kwargs={"filepath": train_path, "doc_ids": None, "max_samples": max_samples}
+                        gen_kwargs={"filepath": train_path, "doc_ids": None, "max_samples": max_samples, "max_docs": max_docs}
                     )
                 )
 
@@ -172,7 +177,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 splits.append(
                     datasets.SplitGenerator(
                         name=datasets.Split.VALIDATION,
-                        gen_kwargs={"filepath": val_path, "doc_ids": None, "max_samples": max_samples}
+                        gen_kwargs={"filepath": val_path, "doc_ids": None, "max_samples": max_samples, "max_docs": max_docs}
                     )
                 )
 
@@ -182,18 +187,20 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             splits.append(
                 datasets.SplitGenerator(
                     name=datasets.Split.TEST,
-                    gen_kwargs={"filepath": test_path, "doc_ids": None, "max_samples": max_samples}
+                    gen_kwargs={"filepath": test_path, "doc_ids": None, "max_samples": max_samples, "max_docs": max_docs}
                 )
             )
 
         return splits
 
-    def _generate_examples(self, filepath, doc_ids=None, max_samples=None):
+    def _generate_examples(self, filepath, doc_ids=None, max_samples=None, max_docs=None):
         logger.info("⏳ Generating examples from = %s", filepath)
         if doc_ids is not None:
             logger.info(f"  Filtering to {len(doc_ids)} docs")
         if max_samples is not None:
             logger.info(f"  Limiting to {max_samples} samples (quick mode)")
+        if max_docs is not None:
+            logger.info(f"  Limiting to {max_docs} docs (quick mode)")
 
         # 支持两种目录结构：
         # 1. FUNSD格式: train/annotations/, train/images/

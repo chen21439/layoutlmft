@@ -285,20 +285,10 @@ class JointModel(nn.Module):
                 # 输出: parent_logits [B, L+1, L+1]
                 parent_logits = self.stage3(line_features, line_mask)
 
-                # 调试：检查 NaN 和 Inf 的来源
+                # 检查 NaN（只在有 NaN 时才报警，-inf 是正常的因果 mask）
                 num_nan = torch.isnan(parent_logits).sum().item()
-                num_all_inf_rows = (torch.isinf(parent_logits).all(dim=-1)).sum().item()
-                valid_lines = line_mask.sum().item()
-
-                if num_nan > 0 or num_all_inf_rows > 0:
-                    logger.warning(
-                        f"[DEBUG] parent_logits issue: "
-                        f"num_nan={num_nan}, num_all_inf_rows={num_all_inf_rows}, "
-                        f"valid_lines={valid_lines}, shape={parent_logits.shape}"
-                    )
-
-                # 检查 NaN
                 if num_nan > 0:
+                    logger.warning(f"[DEBUG] parent_logits has NaN: {num_nan}")
                     # 跳过这个 batch，避免 NaN 传播
                     pass
                 else:
