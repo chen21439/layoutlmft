@@ -407,7 +407,8 @@ class JointModel(nn.Module):
                     # 跳过无效样本
                     if parent_idx < 0 or parent_idx >= num_lines:
                         continue
-                    if rel_label < 0 or rel_label >= 4:  # 0=none, 1=connect, 2=contain, 3=equality
+                    # 跳过 none/meta (rel_label=0) 和无效标签，只训练 connect/contain/equality
+                    if rel_label <= 0 or rel_label >= 4:  # 1=connect, 2=contain, 3=equality
                         continue
 
                     # 获取特征
@@ -1347,6 +1348,7 @@ def train(args: JointTrainingArguments):
     model.train()
 
     global_step = 0
+    accumulated_steps = 0  # 用于跟踪梯度累积的 batch 数
     best_metric = 0
     best_checkpoint = None
 
@@ -1398,7 +1400,8 @@ def train(args: JointTrainingArguments):
             loss.backward()
 
         # Gradient accumulation
-        if (global_step + 1) % args.gradient_accumulation_steps == 0:
+        accumulated_steps += 1
+        if accumulated_steps % args.gradient_accumulation_steps == 0:
             if scaler:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -1411,8 +1414,9 @@ def train(args: JointTrainingArguments):
             lr_scheduler.step()
             optimizer.zero_grad()
 
-        global_step += 1
-        progress_bar.update(1)
+            # 只在优化器步数后才增加 global_step（与 HuggingFace Trainer 一致）
+            global_step += 1
+            progress_bar.update(1)
 
         # Logging
         if global_step % args.logging_steps == 0:
@@ -1437,7 +1441,7 @@ def train(args: JointTrainingArguments):
 
             # 端到端评估（分类 + Parent + TEDS）
             logger.info("\n[End-to-End Evaluation]")
-            e2e_results = evaluate_e2e(model, eval_loader, device, compute_teds=not args.quick)
+            e2e_results = evaluate_e2e(model, eval_loader, device, args, global_step)
             log_eval_results(e2e_results, prefix="E2E")
 
             # 使用 line-level macro F1 作为主要指标（与论文一致）
@@ -1491,7 +1495,7 @@ def train(args: JointTrainingArguments):
     exp_manager.mark_stage_completed(
         args.exp, "joint", args.dataset,
         best_checkpoint=os.path.basename(best_checkpoint) if best_checkpoint else "final",
-        metrics={"macro_f1": best_metric} if best_metric > 0 else None,
+        metrics={"macro_f1": float(best_metric)} if best_metric > 0 else None,
     )
 
     logger.info("=" * 60)

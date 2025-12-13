@@ -29,6 +29,23 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 
+def convert_to_python_types(obj):
+    """Convert numpy types to Python native types for YAML serialization."""
+    import numpy as np
+    if isinstance(obj, dict):
+        return {k: convert_to_python_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_python_types(v) for v in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
+
+
 @dataclass
 class StageState:
     """Dynamic state for a training stage."""
@@ -299,6 +316,8 @@ class ExperimentManager:
             stage_state['best_checkpoint'] = best_checkpoint
 
         if metrics is not None:
+            # Convert numpy types to Python native types for YAML serialization
+            metrics = convert_to_python_types(metrics)
             stage_state['metrics'].update(metrics)
 
         # Update last_run timestamp

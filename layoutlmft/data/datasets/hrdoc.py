@@ -326,7 +326,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     parent_id = item.get("parent_id", -1)
                     relation = item.get("relation", "none")
 
-                    # 记录当前line的元数据
+                    # 记录当前line的元数据（暂存原始值，后面重映射）
                     line_parent_ids.append(parent_id)
                     line_relations.append(relation)
 
@@ -337,14 +337,42 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         bboxes.append(normalize_bbox(w["box"], size))
                         line_ids.append(item_line_id)
 
+                # ==================== 重映射 line_parent_ids ====================
+                # 将全局 parent_id 转换为页面内的本地索引
+                # 构建 global_line_id -> local_idx 的映射
+                unique_line_ids = []
+                seen = set()
+                for lid in line_ids:
+                    if lid not in seen:
+                        unique_line_ids.append(lid)
+                        seen.add(lid)
+
+                global_to_local = {global_id: local_idx for local_idx, global_id in enumerate(unique_line_ids)}
+
+                # 重映射 parent_ids
+                remapped_parent_ids = []
+                for parent_id in line_parent_ids:
+                    if parent_id == -1:
+                        # ROOT 节点保持 -1
+                        remapped_parent_ids.append(-1)
+                    elif parent_id in global_to_local:
+                        # 父节点在当前页面内，映射到本地索引
+                        remapped_parent_ids.append(global_to_local[parent_id])
+                    else:
+                        # 父节点不在当前页面（跨页引用），标记为 -1（ROOT）
+                        remapped_parent_ids.append(-1)
+
+                # 同样重映射 line_ids 为本地索引
+                remapped_line_ids = [global_to_local[lid] for lid in line_ids]
+
                 yield guid, {
                     "id": str(guid),
                     "tokens": tokens,
                     "bboxes": bboxes,
                     "ner_tags": ner_tags,
                     "image": image,
-                    "line_ids": line_ids,
-                    "line_parent_ids": line_parent_ids,
+                    "line_ids": remapped_line_ids,  # 使用重映射后的本地索引
+                    "line_parent_ids": remapped_parent_ids,  # 使用重映射后的本地索引
                     "line_relations": line_relations,
                     "document_name": document_name,  # 文档名称
                     "page_number": page_num,         # 页码
