@@ -90,6 +90,7 @@ from train_parent_finder import (
 from util.eval_utils import compute_macro_f1, log_per_class_metrics
 from util.checkpoint_utils import get_latest_checkpoint, get_best_model
 from util.experiment_manager import ensure_experiment
+from util.hrdoc_eval import evaluate_stage1, evaluate_e2e, log_eval_results
 
 # HRDoc 评估工具
 HRDOC_UTILS_PATH = os.path.join(PROJECT_ROOT, "HRDoc", "utils")
@@ -1425,20 +1426,30 @@ def train(args: JointTrainingArguments):
 
         # Evaluation
         if global_step % args.eval_steps == 0 and eval_loader:
-            logger.info(f"\n--- Evaluation at step {global_step} ---")
-            eval_results = evaluate(model, eval_loader, device, args)
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Evaluation at step {global_step}")
+            logger.info("="*60)
 
-            log_str = f"Eval: loss={eval_results['loss']:.4f}"
-            log_str += f", acc={eval_results['accuracy']:.4f}"
-            log_str += f", macro_f1={eval_results['macro_f1']:.4f}"
-            if "parent_acc" in eval_results:
-                log_str += f", parent_acc={eval_results['parent_acc']:.4f}"
-            if "rel_acc" in eval_results:
-                log_str += f", rel_acc={eval_results['rel_acc']:.4f}"
+            # Stage1 评估（line-level 分类 F1，与论文一致）
+            logger.info("\n[Stage1 Evaluation - Line-level Classification]")
+            stage1_results = evaluate_stage1(model, eval_loader, device)
+            log_eval_results(stage1_results, prefix="Stage1")
+
+            # 端到端评估（分类 + Parent + TEDS）
+            logger.info("\n[End-to-End Evaluation]")
+            e2e_results = evaluate_e2e(model, eval_loader, device, compute_teds=not args.quick)
+            log_eval_results(e2e_results, prefix="E2E")
+
+            # 使用 line-level macro F1 作为主要指标（与论文一致）
+            current_metric = stage1_results.get("line_macro_f1", 0.0)
+
+            # 汇总日志
+            log_str = f"Summary: line_macro_f1={current_metric:.4f}"
+            if "parent_accuracy" in e2e_results:
+                log_str += f", parent_acc={e2e_results['parent_accuracy']:.4f}"
+            if "macro_teds" in e2e_results:
+                log_str += f", teds={e2e_results['macro_teds']:.4f}"
             logger.info(log_str)
-
-            # 保存最佳模型
-            current_metric = eval_results["macro_f1"]
             if current_metric > best_metric:
                 best_metric = current_metric
                 best_checkpoint = os.path.join(args.output_dir, f"checkpoint-{global_step}")
