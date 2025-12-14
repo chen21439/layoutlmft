@@ -21,6 +21,88 @@ from sklearn.metrics import (
 logger = logging.getLogger(__name__)
 
 
+# ==============================================================================
+# Token → Line 聚合函数（统一使用多数投票）
+# ==============================================================================
+
+def aggregate_token_to_line_predictions(
+    token_predictions: List[int],
+    line_ids: List[int],
+    method: str = "majority"
+) -> Dict[int, int]:
+    """
+    将 token-level 预测聚合为 line-level 预测
+
+    这是统一的聚合函数，推理和评估都应该使用这个函数。
+
+    Args:
+        token_predictions: 每个 token 的预测标签
+        line_ids: 每个 token 对应的 line_id（-1 表示无效 token）
+        method: 聚合方法
+            - "majority": 多数投票（推荐）
+            - "first": 取首个 token（不推荐，仅用于兼容）
+
+    Returns:
+        Dict[line_id, predicted_label]: 每行的预测标签
+    """
+    if method == "majority":
+        # 收集每行所有 token 的预测
+        line_pred_tokens = defaultdict(list)
+        for pred, line_id in zip(token_predictions, line_ids):
+            if line_id >= 0:
+                line_pred_tokens[line_id].append(pred)
+
+        # 多数投票
+        line_predictions = {}
+        for line_id, preds in line_pred_tokens.items():
+            line_predictions[line_id] = Counter(preds).most_common(1)[0][0]
+
+        return line_predictions
+
+    elif method == "first":
+        # 取首个 token（不推荐）
+        line_predictions = {}
+        for pred, line_id in zip(token_predictions, line_ids):
+            if line_id >= 0 and line_id not in line_predictions:
+                line_predictions[line_id] = pred
+        return line_predictions
+
+    else:
+        raise ValueError(f"Unknown aggregation method: {method}")
+
+
+def extract_line_labels_from_tokens(
+    token_labels: List[int],
+    line_ids: List[int]
+) -> Dict[int, int]:
+    """
+    从 token-level GT 标签中提取 line-level 标签
+
+    原始数据本来就是 line-level 的，tokenize 时被展开成 token-level，
+    同一行的所有 token 标签相同。这里只是还原回 line-level。
+
+    Args:
+        token_labels: 每个 token 的 GT 标签（-100 表示忽略）
+        line_ids: 每个 token 对应的 line_id
+
+    Returns:
+        Dict[line_id, gt_label]: 每行的 GT 标签
+    """
+    line_labels = {}
+    for label, line_id in zip(token_labels, line_ids):
+        if line_id >= 0 and label >= 0 and line_id not in line_labels:
+            line_labels[line_id] = label
+    return line_labels
+
+
+# 保留旧名称以兼容
+aggregate_token_to_line_labels = extract_line_labels_from_tokens
+
+
+# ==============================================================================
+# 基础评估函数
+# ==============================================================================
+
 def compute_accuracy(predictions: List[int], labels: List[int]) -> float:
     """计算准确率"""
     return accuracy_score(labels, predictions)

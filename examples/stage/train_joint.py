@@ -40,6 +40,31 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from collections import defaultdict, Counter
 
 import numpy as np
+
+# ==================== GPU 设置（必须在 import torch 之前）====================
+# CUDA_VISIBLE_DEVICES must be set before importing torch
+def _setup_gpu_early():
+    """在 import torch 之前设置 GPU，避免 DataParallel 问题"""
+    # 尝试从命令行参数中提取 --env
+    env = "test"  # 默认值
+    for i, arg in enumerate(sys.argv):
+        if arg == "--env" and i + 1 < len(sys.argv):
+            env = sys.argv[i + 1]
+            break
+
+    # 加载配置获取 GPU 设置
+    try:
+        PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        sys.path.insert(0, PROJECT_ROOT)
+        from configs.config_loader import load_config
+        config = load_config(env)
+        if config.gpu.cuda_visible_devices:
+            os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu.cuda_visible_devices
+    except Exception as e:
+        pass  # 如果加载失败，使用默认 GPU 设置
+
+_setup_gpu_early()
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,6 +82,7 @@ from transformers import (
     get_scheduler,
 )
 from transformers.trainer_utils import get_last_checkpoint
+from transformers.modeling_outputs import TokenClassifierOutput
 from torch.optim import AdamW
 
 # 添加项目路径
@@ -90,7 +116,11 @@ from train_parent_finder import (
     ChildParentDistributionMatrix,
     build_child_parent_matrix,
 )
-from util.eval_utils import compute_macro_f1, log_per_class_metrics
+from util.eval_utils import (
+    compute_macro_f1,
+    log_per_class_metrics,
+    aggregate_token_to_line_predictions,
+)
 from util.checkpoint_utils import get_latest_checkpoint, get_best_model
 from util.experiment_manager import ensure_experiment
 
@@ -133,6 +163,13 @@ class JointTrainingArguments(TrainingArguments):
     """
     # 覆盖 output_dir 添加默认值
     output_dir: str = field(default="./output/joint", metadata={"help": "Output directory"})
+
+    # 评估设置（覆盖默认值）
+    evaluation_strategy: str = field(default="steps", metadata={"help": "Evaluation strategy"})
+    eval_steps: int = field(default=500, metadata={"help": "Evaluation steps"})
+    save_strategy: str = field(default="steps", metadata={"help": "Save strategy"})
+    save_steps: int = field(default=500, metadata={"help": "Save steps"})
+    logging_steps: int = field(default=100, metadata={"help": "Logging steps"})
 
     # 实验管理
     exp: str = field(default=None, metadata={"help": "Experiment ID"})
@@ -210,36 +247,6 @@ class JointModel(nn.Module):
         device = input_ids.device
         batch_size = input_ids.shape[0]
 
-        # ==================== 诊断检查点 1: 输入检查 ====================
-        def check_tensor(name, t):
-            """检查 tensor 是否包含 NaN/Inf，返回诊断信息"""
-            if t is None:
-                return None
-            if not isinstance(t, torch.Tensor):
-                return None
-            nan_count = torch.isnan(t).sum().item()
-            inf_count = torch.isinf(t).sum().item()
-            if nan_count > 0 or inf_count > 0:
-                return f"{name}: nan={nan_count}, inf={inf_count}, dtype={t.dtype}, shape={list(t.shape)}, min={t[torch.isfinite(t)].min().item() if torch.isfinite(t).any() else 'N/A'}, max={t[torch.isfinite(t)].max().item() if torch.isfinite(t).any() else 'N/A'}"
-            return None
-
-        # 检查输入
-        input_issues = []
-        for name, tensor in [("input_ids", input_ids), ("bbox", bbox),
-                              ("attention_mask", attention_mask), ("image", image)]:
-            issue = check_tensor(name, tensor)
-            if issue:
-                input_issues.append(issue)
-
-        if input_issues:
-            logger.warning(f"[DIAG] Input issues detected:\n  " + "\n  ".join(input_issues))
-
-        # 额外检查 image 的数值范围（即使没有 NaN/Inf）
-        if image is not None and torch.isfinite(image).all():
-            img_min, img_max = image.min().item(), image.max().item()
-            if img_max > 300 or img_min < -10:  # 异常范围检测
-                logger.warning(f"[DIAG] image range suspicious: min={img_min:.2f}, max={img_max:.2f}")
-
         # ==================== Stage 1: Classification ====================
         stage1_outputs = self.stage1(
             input_ids=input_ids,
@@ -254,24 +261,18 @@ class JointModel(nn.Module):
         logits = stage1_outputs.logits
         hidden_states = stage1_outputs.hidden_states[-1]
 
-        # ==================== 诊断检查点 2: Stage1 输出检查 ====================
-        hs_issue = check_tensor("hidden_states", hidden_states)
-        if hs_issue:
-            logger.warning(f"[DIAG] Stage1 output issue: {hs_issue}")
-
-        loss_issue = check_tensor("cls_loss", cls_loss)
-        if loss_issue:
-            logger.warning(f"[DIAG] cls_loss issue: {loss_issue}")
-
         outputs = {
             "loss": cls_loss * self.lambda_cls,
             "cls_loss": cls_loss,
             "logits": logits,
         }
 
-        # 如果没有 line 信息，直接返回
+        # 如果没有 line 信息，直接返回（使用 TokenClassifierOutput 格式）
         if line_ids is None or line_parent_ids is None:
-            return outputs
+            return TokenClassifierOutput(
+                loss=outputs["loss"],
+                logits=logits,
+            )
 
         # ==================== Stage 2: Feature Extraction ====================
         # 保持梯度流，让 Stage 3/4 的 loss 可以回传到 Stage 1
@@ -281,11 +282,6 @@ class JointModel(nn.Module):
         line_features, line_mask = self.feature_extractor.extract_line_features(
             text_hidden, line_ids, pooling="mean"
         )
-
-        # ==================== 诊断检查点 3: line_features 检查 ====================
-        lf_issue = check_tensor("line_features", line_features)
-        if lf_issue:
-            logger.warning(f"[DIAG] line_features issue: {lf_issue}")
 
         # ==================== Stage 3: Parent Finding ====================
         parent_loss = torch.tensor(0.0, device=device)
@@ -301,47 +297,41 @@ class JointModel(nn.Module):
                 )
                 # gru_hidden: [B, L+1, gru_hidden_size]，包括 ROOT
 
-                # ==================== 诊断检查点 4: parent_logits 检查 ====================
-                pl_issue = check_tensor("parent_logits", parent_logits)
-                if pl_issue:
-                    logger.warning(f"[DIAG] parent_logits issue: {pl_issue}")
-                    # 跳过本批次的 parent loss 计算，避免 NaN 传播
-                else:
-                    for b in range(batch_size):
-                        sample_parent_ids = line_parent_ids[b]
-                        sample_mask = line_mask[b]
-                        num_lines = int(sample_mask.sum().item())
+                for b in range(batch_size):
+                    sample_parent_ids = line_parent_ids[b]
+                    sample_mask = line_mask[b]
+                    num_lines = int(sample_mask.sum().item())
 
-                        for child_idx in range(num_lines):
-                            gt_parent = sample_parent_ids[child_idx].item()
+                    for child_idx in range(num_lines):
+                        gt_parent = sample_parent_ids[child_idx].item()
 
-                            if gt_parent == -100:
-                                continue
-                            if gt_parent >= child_idx:
-                                continue
+                        if gt_parent == -100:
+                            continue
+                        if gt_parent >= child_idx:
+                            continue
 
-                            target_idx = gt_parent + 1 if gt_parent >= 0 else 0
-                            child_logits = parent_logits[b, child_idx + 1, :child_idx + 2]
+                        target_idx = gt_parent + 1 if gt_parent >= 0 else 0
+                        child_logits = parent_logits[b, child_idx + 1, :child_idx + 2]
 
-                            if torch.isinf(child_logits).all():
-                                continue
+                        if torch.isinf(child_logits).all():
+                            continue
 
-                            child_logits = torch.where(
-                                torch.isinf(child_logits),
-                                torch.full_like(child_logits, -1e4),
-                                child_logits
-                            )
+                        child_logits = torch.where(
+                            torch.isinf(child_logits),
+                            torch.full_like(child_logits, -1e4),
+                            child_logits
+                        )
 
-                            target = torch.tensor([target_idx], device=device)
-                            loss = F.cross_entropy(child_logits.unsqueeze(0), target)
+                        target = torch.tensor([target_idx], device=device)
+                        loss = F.cross_entropy(child_logits.unsqueeze(0), target)
 
-                            if not torch.isnan(loss):
-                                parent_loss = parent_loss + loss
-                                parent_total += 1
+                        if not torch.isnan(loss):
+                            parent_loss = parent_loss + loss
+                            parent_total += 1
 
-                            pred_parent = child_logits.argmax().item()
-                            if pred_parent == target_idx:
-                                parent_correct += 1
+                        pred_parent = child_logits.argmax().item()
+                        if pred_parent == target_idx:
+                            parent_correct += 1
             else:
                 for b in range(batch_size):
                     sample_features = line_features[b]
@@ -374,7 +364,9 @@ class JointModel(nn.Module):
 
             if parent_total > 0:
                 parent_loss = parent_loss / parent_total
-                outputs["parent_acc"] = parent_correct / parent_total
+                # 注意：不将 parent_acc 放入 outputs，因为 Trainer 会尝试 detach 它
+                # 而 float 没有 detach 方法。accuracy 通过 _current_loss_dict 记录到日志
+                self._parent_acc = parent_correct / parent_total
 
             outputs["parent_loss"] = parent_loss
             outputs["loss"] = outputs["loss"] + parent_loss * self.lambda_parent
@@ -443,12 +435,20 @@ class JointModel(nn.Module):
 
             if rel_total > 0:
                 rel_loss = rel_loss / rel_total
-                outputs["rel_acc"] = rel_correct / rel_total
+                # 注意：不将 rel_acc 放入 outputs，因为 Trainer 会尝试 detach 它
+                # 而 float 没有 detach 方法。accuracy 通过 _current_loss_dict 记录到日志
+                self._rel_acc = rel_correct / rel_total
 
             outputs["rel_loss"] = rel_loss
             outputs["loss"] = outputs["loss"] + rel_loss * self.lambda_rel
 
-        return outputs
+        # 返回 TokenClassifierOutput 格式，兼容 HuggingFace Trainer
+        # 同时保留额外的 loss 信息在 outputs 字典中供 compute_loss 使用
+        self._outputs_dict = outputs  # 保存完整的 outputs 供 compute_loss 使用
+        return TokenClassifierOutput(
+            loss=outputs["loss"],
+            logits=outputs["logits"],
+        )
 
 
 # ==================== 自定义 Trainer ====================
@@ -513,20 +513,24 @@ class JointTrainer(Trainer):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
 
         outputs = model(**inputs)
-        loss = outputs["loss"]
+        loss = outputs.loss  # TokenClassifierOutput 使用属性访问
+
+        # 从模型实例获取完整的 outputs 字典（包含各阶段 loss）
+        outputs_dict = getattr(model, "_outputs_dict", {})
 
         # 记录各 loss 用于日志
         self._current_loss_dict = {
-            "cls_loss": outputs.get("cls_loss", torch.tensor(0.0)).item(),
+            "cls_loss": outputs_dict.get("cls_loss", torch.tensor(0.0)).item() if "cls_loss" in outputs_dict else 0.0,
         }
-        if "parent_loss" in outputs:
-            self._current_loss_dict["parent_loss"] = outputs["parent_loss"].item()
-        if "rel_loss" in outputs:
-            self._current_loss_dict["rel_loss"] = outputs["rel_loss"].item()
-        if "parent_acc" in outputs:
-            self._current_loss_dict["parent_acc"] = outputs["parent_acc"]
-        if "rel_acc" in outputs:
-            self._current_loss_dict["rel_acc"] = outputs["rel_acc"]
+        if "parent_loss" in outputs_dict:
+            self._current_loss_dict["parent_loss"] = outputs_dict["parent_loss"].item()
+        if "rel_loss" in outputs_dict:
+            self._current_loss_dict["rel_loss"] = outputs_dict["rel_loss"].item()
+        # accuracy 从模型实例属性读取
+        if hasattr(model, "_parent_acc"):
+            self._current_loss_dict["parent_acc"] = model._parent_acc
+        if hasattr(model, "_rel_acc"):
+            self._current_loss_dict["rel_acc"] = model._rel_acc
 
         return (loss, outputs) if return_outputs else loss
 
@@ -668,38 +672,33 @@ class E2EEvaluationCallback(TrainerCallback):
         # 运行端到端评估
         e2e_results = self._evaluate_e2e(model, device, global_step)
 
-        # 打印结果
+        # 打印结果（紧凑表格格式）
         if e2e_results:
-            # Stage 1: 分类指标
-            logger.info("[Stage 1 - Classification]")
-            if "line_macro_f1" in e2e_results:
-                logger.info(f"  Line-level Macro F1:  {e2e_results['line_macro_f1']:.4f}")
-            if "line_micro_f1" in e2e_results:
-                logger.info(f"  Line-level Micro F1:  {e2e_results['line_micro_f1']:.4f}")
-            if "line_accuracy" in e2e_results:
-                logger.info(f"  Line-level Accuracy:  {e2e_results['line_accuracy']:.4f}")
+            # 提取指标
+            line_macro = e2e_results.get('line_macro_f1', 0) * 100
+            line_micro = e2e_results.get('line_micro_f1', 0) * 100
+            line_acc = e2e_results.get('line_accuracy', 0) * 100
+            parent_acc = e2e_results.get('parent_accuracy', 0) * 100
+            rel_acc = e2e_results.get('relation_accuracy', 0) * 100
+            rel_macro = e2e_results.get('relation_macro_f1', 0) * 100
+            teds = e2e_results.get('macro_teds', 0) * 100
+            num_lines = e2e_results.get('num_lines', 0)
 
-            # Stage 3: Parent 指标
-            logger.info("[Stage 3 - Parent Finding]")
-            if "parent_accuracy" in e2e_results:
-                logger.info(f"  Parent Accuracy:      {e2e_results['parent_accuracy']:.4f}")
+            # 紧凑格式打印
+            logger.info("┌─────────────────────────────────────────────────────────┐")
+            logger.info(f"│  Stage1(Line) │ MacroF1: {line_macro:5.2f}% │ Acc: {line_acc:5.2f}%          │")
+            logger.info(f"│  Stage3(Par)  │ Accuracy: {parent_acc:5.2f}%                           │")
+            logger.info(f"│  Stage4(Rel)  │ MacroF1: {rel_macro:5.2f}% │ Acc: {rel_acc:5.2f}%          │")
+            if teds > 0:
+                logger.info(f"│  TEDS         │ {teds:5.2f}%                                   │")
+            logger.info(f"│  Lines: {num_lines:<6}                                          │")
+            logger.info("└─────────────────────────────────────────────────────────┘")
 
-            # Stage 4: Relation 指标
-            logger.info("[Stage 4 - Relation Classification]")
-            if "relation_accuracy" in e2e_results:
-                logger.info(f"  Relation Accuracy:    {e2e_results['relation_accuracy']:.4f}")
-            if "relation_macro_f1" in e2e_results:
-                logger.info(f"  Relation Macro F1:    {e2e_results['relation_macro_f1']:.4f}")
-
-            # TEDS
-            if "macro_teds" in e2e_results:
-                logger.info("[End-to-End - TEDS]")
-                logger.info(f"  Macro TEDS:           {e2e_results['macro_teds']:.4f}")
-
-            if "num_lines" in e2e_results:
-                logger.info(f"[Total Lines: {e2e_results['num_lines']}]")
-
-            logger.info("=" * 60)
+            # 一行摘要（方便快速对比）
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
+            if teds > 0:
+                summary += f" | TEDS={teds:.1f}%"
+            logger.info(summary)
 
     def _evaluate_e2e(self, model, device, global_step: int) -> Dict[str, float]:
         """运行端到端评估"""
@@ -758,11 +757,11 @@ class E2EEvaluationCallback(TrainerCallback):
                     line_ids_b = line_ids[b]
                     sample_logits = logits[b]
 
-                    # 提取每行的预测类别
-                    line_preds = {}
-                    for token_idx, line_id in enumerate(line_ids_b.cpu().tolist()):
-                        if line_id >= 0 and line_id not in line_preds:
-                            line_preds[line_id] = sample_logits[token_idx].argmax().item()
+                    # 提取每行的预测类别（使用多数投票）
+                    token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
+                    line_preds = aggregate_token_to_line_predictions(
+                        token_preds, line_ids_b.cpu().tolist(), method="majority"
+                    )
 
                     # Stage 2: 提取特征
                     text_seq_len = batch["input_ids"].shape[1]
@@ -829,34 +828,41 @@ class E2EEvaluationCallback(TrainerCallback):
                         )
                         pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
 
-                    # 收集结果
-                    for line_idx in range(min(actual_num_lines, len(gt_doc))):
+                    # 收集结果（使用 gt_doc 中保存的 line_id 来对齐预测）
+                    for idx, gt_item in enumerate(gt_doc):
+                        if idx >= actual_num_lines:
+                            break
+                        line_id = gt_item["line_id"]  # 使用实际的 line_id
+
                         # Stage 1: 分类
-                        gt_class = CLASS2ID.get(gt_doc[line_idx]["class"], 0)
-                        pred_class = line_preds.get(line_idx, 0)
+                        gt_class = CLASS2ID.get(gt_item["class"], 0)
+                        pred_class = line_preds.get(line_id, 0)  # 用 line_id 而不是 idx
                         all_gt_classes.append(gt_class)
                         all_pred_classes.append(pred_class)
 
                         # Stage 3: Parent
-                        all_gt_parents.append(gt_doc[line_idx]["parent_id"])
-                        all_pred_parents.append(pred_parents[line_idx] if line_idx < len(pred_parents) else -1)
+                        all_gt_parents.append(gt_item["parent_id"])
+                        all_pred_parents.append(pred_parents[idx] if idx < len(pred_parents) else -1)
 
                         # Stage 4: Relation
-                        gt_rel = RELATION2ID.get(gt_doc[line_idx].get("relation", "none"), 0)
+                        gt_rel = RELATION2ID.get(gt_item.get("relation", "none"), 0)
                         all_gt_relations.append(gt_rel)
-                        all_pred_relations.append(pred_relations[line_idx] if line_idx < len(pred_relations) else 0)
+                        all_pred_relations.append(pred_relations[idx] if idx < len(pred_relations) else 0)
 
-                    # TEDS: 保存文档结构
+                    # TEDS: 保存文档结构（使用 line_id 对齐）
                     if self.compute_teds:
                         pred_doc = []
-                        for line_idx in range(actual_num_lines):
-                            class_id = line_preds.get(line_idx, 0)
+                        for idx, gt_item in enumerate(gt_doc):
+                            if idx >= actual_num_lines:
+                                break
+                            line_id = gt_item["line_id"]
+                            class_id = line_preds.get(line_id, 0)  # 用 line_id
                             class_name = ID2CLASS.get(class_id, f"class_{class_id}")
                             pred_doc.append({
                                 "class": class_name,
-                                "text": f"line_{line_idx}",
-                                "parent_id": pred_parents[line_idx],
-                                "relation": ID2RELATION.get(pred_relations[line_idx], "none"),
+                                "text": f"line_{line_id}",
+                                "parent_id": pred_parents[idx],
+                                "relation": ID2RELATION.get(pred_relations[idx], "none"),
                             })
                         all_gt_docs.append(gt_doc)
                         all_pred_docs.append(pred_doc)
@@ -1209,6 +1215,8 @@ def main():
         # max_steps=-1 表示按 epoch 训练，quick 模式强制使用 max_steps
         if training_args.max_steps <= 0 or training_args.max_steps > 20:
             training_args.max_steps = 20
+        # 设置评估策略为按步数评估（而不是按 epoch）
+        training_args.evaluation_strategy = "steps"
         training_args.eval_steps = 10
         training_args.save_steps = 10
         training_args.logging_steps = 5

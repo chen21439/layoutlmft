@@ -16,12 +16,18 @@ import json
 import logging
 import tempfile
 from typing import Dict, List, Optional, Tuple, Any
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from sklearn.metrics import f1_score, accuracy_score
+
+# 导入统一的聚合函数
+from util.eval_utils import (
+    aggregate_token_to_line_predictions,
+    aggregate_token_to_line_labels,
+)
 
 # 添加 HRDoc 工具路径
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -108,11 +114,10 @@ def extract_gt_from_batch(batch, id2label=None) -> List[Dict]:
 
         line_ids_b = line_ids[b]  # [seq_len]
 
-        # 获取每行的标签（取该行第一个 token 的标签）
-        line_labels = {}
-        for token_idx, (label, line_id) in enumerate(zip(labels.cpu().tolist(), line_ids_b.cpu().tolist())):
-            if line_id >= 0 and line_id not in line_labels and label >= 0:
-                line_labels[line_id] = label
+        # 使用统一的聚合函数获取每行的 GT 标签
+        line_labels = aggregate_token_to_line_labels(
+            labels.cpu().tolist(), line_ids_b.cpu().tolist()
+        )
 
         num_lines = len(line_labels)
         if num_lines == 0:
@@ -133,17 +138,18 @@ def extract_gt_from_batch(batch, id2label=None) -> List[Dict]:
             for i in range(min(num_lines, len(relations_b))):
                 relations[i] = ID2RELATION.get(relations_b[i], "none")
 
-        # 构建 GT
+        # 构建 GT（保存实际的 line_id 以便后续对齐）
         doc_gt = []
-        for line_idx in sorted(line_labels.keys()):
-            class_id = line_labels[line_idx]
+        for line_id in sorted(line_labels.keys()):
+            class_id = line_labels[line_id]
             class_name = id2label.get(class_id, f"class_{class_id}")
 
             doc_gt.append({
+                "line_id": line_id,  # 保存实际的 line_id
                 "class": class_name,
-                "text": f"line_{line_idx}",
-                "parent_id": parent_ids[line_idx] if line_idx < len(parent_ids) else -1,
-                "relation": relations[line_idx] if line_idx < len(relations) else "none",
+                "text": f"line_{line_id}",
+                "parent_id": parent_ids[line_id] if line_id < len(parent_ids) else -1,
+                "relation": relations[line_id] if line_id < len(relations) else "none",
             })
 
         results.append(doc_gt)
@@ -215,16 +221,13 @@ def evaluate_stage1(
                 line_ids_b = line_ids[b]
                 sample_logits = logits[b]
 
-                # 提取每行的 GT 和预测
-                line_gt = {}
-                line_pred = {}
+                # 使用统一的聚合函数
+                labels_list = labels.cpu().tolist()
+                line_ids_list = line_ids_b.cpu().tolist()
+                token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
 
-                for token_idx, (label, line_id) in enumerate(zip(labels.cpu().tolist(), line_ids_b.cpu().tolist())):
-                    if line_id >= 0 and label >= 0:
-                        if line_id not in line_gt:
-                            line_gt[line_id] = label
-                        if line_id not in line_pred:
-                            line_pred[line_id] = sample_logits[token_idx].argmax().item()
+                line_gt = aggregate_token_to_line_labels(labels_list, line_ids_list)
+                line_pred = aggregate_token_to_line_predictions(token_preds, line_ids_list, method="majority")
 
                 # 收集结果
                 for line_id in sorted(line_gt.keys()):
@@ -329,11 +332,10 @@ def evaluate_e2e(
                 line_ids_b = line_ids[b]
                 sample_logits = logits[b]
 
-                # 提取每行的预测类别
-                line_preds = {}
-                for token_idx, line_id in enumerate(line_ids_b.cpu().tolist()):
-                    if line_id >= 0 and line_id not in line_preds:
-                        line_preds[line_id] = sample_logits[token_idx].argmax().item()
+                # 使用统一的聚合函数
+                line_ids_list = line_ids_b.cpu().tolist()
+                token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
+                line_preds = aggregate_token_to_line_predictions(token_preds, line_ids_list, method="majority")
 
                 num_lines = len(line_preds)
                 if num_lines == 0:
@@ -404,32 +406,39 @@ def evaluate_e2e(
                     )
                     pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
 
-                # 收集分类结果
-                for line_idx in range(min(actual_num_lines, len(gt_doc))):
-                    gt_class = CLASS2ID.get(gt_doc[line_idx]["class"], 0)
-                    pred_class = line_preds.get(line_idx, 0)
+                # 收集分类结果（使用 line_id 对齐）
+                for idx, gt_item in enumerate(gt_doc):
+                    if idx >= actual_num_lines:
+                        break
+                    line_id = gt_item["line_id"]  # 使用实际的 line_id
+
+                    gt_class = CLASS2ID.get(gt_item["class"], 0)
+                    pred_class = line_preds.get(line_id, 0)  # 用 line_id
 
                     all_gt_classes.append(gt_class)
                     all_pred_classes.append(pred_class)
 
-                    all_gt_parents.append(gt_doc[line_idx]["parent_id"])
-                    all_pred_parents.append(pred_parents[line_idx] if line_idx < len(pred_parents) else -1)
+                    all_gt_parents.append(gt_item["parent_id"])
+                    all_pred_parents.append(pred_parents[idx] if idx < len(pred_parents) else -1)
 
-                    gt_rel = RELATION2ID.get(gt_doc[line_idx].get("relation", "none"), 0)
+                    gt_rel = RELATION2ID.get(gt_item.get("relation", "none"), 0)
                     all_gt_relations.append(gt_rel)
-                    all_pred_relations.append(pred_relations[line_idx] if line_idx < len(pred_relations) else 0)
+                    all_pred_relations.append(pred_relations[idx] if idx < len(pred_relations) else 0)
 
-                # 保存用于 TEDS
+                # 保存用于 TEDS（使用 line_id 对齐）
                 if compute_teds:
                     pred_doc = []
-                    for line_idx in range(actual_num_lines):
-                        class_id = line_preds.get(line_idx, 0)
+                    for idx, gt_item in enumerate(gt_doc):
+                        if idx >= actual_num_lines:
+                            break
+                        line_id = gt_item["line_id"]
+                        class_id = line_preds.get(line_id, 0)  # 用 line_id
                         class_name = id2label.get(class_id, f"class_{class_id}")
                         pred_doc.append({
                             "class": class_name,
-                            "text": f"line_{line_idx}",
-                            "parent_id": pred_parents[line_idx],
-                            "relation": ID2RELATION.get(pred_relations[line_idx], "none"),
+                            "text": f"line_{line_id}",
+                            "parent_id": pred_parents[idx],
+                            "relation": ID2RELATION.get(pred_relations[idx], "none"),
                         })
 
                     all_gt_docs.append(gt_doc)

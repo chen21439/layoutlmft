@@ -167,7 +167,7 @@ class HRDocJointDataCollator:
                     line_parent_ids[i] + [-100] * padding_len  # -100会被忽略
                 )
 
-                # relations: 转换为索引
+                # relations: 转换为索引（即使为空也要添加，保持 batch 一致性）
                 if len(line_relations[i]) > 0:
                     # 论文只有 3 类关系：connect=0, contain=1, equality=2
                     # none/meta 关系映射为 -100，会被 loss 忽略
@@ -177,6 +177,9 @@ class HRDocJointDataCollator:
                     padded_line_relations.append(
                         rel_indices + [-100] * padding_len  # -100 会被 loss 忽略
                     )
+                else:
+                    # 空样本用 -100 填充到 max_lines
+                    padded_line_relations.append([-100] * max_lines)
 
                 # semantic_labels: 从 features 中直接获取（已经是 14 类索引）
                 if "line_semantic_labels" in features[i]:
@@ -184,6 +187,9 @@ class HRDocJointDataCollator:
                     padded_line_semantic_labels.append(
                         sem_labels + [0] * padding_len
                     )
+                else:
+                    # 空样本用 0 填充到 max_lines
+                    padded_line_semantic_labels.append([0] * max_lines)
 
             batch["line_parent_ids"] = torch.tensor(padded_line_parent_ids, dtype=torch.long)
 
