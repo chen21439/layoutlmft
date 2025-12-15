@@ -1111,7 +1111,6 @@ def main():
 
     # 检测是否从 joint checkpoint 续训
     joint_checkpoint = None
-    has_full_hf_checkpoint = False  # 是否有完整的 HF checkpoint（可以让 Trainer 完全恢复）
 
     if training_args.resume_from_checkpoint and training_args.resume_from_checkpoint.lower() != "none":
         if training_args.resume_from_checkpoint == "auto":
@@ -1119,37 +1118,21 @@ def main():
         else:
             joint_checkpoint = training_args.resume_from_checkpoint
 
-        # 验证 checkpoint 有效性
+        # 验证 checkpoint 有效性（必须有 pytorch_model.bin + trainer_state.json）
         if joint_checkpoint:
-            has_stage3 = os.path.exists(os.path.join(joint_checkpoint, "stage3.pt"))
-            has_trainer_state = os.path.exists(os.path.join(joint_checkpoint, "trainer_state.json"))
-            has_pytorch_model = os.path.exists(os.path.join(joint_checkpoint, "pytorch_model.bin"))
+            has_pytorch_model = os.path.isfile(os.path.join(joint_checkpoint, "pytorch_model.bin"))
+            has_trainer_state = os.path.isfile(os.path.join(joint_checkpoint, "trainer_state.json"))
 
             if has_pytorch_model and has_trainer_state:
-                # 完整的 HF checkpoint，Trainer 可以完全恢复
-                has_full_hf_checkpoint = True
-                logger.info(f"Found full HF checkpoint: {joint_checkpoint} (will resume from saved step)")
-            elif has_stage3:
-                # 只有分离的模型权重，手动加载后从 step 0 开始
-                logger.info(f"Found joint checkpoint (stage files only): {joint_checkpoint}")
+                logger.info(f"Found valid checkpoint: {joint_checkpoint}")
             else:
-                logger.warning(f"Invalid checkpoint: {joint_checkpoint}, starting fresh")
+                logger.warning(f"Invalid checkpoint (missing pytorch_model.bin or trainer_state.json): {joint_checkpoint}")
+                logger.warning("Please delete old checkpoints and restart training")
                 joint_checkpoint = None
 
     # Stage 1: LayoutXLM
-    # 如果有完整 HF checkpoint，Trainer 会自动加载，这里用初始模型创建结构
-    if has_full_hf_checkpoint:
-        # 用初始模型创建结构，Trainer 会用 pytorch_model.bin 覆盖权重
-        stage1_path = model_args.model_name_or_path
-        logger.info(f"Loading Stage 1 structure from: {stage1_path} (weights will be loaded by Trainer)")
-    elif joint_checkpoint and os.path.exists(os.path.join(joint_checkpoint, "stage1")):
-        # 从 joint checkpoint 手动加载 stage1
-        stage1_path = os.path.join(joint_checkpoint, "stage1")
-        logger.info(f"Loading Stage 1 from joint checkpoint: {stage1_path}")
-    else:
-        # 从初始 stage1 模型加载
-        stage1_path = model_args.model_name_or_path
-        logger.info(f"Loading Stage 1 from: {stage1_path}")
+    stage1_path = model_args.model_name_or_path
+    logger.info(f"Loading Stage 1 from: {stage1_path}")
 
     stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
     stage1_config.num_labels = NUM_LABELS
@@ -1197,22 +1180,7 @@ def main():
         dropout=0.1,
     )
 
-    # 从 checkpoint 加载 Stage 3/4 权重（如果有完整 HF checkpoint，Trainer 会加载，这里跳过）
-    if joint_checkpoint and not has_full_hf_checkpoint:
-        stage3_path = os.path.join(joint_checkpoint, "stage3.pt")
-        stage4_path = os.path.join(joint_checkpoint, "stage4.pt")
-
-        if os.path.exists(stage3_path):
-            stage3_model.load_state_dict(torch.load(stage3_path, map_location="cpu"))
-            logger.info(f"Loaded Stage 3 from: {stage3_path}")
-
-        if os.path.exists(stage4_path):
-            stage4_model.load_state_dict(torch.load(stage4_path, map_location="cpu"))
-            logger.info(f"Loaded Stage 4 from: {stage4_path}")
-    elif has_full_hf_checkpoint:
-        logger.info("Stage 3/4 weights will be loaded by Trainer from pytorch_model.bin")
-
-    # 联合模型
+    # 联合模型（如果有 checkpoint，Trainer 会从 pytorch_model.bin 加载权重）
     model = JointModel(
         stage1_model=stage1_model,
         stage3_model=stage3_model,
@@ -1267,25 +1235,14 @@ def main():
         callbacks=callbacks,
     )
 
-    # 训练（使用前面检测到的 joint_checkpoint）
-    # Trainer 需要 trainer_state.json + pytorch_model.bin 才能完全恢复
-    # 我们的 checkpoint 结构是 stage1/ + stage3.pt + stage4.pt，没有 pytorch_model.bin
-    # 所以不使用 Trainer 的 resume_from_checkpoint，模型权重已经在前面加载了
-    resume_ckpt_for_trainer = None
+    # 训练
     if joint_checkpoint:
-        # 检查是否是完整的 HF checkpoint（有 pytorch_model.bin）
-        hf_model_path = os.path.join(joint_checkpoint, "pytorch_model.bin")
-        trainer_state_path = os.path.join(joint_checkpoint, "trainer_state.json")
-        if os.path.exists(hf_model_path) and os.path.exists(trainer_state_path):
-            resume_ckpt_for_trainer = joint_checkpoint
-            logger.info(f"Resuming training from step in: {joint_checkpoint}")
-        else:
-            logger.info(f"Loaded model weights from {joint_checkpoint}, starting from step 0 (no HF checkpoint)")
+        logger.info(f"Resuming from checkpoint: {joint_checkpoint}")
     else:
-        logger.info("Starting fresh training (no checkpoint found)")
+        logger.info("Starting fresh training")
 
     logger.info("Starting training...")
-    train_result = trainer.train(resume_from_checkpoint=resume_ckpt_for_trainer)
+    train_result = trainer.train(resume_from_checkpoint=joint_checkpoint)
 
     # 保存最终模型
     trainer.save_model()

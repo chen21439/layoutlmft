@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from collections import Counter
 
-from .eval_utils import aggregate_token_to_line_predictions
+try:
+    from .eval_utils import aggregate_token_to_line_predictions
+except ImportError:
+    from eval_utils import aggregate_token_to_line_predictions
 
 
 # ==================== 输出数据结构 ====================
