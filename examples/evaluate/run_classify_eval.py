@@ -31,16 +31,7 @@ def load_config(env: str):
 
 def get_data_dir(config, dataset: str) -> str:
     """Get data directory for dataset."""
-    if hasattr(config, 'datasets') and hasattr(config.datasets, dataset):
-        return getattr(config.datasets, dataset).data_dir
-
-    data_dir_base = os.path.dirname(config.paths.hrdoc_data_dir)
-    if dataset == "hrds":
-        return os.path.join(data_dir_base, "HRDS")
-    elif dataset == "hrdh":
-        return os.path.join(data_dir_base, "HRDH")
-    else:
-        return config.paths.hrdoc_data_dir
+    return config.dataset.get_data_dir(dataset)
 
 
 def main():
@@ -49,8 +40,8 @@ def main():
     parser.add_argument("--env", type=str, default=None,
                         help="Environment config (dev/test)")
     parser.add_argument("--dataset", type=str, default="hrds",
-                        choices=["hrds", "hrdh"],
-                        help="Dataset name (hrds/hrdh)")
+                        choices=["hrds", "hrdh", "tender"],
+                        help="Dataset name (hrds/hrdh/tender)")
     parser.add_argument("--gt_folder", type=str, default=None,
                         help="Ground truth folder path (overrides config)")
     parser.add_argument("--pred_folder", type=str, default=None,

@@ -137,29 +137,26 @@ class QuickTestConfig:
     relation_max_steps: int = 50
 
 
-@dataclass
-class SingleDatasetConfig:
-    """Single dataset configuration"""
-    data_dir: str = ""
-    description: str = ""
+# 数据集名称到目录名的映射
+DATASET_DIR_MAP = {
+    "hrds": "HRDS",
+    "hrdh": "HRDH",
+    "tender": "tender_document",
+}
 
 
 @dataclass
 class DatasetConfig:
     """Dataset configuration with default selection"""
     name: str = "hrds"  # Which dataset to use by default
+    base_dir: str = ""  # Base directory for all datasets
     covmatch: str = "doc_covmatch_dev10_seed42"  # Which covmatch split to use
-    hrds: SingleDatasetConfig = field(default_factory=SingleDatasetConfig)
-    hrdh: SingleDatasetConfig = field(default_factory=SingleDatasetConfig)
-
-    def get_current(self) -> SingleDatasetConfig:
-        """Get the currently selected dataset config"""
-        return getattr(self, self.name)
 
     def get_data_dir(self, dataset_name: str = None) -> str:
         """Get data_dir for specified or current dataset"""
         name = dataset_name or self.name
-        return getattr(self, name).data_dir
+        dir_name = DATASET_DIR_MAP.get(name, name)
+        return os.path.join(self.base_dir, dir_name)
 
     def get_covmatch_dir(self, dataset_name: str = None) -> str:
         """Get covmatch split directory path for specified or current dataset"""
@@ -257,15 +254,8 @@ def load_config(env: str = "dev") -> Config:
     dataset_data = data.get('dataset', {})
     dataset_config = DatasetConfig(
         name=dataset_data.get('name', 'hrds'),
+        base_dir=dataset_data.get('base_dir', ''),
         covmatch=dataset_data.get('covmatch', 'doc_covmatch_dev10_seed42'),
-        hrds=SingleDatasetConfig(
-            data_dir=dataset_data.get('hrds', {}).get('data_dir', ''),
-            description=dataset_data.get('hrds', {}).get('description', ''),
-        ),
-        hrdh=SingleDatasetConfig(
-            data_dir=dataset_data.get('hrdh', {}).get('data_dir', ''),
-            description=dataset_data.get('hrdh', {}).get('description', ''),
-        ),
     )
 
     # Build Config object

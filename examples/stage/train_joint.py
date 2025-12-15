@@ -169,6 +169,7 @@ class JointTrainingArguments(TrainingArguments):
     eval_steps: int = field(default=500, metadata={"help": "Evaluation steps"})
     save_strategy: str = field(default="steps", metadata={"help": "Save strategy"})
     save_steps: int = field(default=500, metadata={"help": "Save steps"})
+    save_total_limit: int = field(default=3, metadata={"help": "Maximum number of checkpoints to keep"})
     logging_steps: int = field(default=100, metadata={"help": "Logging steps"})
 
     # 实验管理
@@ -184,6 +185,12 @@ class JointTrainingArguments(TrainingArguments):
 
     # 功能开关
     disable_stage34: bool = field(default=False, metadata={"help": "Disable Stage 3/4"})
+
+    # 断点续训（默认自动检测）
+    resume_from_checkpoint: str = field(
+        default="auto",
+        metadata={"help": "Path to checkpoint to resume from. 'auto'=auto-detect, 'none'=start fresh."}
+    )
 
     # 兼容旧参数
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
@@ -544,7 +551,7 @@ class JointTrainer(Trainer):
         super().log(logs)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
-        """保存模型，分别保存各 Stage"""
+        """保存模型，分别保存各 Stage + Trainer 状态"""
 
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -557,9 +564,15 @@ class JointTrainer(Trainer):
         torch.save(self.model.stage3.state_dict(), os.path.join(output_dir, "stage3.pt"))
         torch.save(self.model.stage4.state_dict(), os.path.join(output_dir, "stage4.pt"))
 
+        # 保存完整模型状态（用于 Trainer 续训）
+        torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
+
         # 保存 tokenizer
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(stage1_dir)
+
+        # 保存 trainer_state.json（用于续训）
+        self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
 
         logger.info(f"Model saved to {output_dir}")
 
@@ -1276,14 +1289,55 @@ def main():
     # 加载模型
     logger.info("Loading models...")
 
+    # 检测是否从 joint checkpoint 续训
+    joint_checkpoint = None
+    has_full_hf_checkpoint = False  # 是否有完整的 HF checkpoint（可以让 Trainer 完全恢复）
+
+    if training_args.resume_from_checkpoint and training_args.resume_from_checkpoint.lower() != "none":
+        if training_args.resume_from_checkpoint == "auto":
+            joint_checkpoint = get_last_checkpoint(training_args.output_dir)
+        else:
+            joint_checkpoint = training_args.resume_from_checkpoint
+
+        # 验证 checkpoint 有效性
+        if joint_checkpoint:
+            has_stage3 = os.path.exists(os.path.join(joint_checkpoint, "stage3.pt"))
+            has_trainer_state = os.path.exists(os.path.join(joint_checkpoint, "trainer_state.json"))
+            has_pytorch_model = os.path.exists(os.path.join(joint_checkpoint, "pytorch_model.bin"))
+
+            if has_pytorch_model and has_trainer_state:
+                # 完整的 HF checkpoint，Trainer 可以完全恢复
+                has_full_hf_checkpoint = True
+                logger.info(f"Found full HF checkpoint: {joint_checkpoint} (will resume from saved step)")
+            elif has_stage3:
+                # 只有分离的模型权重，手动加载后从 step 0 开始
+                logger.info(f"Found joint checkpoint (stage files only): {joint_checkpoint}")
+            else:
+                logger.warning(f"Invalid checkpoint: {joint_checkpoint}, starting fresh")
+                joint_checkpoint = None
+
     # Stage 1: LayoutXLM
-    stage1_config = LayoutXLMConfig.from_pretrained(model_args.model_name_or_path)
+    # 如果有完整 HF checkpoint，Trainer 会自动加载，这里用初始模型创建结构
+    if has_full_hf_checkpoint:
+        # 用初始模型创建结构，Trainer 会用 pytorch_model.bin 覆盖权重
+        stage1_path = model_args.model_name_or_path
+        logger.info(f"Loading Stage 1 structure from: {stage1_path} (weights will be loaded by Trainer)")
+    elif joint_checkpoint and os.path.exists(os.path.join(joint_checkpoint, "stage1")):
+        # 从 joint checkpoint 手动加载 stage1
+        stage1_path = os.path.join(joint_checkpoint, "stage1")
+        logger.info(f"Loading Stage 1 from joint checkpoint: {stage1_path}")
+    else:
+        # 从初始 stage1 模型加载
+        stage1_path = model_args.model_name_or_path
+        logger.info(f"Loading Stage 1 from: {stage1_path}")
+
+    stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
     stage1_config.num_labels = NUM_LABELS
     stage1_config.id2label = get_id2label()
     stage1_config.label2id = get_label2id()
 
     stage1_model = LayoutXLMForTokenClassification.from_pretrained(
-        model_args.model_name_or_path,
+        stage1_path,
         config=stage1_config,
     )
 
@@ -1322,6 +1376,21 @@ def main():
         use_geometry=False,  # 论文不使用几何特征
         dropout=0.1,
     )
+
+    # 从 checkpoint 加载 Stage 3/4 权重（如果有完整 HF checkpoint，Trainer 会加载，这里跳过）
+    if joint_checkpoint and not has_full_hf_checkpoint:
+        stage3_path = os.path.join(joint_checkpoint, "stage3.pt")
+        stage4_path = os.path.join(joint_checkpoint, "stage4.pt")
+
+        if os.path.exists(stage3_path):
+            stage3_model.load_state_dict(torch.load(stage3_path, map_location="cpu"))
+            logger.info(f"Loaded Stage 3 from: {stage3_path}")
+
+        if os.path.exists(stage4_path):
+            stage4_model.load_state_dict(torch.load(stage4_path, map_location="cpu"))
+            logger.info(f"Loaded Stage 4 from: {stage4_path}")
+    elif has_full_hf_checkpoint:
+        logger.info("Stage 3/4 weights will be loaded by Trainer from pytorch_model.bin")
 
     # 联合模型
     model = JointModel(
@@ -1378,9 +1447,25 @@ def main():
         callbacks=callbacks,
     )
 
-    # 训练
+    # 训练（使用前面检测到的 joint_checkpoint）
+    # Trainer 需要 trainer_state.json + pytorch_model.bin 才能完全恢复
+    # 我们的 checkpoint 结构是 stage1/ + stage3.pt + stage4.pt，没有 pytorch_model.bin
+    # 所以不使用 Trainer 的 resume_from_checkpoint，模型权重已经在前面加载了
+    resume_ckpt_for_trainer = None
+    if joint_checkpoint:
+        # 检查是否是完整的 HF checkpoint（有 pytorch_model.bin）
+        hf_model_path = os.path.join(joint_checkpoint, "pytorch_model.bin")
+        trainer_state_path = os.path.join(joint_checkpoint, "trainer_state.json")
+        if os.path.exists(hf_model_path) and os.path.exists(trainer_state_path):
+            resume_ckpt_for_trainer = joint_checkpoint
+            logger.info(f"Resuming training from step in: {joint_checkpoint}")
+        else:
+            logger.info(f"Loaded model weights from {joint_checkpoint}, starting from step 0 (no HF checkpoint)")
+    else:
+        logger.info("Starting fresh training (no checkpoint found)")
+
     logger.info("Starting training...")
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=resume_ckpt_for_trainer)
 
     # 保存最终模型
     trainer.save_model()

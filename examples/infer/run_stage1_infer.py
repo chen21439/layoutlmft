@@ -49,12 +49,7 @@ def load_config(env: str):
 
 def get_data_dir(config, dataset: str) -> str:
     """Get data directory for dataset."""
-    # Use new config.dataset API
-    data_dir = config.dataset.get_data_dir(dataset)
-    if data_dir and os.path.exists(data_dir):
-        return data_dir
-    # Fallback to legacy path
-    return config.paths.hrdoc_data_dir
+    return config.dataset.get_data_dir(dataset)
 
 
 def get_latest_model(config, exp: str = None):
@@ -421,7 +416,7 @@ def main():
     parser.add_argument("--env", type=str, default=None,
                         help="Environment config (dev/test)")
     parser.add_argument("--dataset", type=str, default="hrds",
-                        choices=["hrds", "hrdh"],
+                        choices=["hrds", "hrdh", "tender"],
                         help="Dataset name")
     parser.add_argument("--exp", type=str, default=None,
                         help="Experiment ID")
