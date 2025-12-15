@@ -123,6 +123,7 @@ from util.eval_utils import (
 )
 from util.checkpoint_utils import get_latest_checkpoint, get_best_model
 from util.experiment_manager import ensure_experiment
+from data import HRDocDataLoader, HRDocDataLoaderConfig, tokenize_with_line_boundary
 
 # HRDoc 评估工具
 HRDOC_UTILS_PATH = os.path.join(PROJECT_ROOT, "HRDoc", "utils")
@@ -799,134 +800,44 @@ def build_child_parent_matrix_from_dataset(dataset, num_classes=NUM_LABELS):
 
 
 def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: JointTrainingArguments):
-    """准备训练和评估数据集"""
+    """
+    准备训练和评估数据集
 
-    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
-
-    def tokenize_and_align(examples):
-        # ==================== Tokenization 说明 ====================
-        # examples["tokens"] 是一个列表，HRDS格式下每个元素是一整行文本
-        # 例如: ["Title of Paper", "Author Name", "Abstract content..."]
-        #
-        # is_split_into_words=True 告诉 tokenizer：
-        # - 输入已经按"单元"分好了（这里每个单元是一整行）
-        # - tokenizer 会对每个单元内部进行 subword 分词
-        # - word_ids() 返回每个 subword token 对应的原始单元索引
-        #
-        # 分词后，同一行的所有 subword tokens 共用该行的 bbox 和 line_id
-        tokenized = tokenizer(
-            examples["tokens"],  # 每个元素是一整行文本
-            padding="max_length",
-            truncation=True,
-            max_length=512,
-            is_split_into_words=True,  # 按行分好，tokenizer 内部再分 subword
-            return_overflowing_tokens=True,
-        )
-
-        all_labels = []
-        all_bboxes = []
-        all_images = []
-        all_line_ids = []
-        all_line_parent_ids = []
-        all_line_relations = []
-        all_line_bboxes = []
-
-        label2id = get_label2id()
-
-        for batch_idx in range(len(tokenized["input_ids"])):
-            word_ids = tokenized.word_ids(batch_index=batch_idx)
-            org_idx = tokenized["overflow_to_sample_mapping"][batch_idx]
-
-            label = examples["ner_tags"][org_idx]
-            bbox = examples["bboxes"][org_idx]
-            image = examples["image"][org_idx]
-            line_ids_raw = examples.get("line_ids", [[]])[org_idx]
-            line_parent_ids_raw = examples.get("line_parent_ids", [[]])[org_idx]
-            line_relations_raw = examples.get("line_relations", [[]])[org_idx]
-
-            token_labels = []
-            token_bboxes = []
-            token_line_ids = []
-            prev_word_idx = None
-
-            for word_idx in word_ids:
-                if word_idx is None:
-                    token_labels.append(-100)
-                    token_bboxes.append([0, 0, 0, 0])
-                    token_line_ids.append(-1)
-                elif word_idx != prev_word_idx:
-                    lbl = label[word_idx]
-                    token_labels.append(lbl if isinstance(lbl, int) else label2id.get(lbl, 0))
-                    token_bboxes.append(bbox[word_idx])
-                    if word_idx < len(line_ids_raw):
-                        token_line_ids.append(line_ids_raw[word_idx])
-                    else:
-                        token_line_ids.append(-1)
-                else:
-                    token_labels.append(-100)
-                    token_bboxes.append(bbox[word_idx])
-                    if word_idx < len(line_ids_raw):
-                        token_line_ids.append(line_ids_raw[word_idx])
-                    else:
-                        token_line_ids.append(-1)
-                prev_word_idx = word_idx
-
-            all_labels.append(token_labels)
-            all_bboxes.append(token_bboxes)
-            all_images.append(image)
-            all_line_ids.append(token_line_ids)
-            all_line_parent_ids.append(line_parent_ids_raw)
-            all_line_relations.append(line_relations_raw)
-
-            line_bboxes = compute_line_bboxes(token_bboxes, token_line_ids)
-            all_line_bboxes.append(line_bboxes)
-
-        tokenized["labels"] = all_labels
-        tokenized["bbox"] = all_bboxes
-        tokenized["image"] = all_images
-        tokenized["line_ids"] = all_line_ids
-        tokenized["line_parent_ids"] = all_line_parent_ids
-        tokenized["line_relations"] = all_line_relations
-        tokenized["line_bboxes"] = all_line_bboxes
-
-        return tokenized
-
-    remove_columns = datasets["train"].column_names
-
-    # 训练数据
-    train_data = datasets["train"]
-    if data_args.max_train_samples > 0:
-        train_data = train_data.select(range(min(len(train_data), data_args.max_train_samples)))
-        logger.info(f"Limited train samples to {len(train_data)}")
-
-    num_proc = 1 if (data_args.max_train_samples > 0 and data_args.max_train_samples < 100) else 4
-    train_dataset = train_data.map(
-        tokenize_and_align,
-        batched=True,
-        remove_columns=remove_columns,
-        num_proc=num_proc,
+    使用统一的数据加载模块，实现按行边界切分的 tokenization：
+    - 确保一整行不会被截断到两个 chunk 中
+    - 如果当前 chunk 放不下完整的一行，该行会被放到下一个 chunk
+    """
+    # 创建数据加载器配置
+    loader_config = HRDocDataLoaderConfig(
+        data_dir=os.environ.get("HRDOC_DATA_DIR"),
+        max_length=512,
+        preprocessing_num_workers=4 if data_args.max_train_samples <= 0 or data_args.max_train_samples >= 100 else 1,
+        overwrite_cache=False,
+        max_train_samples=data_args.max_train_samples if data_args.max_train_samples > 0 else None,
+        max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
     )
 
-    # 评估数据
-    eval_dataset = None
-    if "validation" in datasets:
-        eval_data = datasets["validation"]
-    elif "test" in datasets:
-        eval_data = datasets["test"]
-    else:
-        eval_data = None
+    # 创建数据加载器
+    data_loader = HRDocDataLoader(
+        tokenizer=tokenizer,
+        config=loader_config,
+        include_line_info=True,  # 联合训练需要 line_ids, line_parent_ids, line_relations
+    )
 
-    if eval_data is not None:
-        if data_args.max_eval_samples > 0:
-            eval_data = eval_data.select(range(min(len(eval_data), data_args.max_eval_samples)))
-        eval_dataset = eval_data.map(
-            tokenize_and_align,
-            batched=True,
-            remove_columns=remove_columns,
-            num_proc=4,
-        )
+    # 加载并准备数据集
+    data_loader.load_raw_datasets()
+    tokenized_datasets = data_loader.prepare_datasets()
 
-    return train_dataset, eval_dataset, datasets["train"]
+    train_dataset = tokenized_datasets.get("train")
+    eval_dataset = tokenized_datasets.get("validation")
+
+    # 获取原始训练数据集（用于构建 M_cp 矩阵）
+    raw_train_dataset = data_loader._raw_datasets.get("train")
+
+    logger.info(f"Train dataset: {len(train_dataset) if train_dataset else 0} samples")
+    logger.info(f"Eval dataset: {len(eval_dataset) if eval_dataset else 0} samples")
+
+    return train_dataset, eval_dataset, raw_train_dataset
 
 
 # ==================== Line-level 评估指标 ====================

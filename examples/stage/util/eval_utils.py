@@ -1,12 +1,36 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-评估工具函数
+评估工具函数（部分已迁移到 metrics 模块）
 
-提供训练过程中评估的公共逻辑，供所有 Stage 使用。
+=============================================================================
+⚠️  DEPRECATION NOTICE / 弃用通知
+=============================================================================
+本模块中的 Token → Line 聚合函数已迁移到 metrics.line_eval 模块：
+
+旧路径（已弃用）：
+    from util.eval_utils import aggregate_token_to_line_predictions
+
+新路径（推荐）：
+    from metrics.line_eval import aggregate_token_to_line_predictions
+
+迁移的函数：
+    - aggregate_token_to_line_predictions  →  metrics.line_eval
+    - extract_line_labels_from_tokens      →  metrics.line_eval
+    - aggregate_token_to_line_labels       →  metrics.line_eval (别名)
+
+保留在此模块的函数（通用工具，未迁移）：
+    - compute_accuracy
+    - compute_macro_f1
+    - compute_multiclass_metrics
+    - log_per_class_metrics
+    - log_evaluation_summary
+    - EvaluationTracker
+=============================================================================
 """
 
 import logging
+import warnings
 import numpy as np
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -22,7 +46,9 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
-# Token → Line 聚合函数（统一使用多数投票）
+# Token → Line 聚合函数
+# ==============================================================================
+# ⚠️  已迁移到 metrics.line_eval，此处保留仅为向后兼容
 # ==============================================================================
 
 def aggregate_token_to_line_predictions(
@@ -31,9 +57,10 @@ def aggregate_token_to_line_predictions(
     method: str = "majority"
 ) -> Dict[int, int]:
     """
-    将 token-level 预测聚合为 line-level 预测
+    [DEPRECATED] 将 token-level 预测聚合为 line-level 预测
 
-    这是统一的聚合函数，推理和评估都应该使用这个函数。
+    ⚠️  此函数已迁移到 metrics.line_eval 模块，请使用：
+        from metrics.line_eval import aggregate_token_to_line_predictions
 
     Args:
         token_predictions: 每个 token 的预测标签
@@ -45,6 +72,12 @@ def aggregate_token_to_line_predictions(
     Returns:
         Dict[line_id, predicted_label]: 每行的预测标签
     """
+    warnings.warn(
+        "aggregate_token_to_line_predictions 已迁移到 metrics.line_eval 模块。"
+        "请使用: from metrics.line_eval import aggregate_token_to_line_predictions",
+        DeprecationWarning,
+        stacklevel=2
+    )
     if method == "majority":
         # 收集每行所有 token 的预测
         line_pred_tokens = defaultdict(list)
@@ -76,7 +109,10 @@ def extract_line_labels_from_tokens(
     line_ids: List[int]
 ) -> Dict[int, int]:
     """
-    从 token-level GT 标签中提取 line-level 标签
+    [DEPRECATED] 从 token-level GT 标签中提取 line-level 标签
+
+    ⚠️  此函数已迁移到 metrics.line_eval 模块，请使用：
+        from metrics.line_eval import extract_line_labels_from_tokens
 
     原始数据本来就是 line-level 的，tokenize 时被展开成 token-level，
     同一行的所有 token 标签相同。这里只是还原回 line-level。
@@ -88,6 +124,12 @@ def extract_line_labels_from_tokens(
     Returns:
         Dict[line_id, gt_label]: 每行的 GT 标签
     """
+    warnings.warn(
+        "extract_line_labels_from_tokens 已迁移到 metrics.line_eval 模块。"
+        "请使用: from metrics.line_eval import extract_line_labels_from_tokens",
+        DeprecationWarning,
+        stacklevel=2
+    )
     line_labels = {}
     for label, line_id in zip(token_labels, line_ids):
         if line_id >= 0 and label >= 0 and line_id not in line_labels:

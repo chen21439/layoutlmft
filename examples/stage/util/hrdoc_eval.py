@@ -12,6 +12,7 @@ HRDoc 评估工具
 重构说明：
 - 端到端推理逻辑已抽离到 e2e_inference.py
 - 本模块只负责评估指标计算
+- 行级评估使用 metrics.line_eval 模块（Single Source of Truth）
 """
 
 import os
@@ -25,13 +26,24 @@ from collections import defaultdict, Counter
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from sklearn.metrics import f1_score, accuracy_score
 
-# 导入统一的聚合函数
-from util.eval_utils import (
+# ===========================================================================
+# 导入行级评估模块（Single Source of Truth）
+# ===========================================================================
+# 添加 stage 目录到路径（用于导入 metrics 模块）
+STAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if STAGE_ROOT not in sys.path:
+    sys.path.insert(0, STAGE_ROOT)
+
+from metrics.line_eval import (
     aggregate_token_to_line_predictions,
-    aggregate_token_to_line_labels,
+    extract_line_labels_from_tokens,
+    compute_line_level_metrics,
+    LineMetricsResult,
 )
+
+# 兼容旧代码
+aggregate_token_to_line_labels = extract_line_labels_from_tokens
 
 # 导入共享的推理模块
 from util.e2e_inference import run_e2e_inference_single, E2EInferenceOutput
@@ -169,31 +181,39 @@ def evaluate_stage1(
     eval_loader: DataLoader,
     device,
     id2label: Dict[int, str] = None,
+    class_names: List[str] = None,
+    log_details: bool = True,
 ) -> Dict[str, float]:
     """
-    Stage1 评估：只评估语义分类
+    Stage1 评估：只评估语义分类（LINE 级别）
 
     使用 line-level 的 Macro F1 和 Micro F1（与 HRDoc 论文一致）
+    评估逻辑使用 metrics.line_eval 模块（Single Source of Truth）
 
     Args:
         model: JointModel 或 LayoutXLM 模型
         eval_loader: 评估数据加载器
         device: 设备
-        id2label: 类别映射
+        id2label: 类别 ID -> 名称映射
+        class_names: 类别名称列表（用于日志）
+        log_details: 是否打印详细的每类指标
 
     Returns:
         评估指标字典
     """
     if id2label is None:
         id2label = ID2CLASS
+    if class_names is None:
+        class_names = [id2label.get(i, f"class_{i}") for i in range(14)]
 
     model.eval()
 
-    all_gt_classes = []
-    all_pred_classes = []
+    # 收集所有行的预测和标签
+    all_line_predictions = []
+    all_line_labels = []
 
     with torch.no_grad():
-        for batch in tqdm(eval_loader, desc="Stage1 Eval"):
+        for batch in tqdm(eval_loader, desc="Stage1 Eval [LINE-LEVEL]"):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
             # 获取 Stage1 输出
@@ -228,34 +248,48 @@ def evaluate_stage1(
                 line_ids_b = line_ids[b]
                 sample_logits = logits[b]
 
-                # 使用统一的聚合函数
+                # 使用 metrics.line_eval 的聚合函数（Single Source of Truth）
                 labels_list = labels.cpu().tolist()
                 line_ids_list = line_ids_b.cpu().tolist()
                 token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
 
-                line_gt = aggregate_token_to_line_labels(labels_list, line_ids_list)
+                # Token → Line 聚合
+                line_gt = extract_line_labels_from_tokens(labels_list, line_ids_list)
                 line_pred = aggregate_token_to_line_predictions(token_preds, line_ids_list, method="majority")
 
-                # 收集结果
+                # 对齐并收集结果
                 for line_id in sorted(line_gt.keys()):
                     if line_id in line_pred:
-                        all_gt_classes.append(line_gt[line_id])
-                        all_pred_classes.append(line_pred[line_id])
+                        all_line_labels.append(line_gt[line_id])
+                        all_line_predictions.append(line_pred[line_id])
 
-    # 计算指标
-    results = {}
+    # 使用 metrics.line_eval 计算指标（Single Source of Truth）
+    if not all_line_labels:
+        return {}
 
-    if all_gt_classes:
-        results["line_macro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="macro")
-        results["line_micro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="micro")
-        results["line_accuracy"] = accuracy_score(all_gt_classes, all_pred_classes)
-        results["num_lines"] = len(all_gt_classes)
+    metrics_result: LineMetricsResult = compute_line_level_metrics(
+        line_predictions=all_line_predictions,
+        line_labels=all_line_labels,
+        num_classes=14,
+        class_names=class_names,
+    )
 
-        # 每类 F1
-        per_class_f1 = f1_score(all_gt_classes, all_pred_classes, average=None, labels=list(range(14)))
-        for i, f1 in enumerate(per_class_f1):
-            class_name = id2label.get(i, f"class_{i}")
-            results[f"f1_{class_name}"] = f1
+    # 打印详细指标
+    if log_details:
+        metrics_result.log_summary(class_names=class_names, title="Stage1 Line-Level Metrics")
+
+    # 转换为旧格式的字典（保持向后兼容）
+    results = {
+        "line_macro_f1": metrics_result.macro_f1,
+        "line_micro_f1": metrics_result.micro_f1,
+        "line_accuracy": metrics_result.accuracy,
+        "num_lines": metrics_result.num_lines,
+    }
+
+    # 每类 F1（保持旧键名格式）
+    for cls_id, cls_metrics in metrics_result.per_class_metrics.items():
+        class_name = id2label.get(cls_id, f"class_{cls_id}")
+        results[f"f1_{class_name}"] = cls_metrics["f1"]
 
     return results
 

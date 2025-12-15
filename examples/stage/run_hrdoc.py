@@ -47,6 +47,11 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
+# 添加项目路径（用于导入 data 模块）
+STAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, STAGE_ROOT)
+from data import HRDocDataLoader, HRDocDataLoaderConfig
+
 # Register both layoutxlm and layoutlmv2 (LayoutXLM uses layoutlmv2 as model_type in config.json)
 CONFIG_MAPPING.update({
     "layoutxlm": LayoutXLMConfig,
@@ -134,6 +139,20 @@ def main():
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
+    # 使用统一数据加载器加载数据集
+    loader_config = HRDocDataLoaderConfig(
+        data_dir=os.environ.get("HRDOC_DATA_DIR"),
+        max_length=512,
+        preprocessing_num_workers=data_args.preprocessing_num_workers or 4,
+        overwrite_cache=data_args.overwrite_cache,
+        max_train_samples=data_args.max_train_samples,
+        max_val_samples=data_args.max_val_samples,
+        max_test_samples=data_args.max_test_samples,
+        label_all_tokens=data_args.label_all_tokens,
+        pad_to_max_length=data_args.pad_to_max_length,
+    )
+
+    # 先加载原始数据集（用于 column_names、features 和 balanced loss 计算）
     datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
 
     if training_args.do_train:
@@ -272,124 +291,48 @@ def main():
             "requirement"
         )
 
-    # Preprocessing the dataset
-    # Padding strategy
+    # ==================== 使用统一数据加载器进行 Tokenization ====================
+    # 统一数据加载器实现按行边界切分的 tokenization：
+    # - 确保一整行不会被截断到两个 chunk 中
+    # - 如果当前 chunk 放不下完整的一行，该行会被放到下一个 chunk
     padding = "max_length" if data_args.pad_to_max_length else False
 
-    # ==================== Tokenization 说明 ====================
-    # examples[text_column_name] (即 "tokens") 是一个列表
-    # HRDS格式下，每个元素是一整行文本，不是单个词
-    # 例如: ["Title of Paper", "Author Name", "Abstract content..."]
-    #
-    # is_split_into_words=True 告诉 tokenizer：
-    # - 输入已经按"单元"分好了（这里每个单元是一整行）
-    # - tokenizer 会对每个单元内部进行 subword 分词
-    # - word_ids() 返回每个 subword token 对应的原始单元索引（即行索引）
-    #
-    # 分词后，同一行的所有 subword tokens 共用该行的 bbox、label 和 line_id
-    def tokenize_and_align_labels(examples):
-        tokenized_inputs = tokenizer(
-            examples[text_column_name],  # 每个元素是一整行文本
-            padding=padding,
-            truncation=True,
-            max_length=512,
-            return_overflowing_tokens=True,
-            is_split_into_words=True,  # 按行分好，tokenizer 内部再分 subword
-        )
+    # 创建数据加载器（Stage 1 不需要 line_ids 等信息）
+    data_loader = HRDocDataLoader(
+        tokenizer=tokenizer,
+        config=loader_config,
+        include_line_info=False,  # Stage 1 训练只需要 labels, bbox, image
+    )
 
-        labels = []
-        bboxes = []
-        images = []
-        for batch_index in range(len(tokenized_inputs["input_ids"])):
-            word_ids = tokenized_inputs.word_ids(batch_index=batch_index)
-            org_batch_index = tokenized_inputs["overflow_to_sample_mapping"][batch_index]
+    # 使用已加载的原始数据集
+    data_loader._raw_datasets = datasets
 
-            label = examples[label_column_name][org_batch_index]
-            bbox = examples["bboxes"][org_batch_index]
-            image = examples["image"][org_batch_index]
-            previous_word_idx = None
-            label_ids = []
-            bbox_inputs = []
-            for word_idx in word_ids:
-                # Special tokens have a word id that is None. We set the label to -100 so they are automatically
-                # ignored in the loss function.
-                if word_idx is None:
-                    label_ids.append(-100)
-                    bbox_inputs.append([0, 0, 0, 0])
-                # We set the label for the first token of each word.
-                elif word_idx != previous_word_idx:
-                    # label can be either a string (from raw data) or an int (from ClassLabel feature)
-                    lbl = label[word_idx]
-                    label_id = lbl if isinstance(lbl, int) else label_to_id[lbl]
-                    label_ids.append(label_id)
-                    bbox_inputs.append(bbox[word_idx])
-                # For the other tokens in a word, we set the label to either the current label or -100, depending on
-                # the label_all_tokens flag.
-                else:
-                    if data_args.label_all_tokens:
-                        lbl = label[word_idx]
-                        label_id = lbl if isinstance(lbl, int) else label_to_id[lbl]
-                        label_ids.append(label_id)
-                    else:
-                        label_ids.append(-100)
-                    bbox_inputs.append(bbox[word_idx])
-                previous_word_idx = word_idx
-            labels.append(label_ids)
-            bboxes.append(bbox_inputs)
-            images.append(image)
-        tokenized_inputs["labels"] = labels
-        tokenized_inputs["bbox"] = bboxes
-        tokenized_inputs["image"] = images
-        return tokenized_inputs
+    # 准备 tokenized 数据集
+    tokenized_datasets = data_loader.prepare_datasets()
+
+    train_dataset = None
+    eval_dataset = None
+    test_dataset = None
 
     if training_args.do_train:
-        if "train" not in datasets:
+        if "train" not in tokenized_datasets:
             raise ValueError("--do_train requires a train dataset")
-        train_dataset = datasets["train"]
-        if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
-        train_dataset = train_dataset.map(
-            tokenize_and_align_labels,
-            batched=True,
-            remove_columns=remove_columns,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+        train_dataset = tokenized_datasets["train"]
+        logger.info(f"Train dataset: {len(train_dataset)} samples")
 
     if training_args.do_eval:
-        # Try validation split first, fall back to test split
-        if "validation" in datasets:
-            eval_dataset = datasets["validation"]
-            logger.info("Using validation split for evaluation")
-        elif "test" in datasets:
-            eval_dataset = datasets["test"]
-            logger.warning("No validation split found, using test split for evaluation during training")
+        if "validation" in tokenized_datasets:
+            eval_dataset = tokenized_datasets["validation"]
+            logger.info(f"Using validation split for evaluation: {len(eval_dataset)} samples")
         else:
             raise ValueError("--do_eval requires a validation or test dataset")
 
-        if data_args.max_val_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_val_samples))
-        eval_dataset = eval_dataset.map(
-            tokenize_and_align_labels,
-            batched=True,
-            remove_columns=remove_columns,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
-
     if training_args.do_predict:
-        if "test" not in datasets:
+        if "test" in tokenized_datasets:
+            test_dataset = tokenized_datasets["test"]
+            logger.info(f"Test dataset: {len(test_dataset)} samples")
+        else:
             raise ValueError("--do_predict requires a test dataset")
-        test_dataset = datasets["test"]
-        if data_args.max_test_samples is not None:
-            test_dataset = test_dataset.select(range(data_args.max_test_samples))
-        test_dataset = test_dataset.map(
-            tokenize_and_align_labels,
-            batched=True,
-            remove_columns=remove_columns,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
 
     # Data collator
     data_collator = DataCollatorForKeyValueExtraction(
@@ -412,7 +355,26 @@ def main():
         ("fstline", "paraline"),
     ]
 
+    # =========================================================================
+    # compute_metrics: TOKEN 级别评估（用于训练过程中的快速反馈）
+    # =========================================================================
+    # 注意：此函数计算的是 TOKEN 级别的准确率和 F1，不是 LINE 级别！
+    #
+    # 原因：HuggingFace Trainer 的 compute_metrics 只接收 (predictions, labels)，
+    #       无法直接访问 line_ids，因此无法做行级聚合。
+    #
+    # 官方行级评估：
+    #   - 使用 metrics.line_eval 模块（Single Source of Truth）
+    #   - 或使用 util/hrdoc_eval.py 的端到端评估
+    #   - 行级评估使用多数投票聚合 token → line
+    #
+    # Token vs Line 级别指标差异：
+    #   - Token 级别会被 paraline/fstline 主导（样本量大）
+    #   - Line 级别更能反映少数类的真实表现
+    #   - 通常 Token Acc > Line Acc（因为 token 级别有部分正确也算）
+    # =========================================================================
     def compute_metrics(p):
+        """Token 级别评估（训练快速反馈用，非官方指标）"""
         from collections import Counter, defaultdict
 
         predictions, labels = p
@@ -518,7 +480,8 @@ def main():
 
         # Log per-class summary (for visibility in training logs)
         logger.info("=" * 60)
-        logger.info("Per-Class Metrics (14 classes):")
+        logger.info("Per-Class Metrics [TOKEN-LEVEL] (14 classes):")
+        logger.info("⚠️  注意：这是 TOKEN 级别指标，LINE 级别请看端到端评估")
         logger.info(f"{'Class':<12} {'Prec':>7} {'Recall':>7} {'F1':>7} {'GT':>6} {'Pred':>6}")
         logger.info("-" * 55)
         for cls in label_list:
@@ -531,9 +494,9 @@ def main():
                 logger.info(f"{cls:<12} {prec:>7.1%} {rec:>7.1%} {f1:>7.1%} {stats['gt_count']:>6} {stats['pred_count']:>6}")
 
         logger.info("-" * 55)
-        logger.info(f"Overall Accuracy: {overall_accuracy:.1%}")
-        logger.info(f"Macro F1: {macro_f1:.1%} (only classes with samples)")
-        logger.info(f"Macro F1 (all 14): {macro_f1_all:.1%} (includes zero-sample classes)")
+        logger.info(f"[TOKEN] Overall Accuracy: {overall_accuracy:.1%}")
+        logger.info(f"[TOKEN] Macro F1: {macro_f1:.1%} (only classes with samples)")
+        logger.info(f"[TOKEN] Macro F1 (all 14): {macro_f1_all:.1%} (includes zero-sample classes)")
         logger.info("-" * 55)
         logger.info("Confusion pairs (GT -> Pred rate):")
         for cls_a, cls_b in MONITOR_PAIRS:
