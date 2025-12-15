@@ -14,6 +14,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
+import torch
 import numpy as np
 from datasets import ClassLabel, load_dataset, load_metric
 
@@ -47,9 +48,11 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
 
-# 添加项目路径（用于导入 data 模块）
+# 添加项目路径（用于导入 data 模块和 metrics 模块）
 STAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)  # examples/ 目录，用于导入统一的 metrics 模块
 sys.path.insert(0, STAGE_ROOT)
+sys.path.insert(0, EXAMPLES_ROOT)
 from data import HRDocDataLoader, HRDocDataLoaderConfig
 
 # Register both layoutxlm and layoutlmv2 (LayoutXLM uses layoutlmv2 as model_type in config.json)
@@ -86,6 +89,128 @@ class TokenizerCopyCallback(TrainerCallback):
             if not os.path.exists(dst_tokenizer_json):
                 shutil.copy(self.src_tokenizer_json, dst_tokenizer_json)
                 logger.info(f"Copied tokenizer.json to {checkpoint_dir}")
+
+
+class LineLevelEvalCallback(TrainerCallback):
+    """
+    在每次评估后运行 LINE 级别诊断
+
+    诊断内容：
+    1. label=-100 但参与投票的 token 占比
+    2. TOKEN vs LINE 指标对比
+    """
+
+    def __init__(self, eval_dataset, data_collator, label_list):
+        self.eval_dataset = eval_dataset
+        self.data_collator = data_collator
+        self.label_list = label_list
+
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        """在 Trainer.evaluate() 后运行 LINE 级别诊断"""
+        if model is None:
+            return
+
+        try:
+            from torch.utils.data import DataLoader
+            from metrics.line_eval import compute_line_level_metrics_batch
+
+            logger.info("")
+            logger.info("=" * 65)
+            logger.info(f"[LINE-LEVEL DIAG] Step {state.global_step}")
+            logger.info("=" * 65)
+
+            # 创建小批量评估（避免太慢）
+            max_samples = min(500, len(self.eval_dataset))
+            subset = torch.utils.data.Subset(self.eval_dataset, range(max_samples))
+            eval_dataloader = DataLoader(
+                subset,
+                batch_size=args.per_device_eval_batch_size,
+                collate_fn=self.data_collator,
+            )
+
+            device = next(model.parameters()).device
+            model.eval()
+
+            # 累积统计
+            all_token_preds = []
+            all_token_labels = []
+            all_line_ids = []
+            diag_total_tokens = 0
+            diag_voted_tokens = 0
+            diag_label_minus100_voted = 0
+
+            with torch.no_grad():
+                for batch in eval_dataloader:
+                    # 将必要的 tensor 移到 device
+                    input_ids = batch["input_ids"].to(device)
+                    bbox = batch["bbox"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    labels = batch["labels"].to(device)
+
+                    # 处理 image（ImageList 类型）
+                    image = batch.get("image")
+                    if image is not None and hasattr(image, 'tensors'):
+                        # ImageList: 需要移动 tensors
+                        from detectron2.structures import ImageList as D2ImageList
+                        image = D2ImageList(image.tensors.to(device), image.image_sizes)
+
+                    outputs = model(
+                        input_ids=input_ids,
+                        bbox=bbox,
+                        attention_mask=attention_mask,
+                        image=image,
+                    )
+                    preds = outputs.logits.argmax(dim=-1)
+
+                    for b in range(preds.shape[0]):
+                        token_preds = preds[b].cpu().tolist()
+                        token_labels = batch["labels"][b].cpu().tolist()
+
+                        if "line_ids" in batch:
+                            line_ids = batch["line_ids"][b].cpu().tolist()
+                            all_line_ids.append(line_ids)
+
+                            # 诊断统计
+                            for pred, label, line_id in zip(token_preds, token_labels, line_ids):
+                                diag_total_tokens += 1
+                                if line_id >= 0:
+                                    diag_voted_tokens += 1
+                                    if label == -100:
+                                        diag_label_minus100_voted += 1
+
+                        all_token_preds.append(token_preds)
+                        all_token_labels.append(token_labels)
+
+            # 打印诊断
+            if diag_total_tokens > 0:
+                logger.info(f"[DIAG] 投票统计 (前 {max_samples} 样本):")
+                logger.info(f"  总 token: {diag_total_tokens}")
+                logger.info(f"  参与投票: {diag_voted_tokens} ({diag_voted_tokens/diag_total_tokens*100:.1f}%)")
+                if diag_voted_tokens > 0:
+                    pct = diag_label_minus100_voted / diag_voted_tokens * 100
+                    logger.info(f"  label=-100 但参与投票: {diag_label_minus100_voted} ({pct:.1f}%)")
+                    if pct > 30:
+                        logger.warning(f"  ⚠️  {pct:.1f}% 的投票 token 未被监督，可能影响 LINE 级别指标！")
+
+            # 计算 LINE 级别指标
+            if all_line_ids:
+                line_metrics = compute_line_level_metrics_batch(
+                    batch_token_predictions=all_token_preds,
+                    batch_token_labels=all_token_labels,
+                    batch_line_ids=all_line_ids,
+                    num_classes=len(self.label_list),
+                    class_names=self.label_list,
+                )
+                logger.info(f"[DIAG] LINE 级别指标:")
+                logger.info(f"  Accuracy: {line_metrics.accuracy:.2%}")
+                logger.info(f"  Macro-F1: {line_metrics.macro_f1:.2%}")
+            else:
+                logger.warning("[DIAG] line_ids 不可用，无法计算 LINE 级别指标")
+
+            logger.info("=" * 65)
+
+        except Exception as e:
+            logger.warning(f"[LINE-LEVEL DIAG] 诊断失败: {e}")
 
 
 def main():
@@ -297,11 +422,11 @@ def main():
     # - 如果当前 chunk 放不下完整的一行，该行会被放到下一个 chunk
     padding = "max_length" if data_args.pad_to_max_length else False
 
-    # 创建数据加载器（Stage 1 不需要 line_ids 等信息）
+    # 创建数据加载器（包含 line_ids 用于行级评估）
     data_loader = HRDocDataLoader(
         tokenizer=tokenizer,
         config=loader_config,
-        include_line_info=False,  # Stage 1 训练只需要 labels, bbox, image
+        include_line_info=True,  # 包含 line_ids 用于行级评估
     )
 
     # 使用已加载的原始数据集
@@ -532,6 +657,11 @@ def main():
         except ImportError:
             logger.warning("EarlyStoppingCallback not available in this transformers version")
 
+    # LINE 级别诊断回调（每次评估后运行）
+    if eval_dataset is not None:
+        callbacks.append(LineLevelEvalCallback(eval_dataset, data_collator, label_list))
+        logger.info("LineLevelEvalCallback enabled for TOKEN vs LINE diagnostics")
+
     # Setup class-balanced batch sampler (Step 3) if enabled
     train_sampler = None
     if training_args.do_train and data_args.use_class_balanced_sampler:
@@ -603,6 +733,72 @@ def main():
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
+
+        # =========================================================================
+        # 行级评估（与 token 级评估对比，验证一致性）
+        # =========================================================================
+        logger.info("*** Line-Level Evaluation ***")
+        try:
+            from metrics.line_eval import compute_line_level_metrics_batch
+            from torch.utils.data import DataLoader
+
+            # 创建评估 DataLoader
+            eval_dataloader = DataLoader(
+                eval_dataset,
+                batch_size=training_args.per_device_eval_batch_size,
+                collate_fn=data_collator,
+            )
+
+            model.eval()
+            all_token_preds = []
+            all_token_labels = []
+            all_line_ids = []
+
+            with torch.no_grad():
+                for batch in eval_dataloader:
+                    batch = {k: v.to(training_args.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+                    outputs = model(
+                        input_ids=batch["input_ids"],
+                        bbox=batch["bbox"],
+                        attention_mask=batch["attention_mask"],
+                        image=batch.get("image"),
+                    )
+                    logits = outputs.logits  # [batch, seq_len, num_classes]
+
+                    # 获取预测
+                    preds = logits.argmax(dim=-1)  # [batch, seq_len]
+
+                    # 收集数据
+                    for b in range(preds.shape[0]):
+                        all_token_preds.append(preds[b].cpu().tolist())
+                        all_token_labels.append(batch["labels"][b].cpu().tolist())
+                        if "line_ids" in batch:
+                            all_line_ids.append(batch["line_ids"][b].cpu().tolist())
+
+            # 计算行级指标
+            if all_line_ids:
+                line_metrics = compute_line_level_metrics_batch(
+                    batch_token_predictions=all_token_preds,
+                    batch_token_labels=all_token_labels,
+                    batch_line_ids=all_line_ids,
+                    num_classes=len(label_list),
+                    class_names=label_list,
+                )
+                line_metrics.log_summary(class_names=label_list, title="Line-Level Metrics (对比验证)")
+
+                logger.info("=" * 65)
+                logger.info("Token vs Line 指标对比:")
+                logger.info(f"  [TOKEN] Accuracy: {metrics.get('eval_accuracy', 0):.2%}")
+                logger.info(f"  [LINE]  Accuracy: {line_metrics.accuracy:.2%}")
+                logger.info(f"  [TOKEN] Macro-F1: {metrics.get('eval_macro_f1', 0):.2%}")
+                logger.info(f"  [LINE]  Macro-F1: {line_metrics.macro_f1:.2%}")
+                logger.info("=" * 65)
+            else:
+                logger.warning("line_ids not available, skipping line-level evaluation")
+
+        except Exception as e:
+            logger.warning(f"Line-level evaluation failed: {e}")
 
     # Predict
     if training_args.do_predict:

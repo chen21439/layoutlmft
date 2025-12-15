@@ -30,10 +30,11 @@ from tqdm import tqdm
 # ===========================================================================
 # 导入行级评估模块（Single Source of Truth）
 # ===========================================================================
-# 添加 stage 目录到路径（用于导入 metrics 模块）
+# 添加 examples 目录到路径（用于导入统一的 metrics 模块）
 STAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if STAGE_ROOT not in sys.path:
-    sys.path.insert(0, STAGE_ROOT)
+EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)  # examples/ 目录
+if EXAMPLES_ROOT not in sys.path:
+    sys.path.insert(0, EXAMPLES_ROOT)
 
 from metrics.line_eval import (
     aggregate_token_to_line_predictions,
@@ -212,6 +213,14 @@ def evaluate_stage1(
     all_line_predictions = []
     all_line_labels = []
 
+    # [诊断] 累积统计
+    diag_total_tokens = 0
+    diag_voted_tokens = 0
+    diag_label_minus100_voted = 0  # label=-100 但参与了投票的 token
+    diag_total_lines_gt = 0
+    diag_total_lines_pred = 0
+    diag_aligned_lines = 0
+
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc="Stage1 Eval [LINE-LEVEL]"):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
@@ -253,15 +262,39 @@ def evaluate_stage1(
                 line_ids_list = line_ids_b.cpu().tolist()
                 token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
 
+                # [诊断] 统计投票情况
+                for i, (pred, line_id, label) in enumerate(zip(token_preds, line_ids_list, labels_list)):
+                    diag_total_tokens += 1
+                    if line_id >= 0:
+                        diag_voted_tokens += 1
+                        if label == -100:
+                            diag_label_minus100_voted += 1
+
                 # Token → Line 聚合
                 line_gt = extract_line_labels_from_tokens(labels_list, line_ids_list)
                 line_pred = aggregate_token_to_line_predictions(token_preds, line_ids_list, method="majority")
+
+                diag_total_lines_gt += len(line_gt)
+                diag_total_lines_pred += len(line_pred)
 
                 # 对齐并收集结果
                 for line_id in sorted(line_gt.keys()):
                     if line_id in line_pred:
                         all_line_labels.append(line_gt[line_id])
                         all_line_predictions.append(line_pred[line_id])
+                        diag_aligned_lines += 1
+
+    # [诊断日志] 评估结束后打印一次汇总
+    logger.info("=" * 65)
+    logger.info("[DIAG Stage1] 投票诊断汇总:")
+    logger.info(f"  总 token 数: {diag_total_tokens}")
+    logger.info(f"  参与投票 token: {diag_voted_tokens} ({diag_voted_tokens/diag_total_tokens*100:.1f}%)" if diag_total_tokens > 0 else "  参与投票: 0")
+    logger.info(f"  label=-100 但参与投票: {diag_label_minus100_voted} ({diag_label_minus100_voted/diag_voted_tokens*100:.1f}%)" if diag_voted_tokens > 0 else "  label=-100 参与投票: 0")
+    if diag_label_minus100_voted > 0 and diag_voted_tokens > 0:
+        pct = diag_label_minus100_voted / diag_voted_tokens * 100
+        logger.warning(f"  ⚠️  {pct:.1f}% 的投票 token 是 label=-100（未被监督但参与投票，可能影响 line 级别指标）")
+    logger.info(f"  GT 行数: {diag_total_lines_gt}, Pred 行数: {diag_total_lines_pred}, 对齐行数: {diag_aligned_lines}")
+    logger.info("=" * 65)
 
     # 使用 metrics.line_eval 计算指标（Single Source of Truth）
     if not all_line_labels:
@@ -340,6 +373,12 @@ def evaluate_e2e(
     all_gt_docs = []
     all_pred_docs = []
 
+    # [诊断] line_id 对齐统计
+    diag_total_lines = 0
+    diag_hit_lines = 0  # GT line_id 在 pred 字典中命中
+    diag_miss_lines = 0  # GT line_id 在 pred 字典中未命中（默认给 0）
+    diag_pred_line_id_ranges = []  # 记录每个样本的 pred line_id 范围
+
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc="E2E Eval"):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
@@ -365,6 +404,11 @@ def evaluate_e2e(
                 pred_relations = pred_output.line_relations
                 actual_num_lines = pred_output.num_lines
 
+                # [诊断] 记录 pred line_id 范围
+                if line_preds:
+                    pred_line_ids = list(line_preds.keys())
+                    diag_pred_line_id_ranges.append((min(pred_line_ids), max(pred_line_ids), len(pred_line_ids)))
+
                 # 收集分类结果（使用 line_id 对齐）
                 for idx, gt_item in enumerate(gt_doc):
                     if idx >= actual_num_lines:
@@ -372,7 +416,15 @@ def evaluate_e2e(
                     line_id = gt_item["line_id"]  # 使用实际的 line_id
 
                     gt_class = CLASS2ID.get(gt_item["class"], 0)
-                    pred_class = line_preds.get(line_id, 0)  # 用 line_id
+
+                    # [诊断] 统计命中率
+                    diag_total_lines += 1
+                    if line_id in line_preds:
+                        pred_class = line_preds[line_id]
+                        diag_hit_lines += 1
+                    else:
+                        pred_class = 0  # 默认给 0
+                        diag_miss_lines += 1
 
                     all_gt_classes.append(gt_class)
                     all_pred_classes.append(pred_class)
@@ -403,14 +455,37 @@ def evaluate_e2e(
                     all_gt_docs.append(gt_doc)
                     all_pred_docs.append(pred_doc)
 
+    # [诊断日志] line_id 对齐统计
+    logger.info("=" * 65)
+    logger.info("[DIAG E2E] line_id 对齐诊断:")
+    logger.info(f"  总行数: {diag_total_lines}")
+    logger.info(f"  命中数: {diag_hit_lines} ({diag_hit_lines/diag_total_lines*100:.1f}%)" if diag_total_lines > 0 else "  命中数: 0")
+    logger.info(f"  未命中(默认0): {diag_miss_lines} ({diag_miss_lines/diag_total_lines*100:.1f}%)" if diag_total_lines > 0 else "  未命中: 0")
+    if diag_miss_lines > 0:
+        logger.warning(f"  ⚠️  {diag_miss_lines} 行因 line_id 对不上被默认预测为 class=0，这会严重影响 macro-F1！")
+    if diag_pred_line_id_ranges:
+        # 检查 line_id 是否从 0 开始连续
+        non_zero_start = sum(1 for r in diag_pred_line_id_ranges if r[0] != 0)
+        if non_zero_start > 0:
+            logger.warning(f"  ⚠️  {non_zero_start}/{len(diag_pred_line_id_ranges)} 个样本的 pred line_id 不是从 0 开始")
+        # 打印几个样本的范围
+        logger.info(f"  pred line_id 范围示例 (min, max, count): {diag_pred_line_id_ranges[:5]}")
+    logger.info("=" * 65)
+
     # 计算指标
     results = {}
 
     if all_gt_classes:
         # 分类指标
-        results["line_macro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="macro")
-        results["line_micro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="micro")
+        from sklearn.metrics import f1_score, accuracy_score
+        results["line_macro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="macro", zero_division=0)
+        results["line_micro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="micro", zero_division=0)
         results["line_accuracy"] = accuracy_score(all_gt_classes, all_pred_classes)
+
+        # [诊断] 打印 class=0 被预测的次数（检查是否因为 miss 导致）
+        pred_class_0_count = sum(1 for p in all_pred_classes if p == 0)
+        gt_class_0_count = sum(1 for g in all_gt_classes if g == 0)
+        logger.info(f"[DIAG E2E] class=0 统计: GT有{gt_class_0_count}个, Pred有{pred_class_0_count}个 (差值可能来自 line_id miss)")
 
         # Parent 准确率
         parent_correct = sum(1 for g, p in zip(all_gt_parents, all_pred_parents) if g == p)

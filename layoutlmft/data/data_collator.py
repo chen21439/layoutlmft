@@ -69,6 +69,15 @@ class DataCollatorForKeyValueExtraction:
 
         has_image_input = "image" in features[0]
         has_bbox_input = "bbox" in features[0]
+        has_line_ids = "line_ids" in features[0]  # 支持 line_ids 用于行级评估
+
+        # 提取 line_ids（在 tokenizer.pad 之前，因为 pad 会忽略未知字段）
+        line_ids = None
+        if has_line_ids:
+            line_ids = [feature["line_ids"] for feature in features]
+            for feature in features:
+                del feature["line_ids"]
+
         if has_image_input:
             image = ImageList.from_tensors([torch.tensor(feature["image"]) for feature in features], 32)
             for feature in features:
@@ -91,10 +100,15 @@ class DataCollatorForKeyValueExtraction:
             batch["labels"] = [label + [self.label_pad_token_id] * (sequence_length - len(label)) for label in labels]
             if has_bbox_input:
                 batch["bbox"] = [bbox + [[0, 0, 0, 0]] * (sequence_length - len(bbox)) for bbox in batch["bbox"]]
+            # line_ids 用 -1 填充（表示无效 token）
+            if has_line_ids and line_ids is not None:
+                batch["line_ids"] = [lid + [-1] * (sequence_length - len(lid)) for lid in line_ids]
         else:
             batch["labels"] = [[self.label_pad_token_id] * (sequence_length - len(label)) + label for label in labels]
             if has_bbox_input:
                 batch["bbox"] = [[[0, 0, 0, 0]] * (sequence_length - len(bbox)) + bbox for bbox in batch["bbox"]]
+            if has_line_ids and line_ids is not None:
+                batch["line_ids"] = [[-1] * (sequence_length - len(lid)) + lid for lid in line_ids]
 
         batch = {k: torch.tensor(v, dtype=torch.int64) if isinstance(v[0], list) else v for k, v in batch.items()}
         if has_image_input:

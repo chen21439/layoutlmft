@@ -12,7 +12,8 @@ from .line_eval import (
     # 行级别指标计算
     compute_line_level_metrics,
     compute_line_level_metrics_from_tokens,
-    # 便捷函数
+    compute_line_level_metrics_batch,
+    # 数据结构
     LineMetricsResult,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "extract_line_labels_from_tokens",
     "compute_line_level_metrics",
     "compute_line_level_metrics_from_tokens",
+    "compute_line_level_metrics_batch",
     "LineMetricsResult",
 ]
