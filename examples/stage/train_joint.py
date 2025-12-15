@@ -804,12 +804,22 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
     datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
 
     def tokenize_and_align(examples):
+        # ==================== Tokenization 说明 ====================
+        # examples["tokens"] 是一个列表，HRDS格式下每个元素是一整行文本
+        # 例如: ["Title of Paper", "Author Name", "Abstract content..."]
+        #
+        # is_split_into_words=True 告诉 tokenizer：
+        # - 输入已经按"单元"分好了（这里每个单元是一整行）
+        # - tokenizer 会对每个单元内部进行 subword 分词
+        # - word_ids() 返回每个 subword token 对应的原始单元索引
+        #
+        # 分词后，同一行的所有 subword tokens 共用该行的 bbox 和 line_id
         tokenized = tokenizer(
-            examples["tokens"],
+            examples["tokens"],  # 每个元素是一整行文本
             padding="max_length",
             truncation=True,
             max_length=512,
-            is_split_into_words=True,
+            is_split_into_words=True,  # 按行分好，tokenizer 内部再分 subword
             return_overflowing_tokens=True,
         )
 

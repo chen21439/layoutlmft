@@ -305,16 +305,26 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         unit=item
                     )
 
+                    # ==================== 数据格式处理 ====================
                     # 支持两种格式：
-                    # FUNSD格式：{"words": [{...}]}
-                    # HRDS格式：{"text": "...", "box": [...]}
+                    # 1. FUNSD格式：{"words": [{"text": "word1", "box": [...]}, ...]}
+                    #    - 一行有多个 word，每个 word 有独立的 bbox
+                    # 2. HRDS格式：{"text": "整行文本", "box": [整行bbox]}
+                    #    - 整行作为一个单元，共用一个 bbox
+                    #
+                    # 重要说明：
+                    # - HRDS格式下，整行文本作为一个元素加入 tokens 列表
+                    # - 后续 tokenizer 会对整行文本进行 subword 分词
+                    # - 分词后的所有 subword tokens 共用整行的 bbox
+                    # - 这种设计保持了行级别的语义完整性
                     if "words" in item:
                         words = item["words"]
                     else:
-                        # HRDS格式：单行文本
+                        # HRDS格式：整行文本作为一个单元
+                        # 注意：这里的 "words" 实际只有一个元素，就是整行
                         words = [{
-                            "text": item["text"],
-                            "box": item["box"]
+                            "text": item["text"],  # 整行文本，如 "lect data that differs..."
+                            "box": item["box"]     # 整行的 bbox
                         }]
                     words = [w for w in words if w["text"].strip() != ""]
                     if len(words) == 0:
@@ -330,10 +340,15 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     line_parent_ids.append(parent_id)
                     line_relations.append(relation)
 
-                    # Line级别标注：同一行的所有token使用相同的标签（无BIO前缀）
+                    # ==================== 构建 tokens 列表 ====================
+                    # HRDS格式：整行文本作为 tokens 列表的一个元素
+                    # 例如：tokens = ["整行1的文本", "整行2的文本", ...]
+                    # 后续传给 tokenizer 时使用 is_split_into_words=True，
+                    # tokenizer 会对每个元素（整行）进行 subword 分词
+                    # 分词后的 subword tokens 继承该行的 bbox 和 line_id
                     for w in words:
                         tokens.append(w["text"])
-                        ner_tags.append(label)  # 直接使用标签，不加 B-/I- 前缀
+                        ner_tags.append(label)  # Line级别标注，无BIO前缀
                         bboxes.append(normalize_bbox(w["box"], size))
                         line_ids.append(item_line_id)
 

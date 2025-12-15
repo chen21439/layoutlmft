@@ -276,16 +276,25 @@ def main():
     # Padding strategy
     padding = "max_length" if data_args.pad_to_max_length else False
 
-    # Tokenize all texts and align the labels with them.
+    # ==================== Tokenization 说明 ====================
+    # examples[text_column_name] (即 "tokens") 是一个列表
+    # HRDS格式下，每个元素是一整行文本，不是单个词
+    # 例如: ["Title of Paper", "Author Name", "Abstract content..."]
+    #
+    # is_split_into_words=True 告诉 tokenizer：
+    # - 输入已经按"单元"分好了（这里每个单元是一整行）
+    # - tokenizer 会对每个单元内部进行 subword 分词
+    # - word_ids() 返回每个 subword token 对应的原始单元索引（即行索引）
+    #
+    # 分词后，同一行的所有 subword tokens 共用该行的 bbox、label 和 line_id
     def tokenize_and_align_labels(examples):
         tokenized_inputs = tokenizer(
-            examples[text_column_name],
+            examples[text_column_name],  # 每个元素是一整行文本
             padding=padding,
             truncation=True,
             max_length=512,
             return_overflowing_tokens=True,
-            # We use this argument because the texts in our dataset are lists of words (with a label for each word).
-            is_split_into_words=True,
+            is_split_into_words=True,  # 按行分好，tokenizer 内部再分 subword
         )
 
         labels = []
