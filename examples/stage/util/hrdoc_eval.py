@@ -8,6 +8,10 @@ HRDoc 评估工具
 2. 端到端评估：评估分类 + Parent准确率 + TEDS
 
 使用 HRDoc 官方评估方法
+
+重构说明：
+- 端到端推理逻辑已抽离到 e2e_inference.py
+- 本模块只负责评估指标计算
 """
 
 import os
@@ -28,6 +32,9 @@ from util.eval_utils import (
     aggregate_token_to_line_predictions,
     aggregate_token_to_line_labels,
 )
+
+# 导入共享的推理模块
+from util.e2e_inference import run_e2e_inference_single, E2EInferenceOutput
 
 # 添加 HRDoc 工具路径
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -264,6 +271,8 @@ def evaluate_e2e(
     """
     端到端评估：分类 + Parent准确率 + TEDS
 
+    使用共享的 e2e_inference 模块进行推理，本函数只负责评估指标计算。
+
     Args:
         model: JointModel
         eval_loader: 评估数据加载器
@@ -301,18 +310,6 @@ def evaluate_e2e(
         for batch in tqdm(eval_loader, desc="E2E Eval"):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-            # Stage 1: 分类
-            stage1_outputs = model.stage1(
-                input_ids=batch["input_ids"],
-                bbox=batch["bbox"],
-                attention_mask=batch["attention_mask"],
-                image=batch.get("image"),
-                output_hidden_states=True,
-            )
-
-            logits = stage1_outputs.logits
-            hidden_states = stage1_outputs.hidden_states[-1]
-
             batch_size = batch["input_ids"].shape[0]
 
             # 提取 GT
@@ -323,88 +320,16 @@ def evaluate_e2e(
                 if not gt_doc:
                     continue
 
-                labels = batch["labels"][b]
-                line_ids = batch.get("line_ids")
+                # 使用共享推理模块进行端到端推理
+                pred_output = run_e2e_inference_single(model, batch, batch_idx=b, device=device)
 
-                if line_ids is None:
+                if pred_output.num_lines == 0:
                     continue
 
-                line_ids_b = line_ids[b]
-                sample_logits = logits[b]
-
-                # 使用统一的聚合函数
-                line_ids_list = line_ids_b.cpu().tolist()
-                token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
-                line_preds = aggregate_token_to_line_predictions(token_preds, line_ids_list, method="majority")
-
-                num_lines = len(line_preds)
-                if num_lines == 0:
-                    continue
-
-                # Stage 2: 提取特征
-                text_seq_len = batch["input_ids"].shape[1]
-                text_hidden = hidden_states[b:b+1, :text_seq_len, :]
-
-                line_features, line_mask = model.feature_extractor.extract_line_features(
-                    text_hidden, line_ids_b.unsqueeze(0), pooling="mean"
-                )
-
-                line_features = line_features[0]  # [max_lines, H]
-                line_mask = line_mask[0]
-                actual_num_lines = int(line_mask.sum().item())
-
-                # Stage 3: 预测父节点
-                pred_parents = [-1] * actual_num_lines
-                gru_hidden = None  # 用于 Stage 4
-
-                if hasattr(model, 'use_gru') and model.use_gru:
-                    # 论文对齐：获取 GRU 隐状态用于 Stage 4
-                    parent_logits, gru_hidden = model.stage3(
-                        line_features.unsqueeze(0),
-                        line_mask.unsqueeze(0),
-                        return_gru_hidden=True
-                    )
-                    # gru_hidden: [1, L+1, gru_hidden_size]，包括 ROOT
-                    gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
-
-                    for child_idx in range(actual_num_lines):
-                        child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]
-                        pred_parent_idx = child_logits.argmax().item()
-                        pred_parents[child_idx] = pred_parent_idx - 1
-                else:
-                    # SimpleParentFinder
-                    for child_idx in range(1, actual_num_lines):
-                        parent_candidates = line_features[:child_idx]
-                        child_feat = line_features[child_idx]
-                        scores = model.stage3(parent_candidates, child_feat)
-                        pred_parents[child_idx] = scores.argmax().item()
-
-                # Stage 4: 预测关系（论文对齐：使用 GRU 隐状态，不使用几何特征）
-                pred_relations = [0] * actual_num_lines
-
-                for child_idx in range(actual_num_lines):
-                    parent_idx = pred_parents[child_idx]
-                    if parent_idx < 0 or parent_idx >= actual_num_lines:
-                        continue
-
-                    if gru_hidden is not None:
-                        # 论文对齐：使用 GRU 隐状态
-                        # gru_hidden 包含 ROOT，所以需要 +1 偏移
-                        parent_gru_idx = parent_idx + 1
-                        child_gru_idx = child_idx + 1
-                        parent_feat = gru_hidden[parent_gru_idx]
-                        child_feat = gru_hidden[child_gru_idx]
-                    else:
-                        # 非 GRU 模式：使用 encoder 输出
-                        parent_feat = line_features[parent_idx]
-                        child_feat = line_features[child_idx]
-
-                    # 论文对齐：不使用几何特征
-                    rel_logits = model.stage4(
-                        parent_feat.unsqueeze(0),
-                        child_feat.unsqueeze(0),
-                    )
-                    pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
+                line_preds = pred_output.line_classes
+                pred_parents = pred_output.line_parents
+                pred_relations = pred_output.line_relations
+                actual_num_lines = pred_output.num_lines
 
                 # 收集分类结果（使用 line_id 对齐）
                 for idx, gt_item in enumerate(gt_doc):

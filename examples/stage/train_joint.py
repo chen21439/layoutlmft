@@ -662,6 +662,8 @@ class E2EEvaluationCallback(TrainerCallback):
     - Stage 3: Parent 准确率
     - Stage 4: Relation 准确率 + Macro F1
     - TEDS: Tree Edit Distance Similarity (可选)
+
+    重构说明：调用 hrdoc_eval.evaluate_e2e 共享推理逻辑，避免代码重复
     """
 
     def __init__(self, eval_dataloader, data_collator, compute_teds: bool = False):
@@ -682,7 +684,7 @@ class E2EEvaluationCallback(TrainerCallback):
         logger.info(f"End-to-End Evaluation (Stage 1/3/4) at Step {global_step}")
         logger.info("=" * 60)
 
-        # 运行端到端评估
+        # 运行端到端评估（使用共享模块）
         e2e_results = self._evaluate_e2e(model, device, global_step)
 
         # 打印结果（紧凑表格格式）
@@ -714,204 +716,22 @@ class E2EEvaluationCallback(TrainerCallback):
             logger.info(summary)
 
     def _evaluate_e2e(self, model, device, global_step: int) -> Dict[str, float]:
-        """运行端到端评估"""
-        from util.hrdoc_eval import (
-            ID2CLASS, CLASS2ID, ID2RELATION, RELATION2ID,
-            extract_gt_from_batch, compute_teds_score
+        """运行端到端评估 - 调用共享的 hrdoc_eval.evaluate_e2e"""
+        from util.hrdoc_eval import evaluate_e2e
+        from types import SimpleNamespace
+
+        # 创建 args 对象传递 compute_teds 设置
+        # hrdoc_eval.evaluate_e2e 通过 args.quick 控制是否计算 TEDS
+        eval_args = SimpleNamespace(quick=not self.compute_teds)
+
+        # 调用共享的评估函数
+        results = evaluate_e2e(
+            model=model,
+            eval_loader=self.eval_dataloader,
+            device=device,
+            args=eval_args,
+            global_step=global_step,
         )
-        from sklearn.metrics import f1_score, accuracy_score
-
-        model.eval()
-
-        # Stage 1 分类
-        all_gt_classes = []
-        all_pred_classes = []
-
-        # Stage 3 Parent
-        all_gt_parents = []
-        all_pred_parents = []
-
-        # Stage 4 Relation
-        all_gt_relations = []
-        all_pred_relations = []
-
-        # TEDS
-        all_gt_docs = []
-        all_pred_docs = []
-
-        with torch.no_grad():
-            for batch in tqdm(self.eval_dataloader, desc="E2E Eval"):
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-
-                # Stage 1
-                stage1_outputs = model.stage1(
-                    input_ids=batch["input_ids"],
-                    bbox=batch["bbox"],
-                    attention_mask=batch["attention_mask"],
-                    image=batch.get("image"),
-                    output_hidden_states=True,
-                )
-                logits = stage1_outputs.logits
-                hidden_states = stage1_outputs.hidden_states[-1]
-                batch_size = batch["input_ids"].shape[0]
-
-                # 提取 GT
-                gt_docs = extract_gt_from_batch(batch, ID2CLASS)
-
-                for b in range(batch_size):
-                    gt_doc = gt_docs[b]
-                    if not gt_doc:
-                        continue
-
-                    line_ids = batch.get("line_ids")
-                    if line_ids is None:
-                        continue
-
-                    line_ids_b = line_ids[b]
-                    sample_logits = logits[b]
-
-                    # 提取每行的预测类别（使用多数投票）
-                    token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
-                    line_preds = aggregate_token_to_line_predictions(
-                        token_preds, line_ids_b.cpu().tolist(), method="majority"
-                    )
-
-                    # Stage 2: 提取特征
-                    text_seq_len = batch["input_ids"].shape[1]
-                    text_hidden = hidden_states[b:b+1, :text_seq_len, :]
-
-                    line_features, line_mask = model.feature_extractor.extract_line_features(
-                        text_hidden, line_ids_b.unsqueeze(0), pooling="mean"
-                    )
-
-                    line_features = line_features[0]
-                    line_mask = line_mask[0]
-                    actual_num_lines = int(line_mask.sum().item())
-
-                    if actual_num_lines == 0:
-                        continue
-
-                    # Stage 3: 预测父节点
-                    pred_parents = [-1] * actual_num_lines
-                    gru_hidden = None  # 用于 Stage 4
-
-                    if hasattr(model, 'use_gru') and model.use_gru:
-                        # 论文对齐：获取 GRU 隐状态用于 Stage 4
-                        parent_logits, gru_hidden = model.stage3(
-                            line_features.unsqueeze(0),
-                            line_mask.unsqueeze(0),
-                            return_gru_hidden=True
-                        )
-                        # gru_hidden: [1, L+1, gru_hidden_size]，包括 ROOT
-                        gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
-                        for child_idx in range(actual_num_lines):
-                            child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]
-                            pred_parent_idx = child_logits.argmax().item()
-                            pred_parents[child_idx] = pred_parent_idx - 1
-                    else:
-                        for child_idx in range(1, actual_num_lines):
-                            parent_candidates = line_features[:child_idx]
-                            child_feat = line_features[child_idx]
-                            scores = model.stage3(parent_candidates, child_feat)
-                            pred_parents[child_idx] = scores.argmax().item()
-
-                    # Stage 4: 预测关系（论文对齐：使用 GRU 隐状态，不使用几何特征）
-                    pred_relations = [0] * actual_num_lines
-
-                    for child_idx in range(actual_num_lines):
-                        parent_idx = pred_parents[child_idx]
-                        if parent_idx < 0 or parent_idx >= actual_num_lines:
-                            continue
-
-                        if gru_hidden is not None:
-                            # 论文对齐：使用 GRU 隐状态
-                            # gru_hidden 包含 ROOT，所以需要 +1 偏移
-                            parent_gru_idx = parent_idx + 1
-                            child_gru_idx = child_idx + 1
-                            parent_feat = gru_hidden[parent_gru_idx]
-                            child_feat = gru_hidden[child_gru_idx]
-                        else:
-                            # 非 GRU 模式：使用 encoder 输出
-                            parent_feat = line_features[parent_idx]
-                            child_feat = line_features[child_idx]
-
-                        rel_logits = model.stage4(
-                            parent_feat.unsqueeze(0),
-                            child_feat.unsqueeze(0),
-                        )
-                        pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
-
-                    # 收集结果（使用 gt_doc 中保存的 line_id 来对齐预测）
-                    for idx, gt_item in enumerate(gt_doc):
-                        if idx >= actual_num_lines:
-                            break
-                        line_id = gt_item["line_id"]  # 使用实际的 line_id
-
-                        # Stage 1: 分类
-                        gt_class = CLASS2ID.get(gt_item["class"], 0)
-                        pred_class = line_preds.get(line_id, 0)  # 用 line_id 而不是 idx
-                        all_gt_classes.append(gt_class)
-                        all_pred_classes.append(pred_class)
-
-                        # Stage 3: Parent
-                        all_gt_parents.append(gt_item["parent_id"])
-                        all_pred_parents.append(pred_parents[idx] if idx < len(pred_parents) else -1)
-
-                        # Stage 4: Relation
-                        gt_rel = RELATION2ID.get(gt_item.get("relation", "none"), 0)
-                        all_gt_relations.append(gt_rel)
-                        all_pred_relations.append(pred_relations[idx] if idx < len(pred_relations) else 0)
-
-                    # TEDS: 保存文档结构（使用 line_id 对齐）
-                    if self.compute_teds:
-                        pred_doc = []
-                        for idx, gt_item in enumerate(gt_doc):
-                            if idx >= actual_num_lines:
-                                break
-                            line_id = gt_item["line_id"]
-                            class_id = line_preds.get(line_id, 0)  # 用 line_id
-                            class_name = ID2CLASS.get(class_id, f"class_{class_id}")
-                            pred_doc.append({
-                                "class": class_name,
-                                "text": f"line_{line_id}",
-                                "parent_id": pred_parents[idx],
-                                "relation": ID2RELATION.get(pred_relations[idx], "none"),
-                            })
-                        all_gt_docs.append(gt_doc)
-                        all_pred_docs.append(pred_doc)
-
-        # 计算指标
-        results = {}
-
-        if all_gt_classes:
-            # Stage 1: 分类指标
-            results["line_macro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="macro", zero_division=0)
-            results["line_micro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="micro", zero_division=0)
-            results["line_accuracy"] = accuracy_score(all_gt_classes, all_pred_classes)
-
-            # Stage 3: Parent 准确率
-            parent_correct = sum(1 for g, p in zip(all_gt_parents, all_pred_parents) if g == p)
-            results["parent_accuracy"] = parent_correct / len(all_gt_parents)
-
-            # Stage 4: Relation 指标（只计算有父节点的）
-            rel_pairs = [(g, p) for g, p, gp in zip(all_gt_relations, all_pred_relations, all_gt_parents) if gp >= 0]
-            if rel_pairs:
-                gt_rels = [g for g, p in rel_pairs]
-                pred_rels = [p for g, p in rel_pairs]
-                rel_correct = sum(1 for g, p in rel_pairs if g == p)
-                results["relation_accuracy"] = rel_correct / len(rel_pairs)
-                results["relation_macro_f1"] = f1_score(gt_rels, pred_rels, average="macro", zero_division=0)
-
-            results["num_lines"] = len(all_gt_classes)
-
-        # TEDS
-        if self.compute_teds and all_gt_docs:
-            try:
-                teds_score = compute_teds_score(all_gt_docs, all_pred_docs)
-                if teds_score is not None:
-                    results["macro_teds"] = teds_score
-            except Exception as e:
-                logger.warning(f"TEDS computation failed: {e}")
 
         model.train()
         return results
