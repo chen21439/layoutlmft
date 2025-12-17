@@ -560,22 +560,21 @@ class JointTrainer(Trainer):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # Stage 1: 使用 HuggingFace 格式保存
+        # Stage 1: 只保存 config（模型权重在根目录的 pytorch_model.bin 中）
         stage1_dir = os.path.join(output_dir, "stage1")
-        self.model.stage1.save_pretrained(stage1_dir)
+        os.makedirs(stage1_dir, exist_ok=True)
+        self.model.stage1.config.save_pretrained(stage1_dir)
 
         # Stage 3/4: 保存为 PyTorch 格式
         torch.save(self.model.stage3.state_dict(), os.path.join(output_dir, "stage3.pt"))
         torch.save(self.model.stage4.state_dict(), os.path.join(output_dir, "stage4.pt"))
 
-        # 保存完整模型状态（用于 Trainer 续训）
+        # 保存完整模型状态（标准格式，供 Trainer resume 使用）
         torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
 
-        # 保存 tokenizer 到根目录（统一结构，方便加载）
+        # 保存 tokenizer 到根目录
         if self.tokenizer is not None:
             self.tokenizer.save_pretrained(output_dir)
-            # 同时保存到 stage1 目录（兼容性）
-            self.tokenizer.save_pretrained(stage1_dir)
 
         # 保存 trainer_state.json（用于续训）
         self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
@@ -1030,13 +1029,9 @@ def main():
     # 标记 stage 开始
     exp_manager.mark_stage_started(training_args.exp, "joint", data_args.dataset)
 
-    # 加载 tokenizer（优先从根目录，兼容旧 checkpoint 从 stage1/ 子目录）
+    # 加载 tokenizer（统一从 model_path 根目录加载）
     logger.info("Loading tokenizer...")
-    if os.path.exists(os.path.join(model_args.model_name_or_path, "tokenizer.json")):
-        tokenizer_path = model_args.model_name_or_path
-    else:
-        tokenizer_path = os.path.join(model_args.model_name_or_path, "stage1")
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
     assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集
@@ -1125,7 +1120,7 @@ def main():
         dropout=0.1,
     )
 
-    # 联合模型（如果有 checkpoint，Trainer 会从 pytorch_model.bin 加载权重）
+    # 联合模型
     model = JointModel(
         stage1_model=stage1_model,
         stage3_model=stage3_model,

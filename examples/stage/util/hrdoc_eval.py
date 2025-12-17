@@ -527,9 +527,9 @@ def compute_teds_score(gt_docs: List[List[Dict]], pred_docs: List[List[Dict]]) -
         Macro TEDS 分数
     """
     try:
-        from doc_utils import generate_doc_tree_from_log_line_level, tree_edit_distance
-    except ImportError:
-        logger.warning("Cannot import doc_utils for TEDS computation")
+        from HRDoc.utils.doc_utils import generate_doc_tree_from_log_line_level, tree_edit_distance
+    except ImportError as e:
+        logger.warning(f"Cannot import doc_utils for TEDS computation: {e}")
         return None
 
     teds_list = []
