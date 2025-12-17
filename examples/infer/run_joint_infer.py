@@ -37,17 +37,13 @@ sys.path.insert(0, str(STAGE_DIR / "util"))
 os.chdir(STAGE_DIR)
 
 from layoutlmft.data.labels import LABEL_LIST, NUM_LABELS, id2label, get_id2label, get_label2id
-from layoutlmft.models.layoutxlm import (
-    LayoutXLMForTokenClassification,
-    LayoutXLMConfig,
-    LayoutXLMTokenizerFast,
-)
-from layoutlmft.models.relation_classifier import (
-    LineFeatureExtractor,
-    MultiClassRelationClassifier,
-)
-from train_parent_finder import ParentFinderGRU, SimpleParentFinder
-from train_joint import JointModel
+from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
+
+# 从共享模块导入
+EXAMPLES_ROOT = PROJECT_ROOT / "examples"
+sys.path.insert(0, str(EXAMPLES_ROOT))
+from models.build import load_joint_model, get_latest_joint_checkpoint
+
 from e2e_inference import run_e2e_inference_single
 from joint_data_collator import HRDocJointDataCollator
 
@@ -73,134 +69,6 @@ def get_data_dir(config, dataset: str) -> str:
     """Get data directory for dataset."""
     return config.dataset.get_data_dir(dataset)
 
-
-def get_latest_joint_model(config, exp: str = None, dataset: str = None):
-    """Auto-detect latest Joint model checkpoint."""
-    from checkpoint_utils import get_latest_checkpoint
-    from experiment_manager import get_experiment_manager
-    import glob
-
-    exp_manager = get_experiment_manager(config)
-    exp_dir = exp_manager.get_experiment_dir(exp)
-
-    joint_dirs = glob.glob(os.path.join(exp_dir, "joint_*"))
-
-    if dataset:
-        dataset_dirs = [d for d in joint_dirs if dataset in d]
-        if dataset_dirs:
-            joint_dirs = dataset_dirs
-
-    latest_model = None
-    latest_mtime = 0
-
-    for joint_dir in joint_dirs:
-        stage3_path = os.path.join(joint_dir, "stage3.pt")
-        if os.path.exists(stage3_path):
-            mtime = os.path.getmtime(stage3_path)
-            if mtime > latest_mtime:
-                latest_mtime = mtime
-                latest_model = joint_dir
-
-        for subdir in glob.glob(os.path.join(joint_dir, "checkpoint-*")):
-            stage3_path = os.path.join(subdir, "stage3.pt")
-            if os.path.exists(stage3_path):
-                mtime = os.path.getmtime(stage3_path)
-                if mtime > latest_mtime:
-                    latest_mtime = mtime
-                    latest_model = subdir
-
-    return latest_model
-
-
-def load_joint_model(model_path: str, device: torch.device, config=None):
-    """Load joint model from checkpoint - 复用 train_joint.py 的模型结构"""
-    logger.info(f"Loading joint model from: {model_path}")
-
-    # Stage 1: LayoutXLM
-    stage1_path = os.path.join(model_path, "stage1")
-    if not os.path.exists(stage1_path):
-        raise ValueError(f"Stage 1 model not found: {stage1_path}")
-
-    stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
-    stage1_config.num_labels = NUM_LABELS
-    stage1_config.id2label = get_id2label()
-    stage1_config.label2id = get_label2id()
-
-    stage1_model = LayoutXLMForTokenClassification.from_pretrained(
-        stage1_path, config=stage1_config,
-    )
-
-    # Load tokenizer: try checkpoint first, fallback to local/remote model
-    tokenizer = None
-    tokenizer_sources = [stage1_path]
-
-    # Add local path from config if available
-    if config and hasattr(config, 'model') and hasattr(config.model, 'local_path') and config.model.local_path:
-        tokenizer_sources.append(config.model.local_path)
-
-    # Add remote model name as final fallback
-    tokenizer_sources.append("microsoft/layoutxlm-base")
-
-    for source in tokenizer_sources:
-        try:
-            tokenizer = LayoutXLMTokenizerFast.from_pretrained(source)
-            logger.info(f"Loaded tokenizer from: {source}")
-            break
-        except Exception as e:
-            logger.debug(f"Failed to load tokenizer from {source}: {e}")
-            continue
-
-    if tokenizer is None:
-        raise ValueError("Failed to load tokenizer from any source")
-
-    logger.info(f"Loaded Stage 1 from: {stage1_path}")
-
-    # Stage 2: Feature Extractor
-    feature_extractor = LineFeatureExtractor()
-
-    # Stage 3: ParentFinder
-    stage3_path = os.path.join(model_path, "stage3.pt")
-    stage3_state = torch.load(stage3_path, map_location="cpu")
-    use_gru = any("gru" in k for k in stage3_state.keys())
-
-    if use_gru:
-        gru_hidden_size = stage3_state.get("gru.weight_hh_l0", torch.zeros(1, 512)).shape[1]
-        stage3_model = ParentFinderGRU(
-            hidden_size=768, gru_hidden_size=gru_hidden_size,
-            num_classes=NUM_LABELS, dropout=0.0, use_soft_mask=False,
-        )
-        logger.info(f"Using ParentFinderGRU (gru_hidden_size={gru_hidden_size})")
-    else:
-        stage3_model = SimpleParentFinder(hidden_size=768, dropout=0.0)
-        logger.info("Using SimpleParentFinder")
-
-    stage3_model.load_state_dict(stage3_state, strict=False)
-    logger.info(f"Loaded Stage 3 from: {stage3_path}")
-
-    # Stage 4: RelationClassifier
-    stage4_path = os.path.join(model_path, "stage4.pt")
-    stage4_state = torch.load(stage4_path, map_location="cpu")
-    hidden_size = stage4_state["fc.weight"].shape[1] // 2 if "fc.weight" in stage4_state else (512 if use_gru else 768)
-
-    stage4_model = MultiClassRelationClassifier(
-        hidden_size=hidden_size, num_relations=3, use_geometry=False, dropout=0.0,
-    )
-    stage4_model.load_state_dict(stage4_state)
-    logger.info(f"Loaded Stage 4 from: {stage4_path}")
-
-    # 组装 JointModel
-    model = JointModel(
-        stage1_model=stage1_model,
-        stage3_model=stage3_model,
-        stage4_model=stage4_model,
-        feature_extractor=feature_extractor,
-        use_gru=use_gru,
-    )
-
-    model = model.to(device)
-    model.eval()
-
-    return model, tokenizer
 
 
 def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_test_samples: int = None):
@@ -437,7 +305,7 @@ def main():
     if not data_dir:
         parser.error("Must specify --data_dir or --env")
 
-    model_path = args.model_path or (get_latest_joint_model(config, args.exp, args.dataset) if config else None)
+    model_path = args.model_path or (get_latest_joint_checkpoint(config, args.exp, args.dataset) if config else None)
     if not model_path:
         parser.error("Must specify --model_path or --env with trained joint model")
     logger.info(f"Using model: {model_path}")

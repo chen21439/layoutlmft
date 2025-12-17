@@ -116,6 +116,13 @@ from train_parent_finder import (
     ChildParentDistributionMatrix,
     build_child_parent_matrix,
 )
+
+# 从共享模块导入 JointModel
+EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)
+sys.path.insert(0, EXAMPLES_ROOT)
+from models.joint_model import JointModel
+from models.build import build_joint_model
+
 from util.eval_utils import (
     compute_macro_f1,
     log_per_class_metrics,
