@@ -109,17 +109,15 @@ def main():
     # Tokenizer 路径：优先使用指定路径，否则使用模型路径
     tokenizer_path = args.tokenizer_path or model_path
 
-    # 根据模型类型选择 tokenizer
-    # LayoutXLM 使用 sentencepiece, LayoutLMv2 使用 vocab.txt
-    is_layoutxlm = os.path.exists(os.path.join(tokenizer_path, "sentencepiece.bpe.model")) or \
-                   "layoutxlm" in tokenizer_path.lower()
-
-    if is_layoutxlm:
+    # 根据 config.model_type 选择 tokenizer
+    model_type = getattr(config, "model_type", None)
+    if model_type == "layoutxlm":
         tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
-        logger.info(f"使用 LayoutXLM tokenizer (XLMRoberta/sentencepiece) from {tokenizer_path}")
+        assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
+        logger.info(f"Using LayoutXLMTokenizerFast from {tokenizer_path}")
     else:
         tokenizer = BertTokenizerFast.from_pretrained(tokenizer_path)
-        logger.info(f"使用 LayoutLMv2 tokenizer (BERT) from {tokenizer_path}")
+        logger.info(f"Using BertTokenizerFast from {tokenizer_path}")
 
     model = LayoutXLMForTokenClassification.from_pretrained(model_path, config=config)
     model = model.to(device)

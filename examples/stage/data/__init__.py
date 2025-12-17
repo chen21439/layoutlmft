@@ -9,6 +9,7 @@
 from .hrdoc_data_loader import (
     HRDocDataLoader,
     HRDocDataLoaderConfig,
+    load_hrdoc_raw_datasets,
     tokenize_with_line_boundary,
     compute_line_bboxes,
     get_label2id,
@@ -20,6 +21,7 @@ from .hrdoc_data_loader import (
 __all__ = [
     "HRDocDataLoader",
     "HRDocDataLoaderConfig",
+    "load_hrdoc_raw_datasets",
     "tokenize_with_line_boundary",
     "compute_line_bboxes",
     "get_label2id",

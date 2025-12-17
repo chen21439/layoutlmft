@@ -22,6 +22,40 @@ from datasets import load_dataset
 logger = logging.getLogger(__name__)
 
 
+# ==================== 独立数据集加载函数 ====================
+
+def load_hrdoc_raw_datasets(data_dir: str = None):
+    """
+    独立的数据集加载函数（不需要 tokenizer）
+
+    可以在创建 HRDocDataLoader 之前调用，获取原始数据集。
+
+    Args:
+        data_dir: 数据目录路径，如果为 None 则使用环境变量 HRDOC_DATA_DIR
+
+    Returns:
+        datasets: HuggingFace datasets 对象
+    """
+    import layoutlmft.data.datasets.hrdoc
+
+    if data_dir:
+        os.environ["HRDOC_DATA_DIR"] = data_dir
+
+    actual_dir = data_dir or os.environ.get("HRDOC_DATA_DIR", "default")
+    print(f"[DataLoader] Loading HRDoc dataset from: {actual_dir}", flush=True)
+    logger.info(f"Loading HRDoc dataset from {actual_dir}")
+
+    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
+
+    # 打印加载结果
+    train_count = len(datasets.get("train", []))
+    val_count = len(datasets.get("validation", []))
+    test_count = len(datasets.get("test", []))
+    print(f"[DataLoader] Dataset loaded: train={train_count}, validation={val_count}, test={test_count}", flush=True)
+
+    return datasets
+
+
 # ==================== 标签定义 ====================
 # HRDoc 数据集的类别标签（与论文一致）
 LABEL_LIST = [
@@ -373,17 +407,8 @@ class HRDocDataLoader:
         self._tokenized_datasets = None
 
     def load_raw_datasets(self) -> Dict:
-        """加载原始数据集"""
-        import layoutlmft.data.datasets.hrdoc
-
-        if self.config.data_dir:
-            os.environ["HRDOC_DATA_DIR"] = self.config.data_dir
-
-        logger.info(f"Loading HRDoc dataset from {self.config.data_dir or 'default path'}")
-        self._raw_datasets = load_dataset(
-            os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__)
-        )
-
+        """加载原始数据集（使用统一的加载函数）"""
+        self._raw_datasets = load_hrdoc_raw_datasets(data_dir=self.config.data_dir)
         return self._raw_datasets
 
     def tokenize_and_align(self, examples: Dict) -> Dict:
@@ -506,6 +531,7 @@ class HRDocDataLoader:
             if self.config.max_train_samples is not None:
                 train_dataset = train_dataset.select(range(self.config.max_train_samples))
 
+            print(f"[DataLoader] Tokenizing train dataset ({len(train_dataset)} samples)...", flush=True)
             logger.info("Tokenizing train dataset...")
             tokenized_datasets["train"] = train_dataset.map(
                 self.tokenize_and_align,
@@ -514,6 +540,7 @@ class HRDocDataLoader:
                 num_proc=self.config.preprocessing_num_workers,
                 load_from_cache_file=not self.config.overwrite_cache,
             )
+            print(f"[DataLoader] Train tokenization done: {len(tokenized_datasets['train'])} chunks", flush=True)
             logger.info(f"Train dataset: {len(tokenized_datasets['train'])} samples")
 
         # 验证集（优先使用 validation，否则使用 test）
@@ -522,6 +549,7 @@ class HRDocDataLoader:
             if self.config.max_val_samples is not None:
                 val_dataset = val_dataset.select(range(self.config.max_val_samples))
 
+            print(f"[DataLoader] Tokenizing validation dataset ({len(val_dataset)} samples)...", flush=True)
             logger.info("Tokenizing validation dataset...")
             tokenized_datasets["validation"] = val_dataset.map(
                 self.tokenize_and_align,
@@ -530,12 +558,14 @@ class HRDocDataLoader:
                 num_proc=self.config.preprocessing_num_workers,
                 load_from_cache_file=not self.config.overwrite_cache,
             )
+            print(f"[DataLoader] Validation tokenization done: {len(tokenized_datasets['validation'])} chunks", flush=True)
             logger.info(f"Validation dataset: {len(tokenized_datasets['validation'])} samples")
         elif "test" in self._raw_datasets:
             val_dataset = self._raw_datasets["test"]
             if self.config.max_val_samples is not None:
                 val_dataset = val_dataset.select(range(self.config.max_val_samples))
 
+            print(f"[DataLoader] Tokenizing validation (from test) dataset ({len(val_dataset)} samples)...", flush=True)
             logger.info("Tokenizing validation dataset (from test split)...")
             tokenized_datasets["validation"] = val_dataset.map(
                 self.tokenize_and_align,
@@ -544,6 +574,7 @@ class HRDocDataLoader:
                 num_proc=self.config.preprocessing_num_workers,
                 load_from_cache_file=not self.config.overwrite_cache,
             )
+            print(f"[DataLoader] Validation tokenization done: {len(tokenized_datasets['validation'])} chunks", flush=True)
             logger.info(f"Validation dataset (from test): {len(tokenized_datasets['validation'])} samples")
 
         # 测试集
@@ -552,6 +583,7 @@ class HRDocDataLoader:
             if self.config.max_test_samples is not None:
                 test_dataset = test_dataset.select(range(self.config.max_test_samples))
 
+            print(f"[DataLoader] Tokenizing test dataset ({len(test_dataset)} samples)...", flush=True)
             logger.info("Tokenizing test dataset...")
             tokenized_datasets["test"] = test_dataset.map(
                 self.tokenize_and_align,
@@ -560,6 +592,7 @@ class HRDocDataLoader:
                 num_proc=self.config.preprocessing_num_workers,
                 load_from_cache_file=not self.config.overwrite_cache,
             )
+            print(f"[DataLoader] Test tokenization done: {len(tokenized_datasets['test'])} chunks", flush=True)
             logger.info(f"Test dataset: {len(tokenized_datasets['test'])} samples")
 
         self._tokenized_datasets = tokenized_datasets

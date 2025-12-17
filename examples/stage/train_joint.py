@@ -568,9 +568,10 @@ class JointTrainer(Trainer):
         # 保存完整模型状态（用于 Trainer 续训）
         torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
 
-        # 保存 tokenizer
+        # 保存 tokenizer (两种格式: legacy + tokenizer.json)
         if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(stage1_dir)
+            self.tokenizer.save_pretrained(stage1_dir, legacy_format=True)
+            self.tokenizer.save_pretrained(stage1_dir, legacy_format=False)
 
         # 保存 trainer_state.json（用于续训）
         self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
@@ -808,24 +809,28 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
     - 如果当前 chunk 放不下完整的一行，该行会被放到下一个 chunk
     """
     # 创建数据加载器配置
+    num_workers = 1 if data_args.max_train_samples and data_args.max_train_samples < 100 else 4
+
     loader_config = HRDocDataLoaderConfig(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
         max_length=512,
-        preprocessing_num_workers=4 if data_args.max_train_samples <= 0 or data_args.max_train_samples >= 100 else 1,
+        preprocessing_num_workers=num_workers,
         overwrite_cache=False,
         max_train_samples=data_args.max_train_samples if data_args.max_train_samples > 0 else None,
         max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
     )
 
-    # 创建数据加载器
+    # 创建数据加载器（统一使用 HRDocDataLoader）
     data_loader = HRDocDataLoader(
         tokenizer=tokenizer,
         config=loader_config,
         include_line_info=True,  # 联合训练需要 line_ids, line_parent_ids, line_relations
     )
 
-    # 加载并准备数据集
+    # 统一使用 load_raw_datasets() 方法加载数据
     data_loader.load_raw_datasets()
+
+    # 准备 tokenized 数据集
     tokenized_datasets = data_loader.prepare_datasets()
 
     train_dataset = tokenized_datasets.get("train")
@@ -1014,6 +1019,7 @@ def main():
     # 加载 tokenizer
     logger.info("Loading tokenizer...")
     tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
+    assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集
     logger.info("Preparing datasets...")

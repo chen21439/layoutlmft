@@ -41,7 +41,7 @@ from transformers import (
 )
 from transformers import TrainerCallback
 from layoutlmft.models.layoutxlm import LayoutXLMForTokenClassification, LayoutXLMConfig
-from layoutlmft.models.layoutxlm import LayoutXLMTokenizer, LayoutXLMTokenizerFast
+from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 import layoutlmft
 from transformers import AutoConfig, AutoTokenizer
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
@@ -53,7 +53,7 @@ STAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
 EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)  # examples/ 目录，用于导入统一的 metrics 模块
 sys.path.insert(0, STAGE_ROOT)
 sys.path.insert(0, EXAMPLES_ROOT)
-from data import HRDocDataLoader, HRDocDataLoaderConfig
+from data import HRDocDataLoader, HRDocDataLoaderConfig, load_hrdoc_raw_datasets
 
 # Register both layoutxlm and layoutlmv2 (LayoutXLM uses layoutlmv2 as model_type in config.json)
 CONFIG_MAPPING.update({
@@ -67,28 +67,26 @@ check_min_version("4.5.0")
 logger = logging.getLogger(__name__)
 
 
-class TokenizerCopyCallback(TrainerCallback):
-    """Callback to copy tokenizer.json to each checkpoint directory.
+class TokenizerSaveCallback(TrainerCallback):
+    """Callback to explicitly save tokenizer to each checkpoint directory.
 
-    LayoutXLMTokenizerFast requires tokenizer.json, but HuggingFace Trainer
-    doesn't save it to checkpoint directories by default.
+    Ensures both legacy format (sentencepiece) and tokenizer.json are saved.
+    HuggingFace Trainer's default save_pretrained may not save tokenizer.json.
     """
 
-    def __init__(self, src_tokenizer_json: str):
-        self.src_tokenizer_json = src_tokenizer_json
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
 
     def on_save(self, args, state, control, **kwargs):
         """Called after checkpoint is saved."""
-        if not os.path.exists(self.src_tokenizer_json):
-            return
-
-        # Find the latest checkpoint directory
         checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
         if os.path.isdir(checkpoint_dir):
-            dst_tokenizer_json = os.path.join(checkpoint_dir, "tokenizer.json")
-            if not os.path.exists(dst_tokenizer_json):
-                shutil.copy(self.src_tokenizer_json, dst_tokenizer_json)
-                logger.info(f"Copied tokenizer.json to {checkpoint_dir}")
+            # Check if tokenizer.json already exists
+            if not os.path.exists(os.path.join(checkpoint_dir, "tokenizer.json")):
+                # Save both formats: legacy (sentencepiece) + tokenizer.json
+                self.tokenizer.save_pretrained(checkpoint_dir, legacy_format=True)
+                self.tokenizer.save_pretrained(checkpoint_dir, legacy_format=False)
+                logger.info(f"Saved tokenizer (both formats) to {checkpoint_dir}")
 
 
 class LineLevelEvalCallback(TrainerCallback):
@@ -292,7 +290,8 @@ def main():
     )
 
     # 先加载原始数据集（用于 column_names、features 和 balanced loss 计算）
-    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
+    # 使用统一的数据加载函数
+    datasets = load_hrdoc_raw_datasets(data_dir=os.environ.get("HRDOC_DATA_DIR"))
 
     if training_args.do_train:
         column_names = datasets["train"].column_names
@@ -347,38 +346,17 @@ def main():
     # )
 
     # Determine model type from config (most reliable, works for checkpoints)
-    # LayoutXLM uses XLMRoberta tokenizer (sentencepiece), LayoutLMv2 uses BERT tokenizer (vocab.txt)
     model_type = getattr(config, "model_type", None)
 
-    # Tokenizer should always be loaded from original model path (config._name_or_path)
-    # because tokenizer doesn't change during training, and checkpoint may not have tokenizer files
-    original_model_path = getattr(config, '_name_or_path', None)
-    tokenizer_path = original_model_path if original_model_path else model_args.model_name_or_path
-    logger.info(f"Loading tokenizer from: {tokenizer_path}")
-
+    # Load tokenizer: use fast tokenizer directly, fail if not available
+    # Fast tokenizer can be built from sentencepiece even without tokenizer.json
     if model_type == "layoutxlm":
-        # LayoutXLM uses XLMRoberta tokenizer (sentencepiece)
-        # Try fast tokenizer first, fall back to slow tokenizer if tokenizer.json not found
-        tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
-        if os.path.exists(tokenizer_json_path):
-            tokenizer = LayoutXLMTokenizerFast.from_pretrained(
-                tokenizer_path,
-                cache_dir=model_args.cache_dir,
-            )
-            logger.info("Using LayoutXLM fast tokenizer (XLMRoberta/sentencepiece)")
-        else:
-            # Use slow tokenizer if tokenizer.json not found
-            tokenizer = LayoutXLMTokenizer.from_pretrained(
-                tokenizer_path,
-                cache_dir=model_args.cache_dir,
-            )
-            logger.info("Using LayoutXLM slow tokenizer (tokenizer.json not found)")
-
-        # Ensure vocab_file points to stable path (original model)
-        if hasattr(tokenizer, 'vocab_file') and original_model_path:
-            original_vocab_file = os.path.join(original_model_path, "sentencepiece.bpe.model")
-            if os.path.exists(original_vocab_file):
-                tokenizer.vocab_file = original_vocab_file
+        tokenizer = LayoutXLMTokenizerFast.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+        )
+        assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
+        logger.info("Using LayoutXLMTokenizerFast")
     elif model_type == "layoutlmv2":
         # LayoutLMv2 uses BERT tokenizer (vocab.txt)
         tokenizer = BertTokenizerFast.from_pretrained(
@@ -663,13 +641,9 @@ def main():
     # Setup callbacks
     callbacks = []
 
-    # Add tokenizer copy callback for LayoutXLM (copies tokenizer.json to each checkpoint)
-    # Use original model path (config._name_or_path) since checkpoint may not have tokenizer files
-    tokenizer_src_path = getattr(config, '_name_or_path', None) or model_args.model_name_or_path
-    src_tokenizer_json = os.path.join(tokenizer_src_path, "tokenizer.json")
-    if os.path.exists(src_tokenizer_json):
-        callbacks.append(TokenizerCopyCallback(src_tokenizer_json))
-        logger.info(f"TokenizerCopyCallback enabled, will copy tokenizer.json from {tokenizer_src_path}")
+    # Add tokenizer save callback to ensure tokenizer.json is saved to checkpoints
+    callbacks.append(TokenizerSaveCallback(tokenizer))
+    logger.info("TokenizerSaveCallback enabled")
 
     # Early stopping (optional)
     if training_args.load_best_model_at_end:
@@ -732,12 +706,11 @@ def main():
         metrics = train_result.metrics
         trainer.save_model()  # Saves the tokenizer too for easy upload
 
-        # 确保 tokenizer.json 被复制到输出目录（LayoutXLM TokenizerFast 需要）
-        src_tokenizer_json = os.path.join(model_args.model_name_or_path, "tokenizer.json")
-        dst_tokenizer_json = os.path.join(training_args.output_dir, "tokenizer.json")
-        if os.path.exists(src_tokenizer_json) and not os.path.exists(dst_tokenizer_json):
-            shutil.copy(src_tokenizer_json, dst_tokenizer_json)
-            logger.info(f"Copied tokenizer.json to {dst_tokenizer_json}")
+        # Ensure both tokenizer formats are saved to output directory
+        if not os.path.exists(os.path.join(training_args.output_dir, "tokenizer.json")):
+            tokenizer.save_pretrained(training_args.output_dir, legacy_format=True)
+            tokenizer.save_pretrained(training_args.output_dir, legacy_format=False)
+            logger.info(f"Saved tokenizer (both formats) to {training_args.output_dir}")
 
         max_train_samples = (
             data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
