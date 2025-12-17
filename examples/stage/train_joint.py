@@ -140,6 +140,9 @@ class JointModelArguments:
     model_name_or_path: str = field(
         default=None, metadata={"help": "Stage 1 model path (if None, auto-detect from experiment)"}
     )
+    model_path: str = field(
+        default=None, metadata={"help": "Alias for model_name_or_path (shorter name)"}
+    )
     use_gru: bool = field(default=True, metadata={"help": "Use GRU decoder (paper method)"})
     use_soft_mask: bool = field(default=True, metadata={"help": "Use Soft-Mask (paper method)"})
     use_focal_loss: bool = field(default=True, metadata={"help": "Use Focal Loss"})
@@ -568,10 +571,11 @@ class JointTrainer(Trainer):
         # 保存完整模型状态（用于 Trainer 续训）
         torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
 
-        # 保存 tokenizer (两种格式: legacy + tokenizer.json)
+        # 保存 tokenizer 到根目录（统一结构，方便加载）
         if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(stage1_dir, legacy_format=True)
-            self.tokenizer.save_pretrained(stage1_dir, legacy_format=False)
+            self.tokenizer.save_pretrained(output_dir)
+            # 同时保存到 stage1 目录（兼容性）
+            self.tokenizer.save_pretrained(stage1_dir)
 
         # 保存 trainer_state.json（用于续训）
         self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
@@ -893,6 +897,12 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
         config.quick_test.enabled = True
     config = config.get_effective_config()
 
+    # 设置 HuggingFace 缓存目录（与 train_stage1.py 保持一致）
+    if config.paths.hf_cache_dir:
+        os.environ["HF_HOME"] = config.paths.hf_cache_dir
+        os.environ["TRANSFORMERS_CACHE"] = config.paths.hf_cache_dir
+        os.environ["HF_DATASETS_CACHE"] = os.path.join(config.paths.hf_cache_dir, "datasets")
+
     # 初始化实验管理器
     exp_manager, exp_dir = ensure_experiment(
         config,
@@ -901,7 +911,11 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
         name=training_args.exp_name or f"Joint {data_args.dataset.upper()}",
     )
 
-    # 设置模型路径
+    # 设置模型路径（优先级：model_path > model_name_or_path > 自动检测）
+    if model_args.model_path:
+        model_args.model_name_or_path = model_args.model_path
+        logger.info(f"Using manually specified model: {model_args.model_name_or_path}")
+
     if model_args.model_name_or_path is None:
         stage1_dir = exp_manager.get_stage_dir(training_args.exp, "stage1", data_args.dataset)
         stage1_model = get_latest_checkpoint(stage1_dir)
@@ -1016,9 +1030,13 @@ def main():
     # 标记 stage 开始
     exp_manager.mark_stage_started(training_args.exp, "joint", data_args.dataset)
 
-    # 加载 tokenizer
+    # 加载 tokenizer（优先从根目录，兼容旧 checkpoint 从 stage1/ 子目录）
     logger.info("Loading tokenizer...")
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
+    if os.path.exists(os.path.join(model_args.model_name_or_path, "tokenizer.json")):
+        tokenizer_path = model_args.model_name_or_path
+    else:
+        tokenizer_path = os.path.join(model_args.model_name_or_path, "stage1")
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
     assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集

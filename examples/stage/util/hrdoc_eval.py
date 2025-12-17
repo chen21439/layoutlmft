@@ -491,11 +491,15 @@ def evaluate_e2e(
         parent_correct = sum(1 for g, p in zip(all_gt_parents, all_pred_parents) if g == p)
         results["parent_accuracy"] = parent_correct / len(all_gt_parents)
 
-        # Relation 准确率（只计算有父节点的）
+        # Relation 准确率和 F1（只计算有父节点的）
         rel_pairs = [(g, p) for g, p, gp in zip(all_gt_relations, all_pred_relations, all_gt_parents) if gp >= 0]
         if rel_pairs:
+            gt_rels = [g for g, p in rel_pairs]
+            pred_rels = [p for g, p in rel_pairs]
             rel_correct = sum(1 for g, p in rel_pairs if g == p)
             results["relation_accuracy"] = rel_correct / len(rel_pairs)
+            results["relation_macro_f1"] = f1_score(gt_rels, pred_rels, average="macro", zero_division=0)
+            results["relation_micro_f1"] = f1_score(gt_rels, pred_rels, average="micro", zero_division=0)
 
         results["num_lines"] = len(all_gt_classes)
 
