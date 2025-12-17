@@ -141,18 +141,29 @@ class LineLevelEvalCallback(TrainerCallback):
 
             with torch.no_grad():
                 for batch in eval_dataloader:
-                    # 将必要的 tensor 移到 device
+                    # 将所有 tensor 移到 device
                     input_ids = batch["input_ids"].to(device)
                     bbox = batch["bbox"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
-                    labels = batch["labels"].to(device)
+                    labels_on_device = batch["labels"].to(device)
 
                     # 处理 image（ImageList 类型）
+                    # detectron2 用 .tensor（单数），shim 用 .tensors（复数）
                     image = batch.get("image")
-                    if image is not None and hasattr(image, 'tensors'):
-                        # ImageList: 需要移动 tensors
-                        from detectron2.structures import ImageList as D2ImageList
-                        image = D2ImageList(image.tensors.to(device), image.image_sizes)
+                    if image is not None:
+                        if hasattr(image, 'tensor'):
+                            # detectron2 的 ImageList（使用 .tensor 单数）
+                            from detectron2.structures import ImageList as D2ImageList
+                            image = D2ImageList(image.tensor.to(device), image.image_sizes)
+                        elif hasattr(image, 'tensors'):
+                            # shim ImageList（使用 .tensors 复数）
+                            class SimpleImageList:
+                                def __init__(self, tensors, image_sizes):
+                                    self.tensors = tensors
+                                    self.image_sizes = image_sizes
+                            image = SimpleImageList(image.tensors.to(device), image.image_sizes)
+                        elif isinstance(image, torch.Tensor):
+                            image = image.to(device)
 
                     outputs = model(
                         input_ids=input_ids,
@@ -170,10 +181,10 @@ class LineLevelEvalCallback(TrainerCallback):
                             line_ids = batch["line_ids"][b].cpu().tolist()
                             all_line_ids.append(line_ids)
 
-                            # 诊断统计
+                            # 诊断统计（只统计文本 token，不含 CLS/SEP/PAD）
                             for pred, label, line_id in zip(token_preds, token_labels, line_ids):
-                                diag_total_tokens += 1
-                                if line_id >= 0:
+                                if line_id >= 0:  # 只统计真正的文本 token
+                                    diag_total_tokens += 1
                                     diag_voted_tokens += 1
                                     if label == -100:
                                         diag_label_minus100_voted += 1
@@ -183,14 +194,13 @@ class LineLevelEvalCallback(TrainerCallback):
 
             # 打印诊断
             if diag_total_tokens > 0:
-                logger.info(f"[DIAG] 投票统计 (前 {max_samples} 样本):")
-                logger.info(f"  总 token: {diag_total_tokens}")
-                logger.info(f"  参与投票: {diag_voted_tokens} ({diag_voted_tokens/diag_total_tokens*100:.1f}%)")
+                logger.info(f"[DIAG] 投票统计 (前 {max_samples} 样本, 不含 special tokens):")
+                logger.info(f"  文本 token: {diag_total_tokens}")
                 if diag_voted_tokens > 0:
                     pct = diag_label_minus100_voted / diag_voted_tokens * 100
-                    logger.info(f"  label=-100 但参与投票: {diag_label_minus100_voted} ({pct:.1f}%)")
+                    logger.info(f"  未监督 (label=-100): {diag_label_minus100_voted} ({pct:.1f}%)")
                     if pct > 30:
-                        logger.warning(f"  ⚠️  {pct:.1f}% 的投票 token 未被监督，可能影响 LINE 级别指标！")
+                        logger.warning(f"  ⚠️  {pct:.1f}% 的文本 token 未被监督，可能影响 LINE 级别指标！")
 
             # 计算 LINE 级别指标
             if all_line_ids:
@@ -225,6 +235,10 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # 保留 line_ids 列用于行级评估（Trainer 默认会移除未使用的列）
+    # 必须在两个解析分支之后设置
+    training_args.remove_unused_columns = False
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -332,30 +346,40 @@ def main():
     #     cache_dir=args.cache_dir,
     # )
 
-    # Determine if this is LayoutXLM or LayoutLMv2 by checking for sentencepiece model
+    # Determine model type from config (most reliable, works for checkpoints)
     # LayoutXLM uses XLMRoberta tokenizer (sentencepiece), LayoutLMv2 uses BERT tokenizer (vocab.txt)
-    model_path = model_args.model_name_or_path
-    is_layoutxlm = os.path.exists(os.path.join(model_path, "sentencepiece.bpe.model")) or \
-                   "layoutxlm" in model_path.lower()
+    model_type = getattr(config, "model_type", None)
 
-    if is_layoutxlm:
+    # Tokenizer should always be loaded from original model path (config._name_or_path)
+    # because tokenizer doesn't change during training, and checkpoint may not have tokenizer files
+    original_model_path = getattr(config, '_name_or_path', None)
+    tokenizer_path = original_model_path if original_model_path else model_args.model_name_or_path
+    logger.info(f"Loading tokenizer from: {tokenizer_path}")
+
+    if model_type == "layoutxlm":
         # LayoutXLM uses XLMRoberta tokenizer (sentencepiece)
         # Try fast tokenizer first, fall back to slow tokenizer if tokenizer.json not found
-        tokenizer_json_path = os.path.join(model_path, "tokenizer.json")
+        tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
         if os.path.exists(tokenizer_json_path):
             tokenizer = LayoutXLMTokenizerFast.from_pretrained(
-                model_args.model_name_or_path,
+                tokenizer_path,
                 cache_dir=model_args.cache_dir,
             )
             logger.info("Using LayoutXLM fast tokenizer (XLMRoberta/sentencepiece)")
         else:
-            # Checkpoint doesn't have tokenizer.json, use slow tokenizer
+            # Use slow tokenizer if tokenizer.json not found
             tokenizer = LayoutXLMTokenizer.from_pretrained(
-                model_args.model_name_or_path,
+                tokenizer_path,
                 cache_dir=model_args.cache_dir,
             )
-            logger.info("Using LayoutXLM slow tokenizer (tokenizer.json not found in checkpoint)")
-    elif getattr(config, "model_type", None) == "layoutlmv2":
+            logger.info("Using LayoutXLM slow tokenizer (tokenizer.json not found)")
+
+        # Ensure vocab_file points to stable path (original model)
+        if hasattr(tokenizer, 'vocab_file') and original_model_path:
+            original_vocab_file = os.path.join(original_model_path, "sentencepiece.bpe.model")
+            if os.path.exists(original_vocab_file):
+                tokenizer.vocab_file = original_vocab_file
+    elif model_type == "layoutlmv2":
         # LayoutLMv2 uses BERT tokenizer (vocab.txt)
         tokenizer = BertTokenizerFast.from_pretrained(
             model_args.model_name_or_path,
@@ -640,10 +664,12 @@ def main():
     callbacks = []
 
     # Add tokenizer copy callback for LayoutXLM (copies tokenizer.json to each checkpoint)
-    src_tokenizer_json = os.path.join(model_args.model_name_or_path, "tokenizer.json")
+    # Use original model path (config._name_or_path) since checkpoint may not have tokenizer files
+    tokenizer_src_path = getattr(config, '_name_or_path', None) or model_args.model_name_or_path
+    src_tokenizer_json = os.path.join(tokenizer_src_path, "tokenizer.json")
     if os.path.exists(src_tokenizer_json):
         callbacks.append(TokenizerCopyCallback(src_tokenizer_json))
-        logger.info(f"TokenizerCopyCallback enabled, will copy tokenizer.json to checkpoints")
+        logger.info(f"TokenizerCopyCallback enabled, will copy tokenizer.json from {tokenizer_src_path}")
 
     # Early stopping (optional)
     if training_args.load_best_model_at_end:
@@ -756,13 +782,32 @@ def main():
 
             with torch.no_grad():
                 for batch in eval_dataloader:
-                    batch = {k: v.to(training_args.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                    device = training_args.device
+                    # 移动普通 tensor 到 device
+                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+                    # 处理 image（ImageList 类型需要特殊处理）
+                    image = batch.get("image")
+                    if image is not None:
+                        if hasattr(image, 'tensor'):
+                            # detectron2 的 ImageList（使用 .tensor 单数）
+                            from detectron2.structures import ImageList as D2ImageList
+                            image = D2ImageList(image.tensor.to(device), image.image_sizes)
+                        elif hasattr(image, 'tensors'):
+                            # shim ImageList（使用 .tensors 复数）
+                            class SimpleImageList:
+                                def __init__(self, tensors, image_sizes):
+                                    self.tensors = tensors
+                                    self.image_sizes = image_sizes
+                            image = SimpleImageList(image.tensors.to(device), image.image_sizes)
+                        elif isinstance(image, torch.Tensor):
+                            image = image.to(device)
 
                     outputs = model(
                         input_ids=batch["input_ids"],
                         bbox=batch["bbox"],
                         attention_mask=batch["attention_mask"],
-                        image=batch.get("image"),
+                        image=image,
                     )
                     logits = outputs.logits  # [batch, seq_len, num_classes]
 

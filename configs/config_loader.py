@@ -19,11 +19,16 @@ Usage:
 """
 
 import os
+import sys
 import yaml
 import socket
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
+
+# Add project root to path for imports
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 # Get the configs directory path
@@ -137,31 +142,8 @@ class QuickTestConfig:
     relation_max_steps: int = 50
 
 
-# 数据集名称到目录名的映射
-DATASET_DIR_MAP = {
-    "hrds": "HRDS",
-    "hrdh": "HRDH",
-    "tender": "tender_document",
-}
-
-
-@dataclass
-class DatasetConfig:
-    """Dataset configuration with default selection"""
-    name: str = "hrds"  # Which dataset to use by default
-    base_dir: str = ""  # Base directory for all datasets
-    covmatch: str = "doc_covmatch_dev10_seed42"  # Which covmatch split to use
-
-    def get_data_dir(self, dataset_name: str = None) -> str:
-        """Get data_dir for specified or current dataset"""
-        name = dataset_name or self.name
-        dir_name = DATASET_DIR_MAP.get(name, name)
-        return os.path.join(self.base_dir, dir_name)
-
-    def get_covmatch_dir(self, dataset_name: str = None) -> str:
-        """Get covmatch split directory path for specified or current dataset"""
-        data_dir = self.get_data_dir(dataset_name)
-        return os.path.join(data_dir, "covmatch", self.covmatch)
+# Import dataset configuration from examples/dataset_config
+from examples.dataset_config.dataset_config import DATASET_DIR_MAP, DatasetConfig
 
 
 @dataclass

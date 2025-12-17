@@ -310,10 +310,10 @@ def main():
                 cmd_args.extend(["--greater_is_better", "True"])
 
     # Handle checkpoint resume/restart
+    # Note: run_hrdoc.py auto-detects checkpoints via get_last_checkpoint()
+    # Don't pass --resume_from_checkpoint (not supported in transformers 4.5.x)
     if args.restart:
         cmd_args.append("--overwrite_output_dir")
-    elif resume_checkpoint:
-        cmd_args.extend(["--resume_from_checkpoint", resume_checkpoint])
 
     if config.stage1_training.fp16:
         cmd_args.append("--fp16")

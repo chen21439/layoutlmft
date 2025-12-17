@@ -262,10 +262,10 @@ def evaluate_stage1(
                 line_ids_list = line_ids_b.cpu().tolist()
                 token_preds = [sample_logits[i].argmax().item() for i in range(sample_logits.shape[0])]
 
-                # [诊断] 统计投票情况
+                # [诊断] 统计投票情况（只统计文本 token，不含 CLS/SEP/PAD）
                 for i, (pred, line_id, label) in enumerate(zip(token_preds, line_ids_list, labels_list)):
-                    diag_total_tokens += 1
-                    if line_id >= 0:
+                    if line_id >= 0:  # 只统计真正的文本 token
+                        diag_total_tokens += 1
                         diag_voted_tokens += 1
                         if label == -100:
                             diag_label_minus100_voted += 1
@@ -286,13 +286,13 @@ def evaluate_stage1(
 
     # [诊断日志] 评估结束后打印一次汇总
     logger.info("=" * 65)
-    logger.info("[DIAG Stage1] 投票诊断汇总:")
-    logger.info(f"  总 token 数: {diag_total_tokens}")
-    logger.info(f"  参与投票 token: {diag_voted_tokens} ({diag_voted_tokens/diag_total_tokens*100:.1f}%)" if diag_total_tokens > 0 else "  参与投票: 0")
-    logger.info(f"  label=-100 但参与投票: {diag_label_minus100_voted} ({diag_label_minus100_voted/diag_voted_tokens*100:.1f}%)" if diag_voted_tokens > 0 else "  label=-100 参与投票: 0")
-    if diag_label_minus100_voted > 0 and diag_voted_tokens > 0:
+    logger.info("[DIAG Stage1] 投票诊断汇总 (不含 special tokens):")
+    logger.info(f"  文本 token: {diag_total_tokens}")
+    if diag_voted_tokens > 0:
         pct = diag_label_minus100_voted / diag_voted_tokens * 100
-        logger.warning(f"  ⚠️  {pct:.1f}% 的投票 token 是 label=-100（未被监督但参与投票，可能影响 line 级别指标）")
+        logger.info(f"  未监督 (label=-100): {diag_label_minus100_voted} ({pct:.1f}%)")
+        if pct > 30:
+            logger.warning(f"  ⚠️  {pct:.1f}% 的文本 token 未被监督，可能影响 LINE 级别指标！")
     logger.info(f"  GT 行数: {diag_total_lines_gt}, Pred 行数: {diag_total_lines_pred}, 对齐行数: {diag_aligned_lines}")
     logger.info("=" * 65)
 

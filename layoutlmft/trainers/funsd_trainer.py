@@ -48,7 +48,17 @@ class FunsdTrainer(Trainer):
         """
         Prepare :obj:`inputs` before feeding them to the model, converting them to tensors if they are not already and
         handling potential state.
+
+        NOTE: line_ids is extracted and stored in self._current_line_ids for Callback use,
+        but removed from inputs since the model doesn't accept it.
         """
+        # 提取 line_ids 供 Callback 使用（行级评估需要）
+        # 模型的 forward() 不接受 line_ids 参数，所以需要移除
+        if "line_ids" in inputs:
+            self._current_line_ids = inputs.pop("line_ids")
+        else:
+            self._current_line_ids = None
+
         for k, v in inputs.items():
             if hasattr(v, "to") and hasattr(v, "device"):
                 inputs[k] = v.to(self.args.device)

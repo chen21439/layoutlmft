@@ -71,6 +71,7 @@ def tokenize_with_line_boundary(
     image: Optional[Any] = None,
     document_name: Optional[str] = None,
     page_number: Optional[int] = None,
+    label_all_tokens: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     按行边界切分的 tokenization
@@ -197,7 +198,14 @@ def tokenize_with_line_boundary(
                 aligned_line_ids.append(word_idx)
             else:
                 # 同一行的后续 token
-                aligned_labels.append(-100)
+                # label_all_tokens=True: 所有 token 都用真实标签（推荐，用于行级分类）
+                # label_all_tokens=False: 只有行首 token 有标签，其他 -100（NER 风格）
+                if label_all_tokens:
+                    lbl = chunk_labels[word_idx]
+                    label_id = lbl if isinstance(lbl, int) else label2id.get(lbl, 0)
+                    aligned_labels.append(label_id)
+                else:
+                    aligned_labels.append(-100)
                 aligned_bboxes.append(chunk_bboxes[word_idx])
                 aligned_line_ids.append(word_idx)
 
@@ -332,7 +340,7 @@ class HRDocDataLoaderConfig:
     max_train_samples: Optional[int] = None
     max_val_samples: Optional[int] = None
     max_test_samples: Optional[int] = None
-    label_all_tokens: bool = False
+    label_all_tokens: bool = True  # True: 行内所有 token 都用真实标签参与训练
     pad_to_max_length: bool = True
 
 
@@ -429,6 +437,7 @@ class HRDocDataLoader:
                 image=image,
                 document_name=document_name,
                 page_number=page_number,
+                label_all_tokens=self.config.label_all_tokens,
             )
 
             # 收集所有 chunks

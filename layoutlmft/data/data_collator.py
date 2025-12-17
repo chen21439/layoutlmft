@@ -78,6 +78,21 @@ class DataCollatorForKeyValueExtraction:
             for feature in features:
                 del feature["line_ids"]
 
+        # 移除 line 级别的变长字段（每个 chunk 的行数不同，无法转为统一 tensor）
+        # 这些字段在 Stage 1 训练中不需要，只在 Stage 2/3/4 中使用
+        variable_length_fields = [
+            "line_bboxes",         # [num_lines, 4] - chunk 行数不同
+            "chunk_line_indices",  # [num_lines] - chunk 行数不同
+            "line_parent_ids",     # [num_lines] - chunk 行数不同
+            "line_relations",      # [num_lines] - chunk 行数不同
+            "document_name",       # str - 非数值型
+            "page_number",         # int - 不需要在 batch 中
+        ]
+        for feature in features:
+            for field in variable_length_fields:
+                if field in feature:
+                    del feature[field]
+
         if has_image_input:
             image = ImageList.from_tensors([torch.tensor(feature["image"]) for feature in features], 32)
             for feature in features:

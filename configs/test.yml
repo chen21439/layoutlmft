@@ -18,17 +18,12 @@ experiment:
 
 # Dataset configuration
 dataset:
-  # Which dataset to use: hrds or hrdh
+  # Which dataset to use: hrds, hrdh, or tender
   name: "hrds"
+  # Dataset base directory (datasets are subdirectories: HRDS, HRDH, tender_document, etc.)
+  base_dir: "/data/LLM_group/layoutlmft/data"
   # Covmatch split directory name
   covmatch: "doc_covmatch_dev10_seed42"
-  # Dataset paths
-  hrds:
-    data_dir: "/data/LLM_group/layoutlmft/data/HRDS"
-    description: "HRDoc-Simple dataset"
-  hrdh:
-    data_dir: "/data/LLM_group/layoutlmft/data/HRDH"
-    description: "HRDoc-Hard dataset"
 
 # Data paths
 paths:
