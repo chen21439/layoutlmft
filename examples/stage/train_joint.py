@@ -567,21 +567,21 @@ class JointTrainer(Trainer):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # Stage 1: 只保存 config（模型权重在根目录的 pytorch_model.bin 中）
+        # Stage 1: 保存完整模型（config + 权重），可独立加载
         stage1_dir = os.path.join(output_dir, "stage1")
-        os.makedirs(stage1_dir, exist_ok=True)
-        self.model.stage1.config.save_pretrained(stage1_dir)
+        self.model.stage1.save_pretrained(stage1_dir)
 
-        # Stage 3/4: 保存为 PyTorch 格式
+        # Stage 3/4: 保存为 PyTorch 格式（用于单独加载推理，续训时由 pytorch_model.bin 恢复）
         torch.save(self.model.stage3.state_dict(), os.path.join(output_dir, "stage3.pt"))
         torch.save(self.model.stage4.state_dict(), os.path.join(output_dir, "stage4.pt"))
 
         # 保存完整模型状态（标准格式，供 Trainer resume 使用）
         torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
 
-        # 保存 tokenizer 到根目录
+        # 保存 tokenizer 到根目录（两种格式，确保 Fast tokenizer 可加载）
         if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(output_dir)
+            self.tokenizer.save_pretrained(output_dir, legacy_format=True)   # sentencepiece
+            self.tokenizer.save_pretrained(output_dir, legacy_format=False)  # tokenizer.json
 
         # 保存 trainer_state.json（用于续训）
         self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
@@ -1078,8 +1078,19 @@ def main():
                 joint_checkpoint = None
 
     # Stage 1: LayoutXLM
-    stage1_path = model_args.model_name_or_path
-    logger.info(f"Loading Stage 1 from: {stage1_path}")
+    # 优先级：model_path 显式指定 > joint_checkpoint/stage1 > 自动检测
+    if model_args.model_path:
+        # 用户显式指定了 model_path，优先使用
+        stage1_path = model_args.model_name_or_path
+        logger.info(f"Loading Stage 1 from specified path: {stage1_path}")
+    elif joint_checkpoint:
+        # 续训且未指定 model_path，从 checkpoint 加载
+        stage1_path = os.path.join(joint_checkpoint, "stage1")
+        logger.info(f"Resuming: Loading Stage 1 from checkpoint: {stage1_path}")
+    else:
+        # 首次训练，使用自动检测的路径
+        stage1_path = model_args.model_name_or_path
+        logger.info(f"Fresh start: Loading Stage 1 from: {stage1_path}")
 
     stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
     stage1_config.num_labels = NUM_LABELS
@@ -1108,10 +1119,15 @@ def main():
         )
 
         if model_args.use_soft_mask:
-            logger.info("Building Child-Parent Distribution Matrix (M_cp)...")
-            cp_matrix = build_child_parent_matrix_from_dataset(raw_train_dataset, num_classes=NUM_LABELS)
-            stage3_model.set_child_parent_matrix(cp_matrix.get_tensor(device))
-            logger.info("M_cp initialized successfully")
+            if joint_checkpoint:
+                # 续训：M_cp 会从 checkpoint 的 state_dict 恢复，跳过构建
+                logger.info("Resuming: M_cp will be restored from checkpoint (skipping build)")
+            else:
+                # 首次训练：从数据集构建 M_cp
+                logger.info("Building Child-Parent Distribution Matrix (M_cp)...")
+                cp_matrix = build_child_parent_matrix_from_dataset(raw_train_dataset, num_classes=NUM_LABELS)
+                stage3_model.set_child_parent_matrix(cp_matrix.get_tensor(device))
+                logger.info("M_cp initialized successfully")
     else:
         logger.info("Using SimpleParentFinder")
         stage3_model = SimpleParentFinder(hidden_size=768, dropout=0.1)

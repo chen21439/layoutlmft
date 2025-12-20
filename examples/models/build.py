@@ -116,13 +116,17 @@ def load_joint_model(
     stage1_config.id2label = get_id2label()
     stage1_config.label2id = get_label2id()
 
-    stage1_model = LayoutXLMForTokenClassification.from_pretrained(
-        stage1_path, config=stage1_config,
-    )
-    logger.info(f"Loaded Stage 1 from: {stage1_path}")
+    # 从根目录 pytorch_model.bin 加载完整模型，提取 stage1 权重
+    root_model_file = os.path.join(model_path, "pytorch_model.bin")
+    full_state = torch.load(root_model_file, map_location="cpu")
+    stage1_state = {k[7:]: v for k, v in full_state.items() if k.startswith("stage1.")}
+
+    stage1_model = LayoutXLMForTokenClassification(config=stage1_config)
+    stage1_model.load_state_dict(stage1_state)
+    logger.info(f"Loaded Stage 1 from: {root_model_file}")
 
     # ==================== Tokenizer ====================
-    tokenizer = _load_tokenizer(stage1_path, config)
+    tokenizer = _load_tokenizer(model_path, config)  # 从根目录加载
 
     # ==================== Stage 2: Feature Extractor ====================
     feature_extractor = LineFeatureExtractor()

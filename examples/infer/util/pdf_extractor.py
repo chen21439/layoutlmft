@@ -397,12 +397,14 @@ class ExtractionStatus:
         return pdf_path in self.status["extracted"]
 
     def mark_extracted(self, pdf_path, result):
-        self.status["extracted"][pdf_path] = {
+        record = {
             "doc_name": result["doc_name"],
-            "annotation": result["annotation"],
             "num_pages": len(result["images"]),
             "timestamp": datetime.now().isoformat()
         }
+        if result.get("annotation"):
+            record["annotation"] = result["annotation"]
+        self.status["extracted"][pdf_path] = record
         self.save()
 
     def mark_failed(self, pdf_path, error):
@@ -442,7 +444,7 @@ def save_info(content_lines, json_path):
         json.dump(anno_json, f, indent=4, ensure_ascii=False)
 
 
-def extract_single_pdf(pdf_path, output_dir=None, doc_name=None):
+def extract_single_pdf(pdf_path, output_dir=None, doc_name=None, images_only=False):
     """
     提取单个PDF的文本行信息
 
@@ -450,6 +452,7 @@ def extract_single_pdf(pdf_path, output_dir=None, doc_name=None):
         pdf_path: PDF文件路径
         output_dir: 输出目录（HRDS格式），如果为None则输出到PDF同目录
         doc_name: 文档名称，如果为None则使用PDF文件名
+        images_only: 是否只提取图片，不生成JSON
 
     Returns:
         dict: {"images": [...], "annotation": "...", "doc_name": "..."}
@@ -463,9 +466,10 @@ def extract_single_pdf(pdf_path, output_dir=None, doc_name=None):
         # HRDS格式输出
         vis_folder = osp.join(output_dir, "images", doc_name)
         json_path = osp.join(output_dir, "test", f"{doc_name}.json")
-        os.makedirs(osp.join(output_dir, "test"), exist_ok=True)
-        os.makedirs(osp.join(output_dir, "train"), exist_ok=True)
         os.makedirs(osp.join(output_dir, "images"), exist_ok=True)
+        if not images_only:
+            os.makedirs(osp.join(output_dir, "test"), exist_ok=True)
+            os.makedirs(osp.join(output_dir, "train"), exist_ok=True)
     else:
         # 原始格式：输出到PDF同目录
         vis_folder = pdf_path[:-4] + "_vis" if pdf_path.endswith(".pdf") else pdf_path + "_vis"
@@ -473,6 +477,14 @@ def extract_single_pdf(pdf_path, output_dir=None, doc_name=None):
 
     # 提取PDF图片
     raw_image_paths = convert_pdf2img(pdf_path, vis_folder)
+
+    # 如果只需要图片，直接返回
+    if images_only:
+        return {
+            "images": raw_image_paths,
+            "annotation": None,
+            "doc_name": doc_name
+        }
 
     # 提取文本行
     content_lines = extract_pdf_line(pdf_path, visual=False)
@@ -494,7 +506,7 @@ def extract_single_pdf(pdf_path, output_dir=None, doc_name=None):
     }
 
 
-def extract_pdf_folder(pdf_folder, output_dir, work_dir, recursive=False, split='test'):
+def extract_pdf_folder(pdf_folder, output_dir, work_dir, recursive=False, split='test', images_only=False):
     """
     批量提取PDF文件夹中的所有PDF，支持状态跟踪
 
@@ -504,6 +516,7 @@ def extract_pdf_folder(pdf_folder, output_dir, work_dir, recursive=False, split=
         work_dir: 工作目录，用于存储状态文件
         recursive: 是否递归搜索子目录
         split: 输出到 'train' 或 'test' 目录
+        images_only: 是否只提取图片，不生成JSON
 
     Returns:
         dict: {pdf_path: result_dict, ...}
@@ -523,6 +536,8 @@ def extract_pdf_folder(pdf_folder, output_dir, work_dir, recursive=False, split=
         return {}
 
     logger.info(f"Found {len(pdf_list)} PDF files")
+    if images_only:
+        logger.info("Mode: images only (no JSON)")
 
     # 过滤已处理的PDF
     pending_pdfs = [p for p in pdf_list if not status.is_extracted(p)]
@@ -533,9 +548,10 @@ def extract_pdf_folder(pdf_folder, output_dir, work_dir, recursive=False, split=
 
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(osp.join(output_dir, "train"), exist_ok=True)
-    os.makedirs(osp.join(output_dir, "test"), exist_ok=True)
     os.makedirs(osp.join(output_dir, "images"), exist_ok=True)
+    if not images_only:
+        os.makedirs(osp.join(output_dir, "train"), exist_ok=True)
+        os.makedirs(osp.join(output_dir, "test"), exist_ok=True)
 
     all_info = {}
     success_count = 0
@@ -544,10 +560,10 @@ def extract_pdf_folder(pdf_folder, output_dir, work_dir, recursive=False, split=
     for pdf_path in pbar:
         pbar.set_description(f"Processing {osp.basename(pdf_path)[:30]}")
         try:
-            result = extract_single_pdf(pdf_path, output_dir)
+            result = extract_single_pdf(pdf_path, output_dir, images_only=images_only)
 
-            # 如果split为train，移动json到train目录
-            if split == 'train':
+            # 如果split为train且不是images_only模式，移动json到train目录
+            if split == 'train' and not images_only and result["annotation"]:
                 old_path = result["annotation"]
                 new_path = old_path.replace("/test/", "/train/")
                 if old_path != new_path and osp.exists(old_path):
@@ -579,8 +595,8 @@ if __name__ == "__main__":
     )
 
     # 默认路径配置
-    DEFAULT_WORK_DIR = "/mnt/e/models/data"
-    DEFAULT_PDF_FOLDER = "/mnt/e/models/data/pdf"
+    DEFAULT_WORK_DIR = "/mnt/e/models/data/Section/tender_document"
+    DEFAULT_PDF_FOLDER = "/mnt/e/models/data/Section/tender_document/pdf"
     DEFAULT_OUTPUT_DIR = "/mnt/e/models/data/Section/tender_document"
 
     parser = argparse.ArgumentParser(description='Extract PDF text lines for HRDoc (HRDS format)')
@@ -596,13 +612,21 @@ if __name__ == "__main__":
                         help='Recursively search for PDFs in subdirectories')
     parser.add_argument('--split', type=str, default='test', choices=['train', 'test'],
                         help='Which split to save JSONs to (default: test)')
+    parser.add_argument('--images_only', action='store_true', default=True,
+                        help='Only extract images from PDF, skip JSON generation (default: True)')
+    parser.add_argument('--with_json', action='store_true',
+                        help='Also generate JSON annotations (overrides --images_only)')
     args = parser.parse_args()
+
+    # --with_json 覆盖 --images_only
+    images_only = not args.with_json
 
     if args.pdf_file:
         # 处理单个PDF
-        result = extract_single_pdf(args.pdf_file, args.output_dir)
+        result = extract_single_pdf(args.pdf_file, args.output_dir, images_only=images_only)
         print(f"Doc name: {result['doc_name']}")
-        print(f"Annotation: {result['annotation']}")
+        if result['annotation']:
+            print(f"Annotation: {result['annotation']}")
         print(f"Images: {result['images'][0]} ... ({len(result['images'])} pages)")
     else:
         # 批量处理
@@ -611,8 +635,10 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
             work_dir=args.work_dir,
             recursive=args.recursive,
-            split=args.split
+            split=args.split,
+            images_only=images_only
         )
         print(f"\nProcessed {len(all_info)} PDFs in this run")
         print(f"Output directory: {args.output_dir}")
+        print(f"Images saved to: {osp.join(args.output_dir, 'images')}")
         print(f"Status file: {osp.join(args.work_dir, 'pdf_extract_status.json')}")

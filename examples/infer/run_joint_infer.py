@@ -22,16 +22,22 @@ from pathlib import Path
 from collections import defaultdict
 from types import SimpleNamespace
 
-import torch
-from tqdm import tqdm
-
-# Add project paths
+# Add project paths (before GPU setup)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 STAGE_DIR = PROJECT_ROOT / "examples" / "stage"
+EXAMPLES_ROOT = PROJECT_ROOT / "examples"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "configs"))
+sys.path.insert(0, str(EXAMPLES_ROOT))
 sys.path.insert(0, str(STAGE_DIR))
 sys.path.insert(0, str(STAGE_DIR / "util"))
+
+# ==================== GPU 设置（必须在 import torch 之前）====================
+from utils.gpu import setup_gpu_early
+setup_gpu_early()
+
+import torch
+from tqdm import tqdm
 
 # 切换工作目录以支持 train_parent_finder.py 中的相对导入
 os.chdir(STAGE_DIR)
@@ -40,8 +46,6 @@ from layoutlmft.data.labels import LABEL_LIST, NUM_LABELS, id2label, get_id2labe
 from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 
 # 从共享模块导入
-EXAMPLES_ROOT = PROJECT_ROOT / "examples"
-sys.path.insert(0, str(EXAMPLES_ROOT))
 from models.build import load_joint_model, get_latest_joint_checkpoint
 
 from e2e_inference import run_e2e_inference_single
@@ -71,8 +75,19 @@ def get_data_dir(config, dataset: str) -> str:
 
 
 
-def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_test_samples: int = None):
-    """Run end-to-end inference using shared e2e_inference module."""
+def run_inference(model_path: str, data_dir: str, output_dir: str = None, config=None, max_test_samples: int = None):
+    """Run end-to-end inference using shared e2e_inference module.
+
+    Args:
+        model_path: Joint model checkpoint path
+        data_dir: Data directory containing test/ subdirectory
+        output_dir: Deprecated, ignored (runs are saved to data_dir/runs/)
+        config: Configuration object
+        max_test_samples: Limit number of test samples
+
+    Returns:
+        runs_dir: Path to the run directory containing results
+    """
     from datasets import load_dataset
     import layoutlmft.data.datasets.hrdoc
 
@@ -81,7 +96,6 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
     logger.info("=" * 60)
     logger.info(f"Model:      {model_path}")
     logger.info(f"Data Dir:   {data_dir}")
-    logger.info(f"Output Dir: {output_dir}")
 
     # Set environment
     os.environ["HRDOC_DATA_DIR"] = data_dir
@@ -204,11 +218,53 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
                     "relation": ID2RELATION.get(pred_output.line_relations[idx], "connect") if idx < len(pred_output.line_relations) else "connect",
                 }
 
-    # Write output JSON files
-    logger.info("Writing prediction files...")
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-    os.makedirs(output_dir)
+    # ==================== 创建 runs 目录结构 ====================
+    from datetime import datetime
+    import hashlib
+
+    # 生成 run_id: YYYYMMDD_HHMMSS_modelname_hash
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_name = os.path.basename(model_path)
+    run_hash = hashlib.md5(f"{model_path}{timestamp}".encode()).hexdigest()[:6]
+    run_id = f"{timestamp}_{model_name}_{run_hash}"
+
+    runs_dir = os.path.join(data_dir, "runs", run_id)
+    enriched_dir = os.path.join(runs_dir, "enriched")
+    os.makedirs(enriched_dir, exist_ok=True)
+
+    logger.info(f"Writing results to: {runs_dir}")
+
+    # ==================== 保存 manifest.json ====================
+    manifest = {
+        "run_id": run_id,
+        "timestamp": timestamp,
+        "model_path": model_path,
+        "data_dir": data_dir,
+        "device": str(device),
+        "num_documents": len(doc_predictions),
+        "total_lines": sum(len(preds) for preds in doc_predictions.values()),
+    }
+    with open(os.path.join(runs_dir, "manifest.json"), 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+    # ==================== 保存 predictions.jsonl ====================
+    # 纯预测输出，每行一个预测记录
+    predictions_path = os.path.join(runs_dir, "predictions.jsonl")
+    with open(predictions_path, 'w', encoding='utf-8') as f:
+        for doc_name, preds in doc_predictions.items():
+            for line_id, pred_info in preds.items():
+                record = {
+                    "doc_name": doc_name,
+                    "line_id": line_id,
+                    "class": pred_info["class"],
+                    "parent_id": pred_info["parent_id"],
+                    "relation": pred_info["relation"],
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # ==================== 保存 enriched/ 融合后 JSON ====================
+    # 非元信息的类别列表（用于判断 is_meta）
+    struct_classes = {"title", "section", "list", "table", "figure", "equation", "paraline"}
 
     test_gt_dir = os.path.join(data_dir, "test")
     json_files = sorted([f for f in os.listdir(test_gt_dir) if f.endswith('.json')])
@@ -217,35 +273,42 @@ def run_inference(model_path: str, data_dir: str, output_dir: str, config, max_t
     for json_file in json_files:
         doc_name = os.path.splitext(json_file)[0]
         gt_path = os.path.join(test_gt_dir, json_file)
-        pred_path = os.path.join(output_dir, json_file)
+        enriched_path = os.path.join(enriched_dir, json_file)
 
         with open(gt_path, 'r', encoding='utf-8') as f:
             gt_data = json.load(f)
 
-        pred_data = []
-        for item in gt_data:
-            pred_item = item.copy()
-            line_id = item.get("line_id")
+        enriched_data = []
+        for idx, item in enumerate(gt_data):
+            enriched_item = item.copy()
+            # 优先使用原始 line_id，没有则用循环索引
+            line_id = item.get("line_id", idx)
 
             if doc_name in doc_predictions and line_id in doc_predictions[doc_name]:
                 pred_info = doc_predictions[doc_name][line_id]
-                pred_item["class"] = pred_info["class"]
-                pred_item["parent_id"] = pred_info["parent_id"]
-                pred_item["relation"] = pred_info["relation"]
+                enriched_item["class"] = pred_info["class"]
+                enriched_item["parent_id"] = pred_info["parent_id"]
+                enriched_item["relation"] = pred_info["relation"]
             else:
                 from layoutlmft.data.labels import trans_class
-                pred_item["class"] = trans_class(item.get("class", "paraline"))
-                pred_item["parent_id"] = item.get("parent_id", -1)
-                pred_item["relation"] = item.get("relation", "connect")
+                enriched_item["class"] = trans_class(item.get("class", "paraline"))
+                enriched_item["parent_id"] = item.get("parent_id", -1)
+                enriched_item["relation"] = item.get("relation", "connect")
 
-            pred_data.append(pred_item)
+            # 添加 line_id 和 is_meta 字段（参考 HRDoc 格式）
+            enriched_item["line_id"] = line_id
+            enriched_item["is_meta"] = enriched_item["class"] not in struct_classes
 
-        with open(pred_path, 'w', encoding='utf-8') as f:
-            json.dump(pred_data, f, indent=2, ensure_ascii=False)
+            enriched_data.append(enriched_item)
+
+        with open(enriched_path, 'w', encoding='utf-8') as f:
+            json.dump(enriched_data, f, indent=2, ensure_ascii=False)
         converted_count += 1
 
-    logger.info(f"Converted {converted_count} files to {output_dir}")
-    return output_dir
+    logger.info(f"Saved {converted_count} enriched files to {enriched_dir}")
+    logger.info(f"Run completed: {run_id}")
+
+    return runs_dir
 
 
 def run_evaluation(gt_folder: str, pred_folder: str, eval_type: str = "all"):
@@ -287,7 +350,6 @@ def main():
     parser.add_argument("--exp", type=str, default=None, help="Experiment ID")
     parser.add_argument("--model_path", type=str, default=None, help="Joint model checkpoint path")
     parser.add_argument("--data_dir", type=str, default=None, help="Data directory")
-    parser.add_argument("--output_dir", type=str, default=None, help="Output directory")
     parser.add_argument("--quick", action="store_true", help="Quick mode: 10 samples")
     parser.add_argument("--max_test_samples", type=int, default=None)
     parser.add_argument("--skip_eval", action="store_true", help="Skip evaluation")
@@ -310,13 +372,13 @@ def main():
         parser.error("Must specify --model_path or --env with trained joint model")
     logger.info(f"Using model: {model_path}")
 
-    output_dir = args.output_dir or os.path.join(data_dir, "test_infer_joint")
     max_test_samples = 10 if args.quick else args.max_test_samples
 
-    result = run_inference(model_path, data_dir, output_dir, config, max_test_samples)
+    runs_dir = run_inference(model_path, data_dir, None, config, max_test_samples)
 
-    if result and not args.skip_eval:
-        run_evaluation(os.path.join(data_dir, "test"), output_dir, args.eval_type)
+    if runs_dir and not args.skip_eval:
+        enriched_dir = os.path.join(runs_dir, "enriched")
+        run_evaluation(os.path.join(data_dir, "test"), enriched_dir, args.eval_type)
 
 
 if __name__ == "__main__":
