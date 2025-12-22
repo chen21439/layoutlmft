@@ -163,6 +163,7 @@ class JointDataArguments:
     """联合训练数据参数"""
     env: str = field(default="test", metadata={"help": "Environment: dev, test"})
     dataset: str = field(default="hrds", metadata={"help": "Dataset: hrds, hrdh, tender"})
+    covmatch: Optional[str] = field(default=None, metadata={"help": "Covmatch split name (e.g., doc_covmatch_dev50_seed42). If not specified, uses config default."})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
 
@@ -948,10 +949,17 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
     data_dir = config.dataset.get_data_dir(data_args.dataset)
     os.environ["HRDOC_DATA_DIR"] = data_dir
 
-    # Covmatch 目录
+    # Covmatch 目录 (命令行参数优先于配置文件)
+    if data_args.covmatch:
+        # 使用命令行指定的 covmatch
+        config.dataset.covmatch = data_args.covmatch
+        logger.info(f"Using covmatch from command line: {data_args.covmatch}")
     covmatch_dir = config.dataset.get_covmatch_dir(data_args.dataset)
     if os.path.exists(covmatch_dir):
         os.environ["HRDOC_SPLIT_DIR"] = covmatch_dir
+        logger.info(f"Covmatch directory: {covmatch_dir}")
+    else:
+        logger.warning(f"Covmatch directory not found: {covmatch_dir}")
 
     # GPU 设置
     if config.gpu.cuda_visible_devices:
@@ -1111,10 +1119,17 @@ def main():
     stage1_config.id2label = get_id2label()
     stage1_config.label2id = get_label2id()
 
-    stage1_model = LayoutXLMForTokenClassification.from_pretrained(
-        stage1_path,
-        config=stage1_config,
-    )
+    if joint_model_path:
+        # Joint checkpoint: config from stage1/, weights will be loaded later from joint pytorch_model.bin
+        # 创建模型结构，权重稍后从 joint checkpoint 加载
+        stage1_model = LayoutXLMForTokenClassification(config=stage1_config)
+        logger.info("Created Stage1 model structure (weights will be loaded from joint checkpoint)")
+    else:
+        # Regular checkpoint or base model: load config and weights together
+        stage1_model = LayoutXLMForTokenClassification.from_pretrained(
+            stage1_path,
+            config=stage1_config,
+        )
 
     # Stage 2: Feature Extractor
     feature_extractor = LineFeatureExtractor()
