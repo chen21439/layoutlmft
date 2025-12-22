@@ -109,7 +109,10 @@ def load_dataset_stats(data_dir: str) -> Tuple[Dict, Dict, List[str]]:
                 parent_edges += 1
                 global_parent_edges += 1
 
-            max_page = max(max_page, line.get('page', 0))
+            page_val = line.get('page', 0)
+            if isinstance(page_val, str):
+                page_val = int(page_val) if page_val.isdigit() else 0
+            max_page = max(max_page, page_val)
 
         line_count = len(lines)
         global_lines += line_count
@@ -546,7 +549,7 @@ def parse_args():
                         help="Environment: dev or test")
 
     # Dataset selection (optional, defaults to config)
-    parser.add_argument("--dataset", type=str, default=None, choices=["hrds", "hrdh"],
+    parser.add_argument("--dataset", type=str, default=None, choices=["hrds", "hrdh", "tender"],
                         help="Dataset to split (default: from config)")
 
     # Split parameters

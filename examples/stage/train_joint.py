@@ -162,7 +162,7 @@ class JointModelArguments:
 class JointDataArguments:
     """联合训练数据参数"""
     env: str = field(default="test", metadata={"help": "Environment: dev, test"})
-    dataset: str = field(default="hrds", metadata={"help": "Dataset: hrds, hrdh"})
+    dataset: str = field(default="hrds", metadata={"help": "Dataset: hrds, hrdh, tender"})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
 
@@ -1079,10 +1079,24 @@ def main():
 
     # Stage 1: LayoutXLM
     # 优先级：model_path 显式指定 > joint_checkpoint/stage1 > 自动检测
+    joint_model_path = None  # 如果 model_path 是 joint checkpoint，记录下来用于后续加载完整权重
+
     if model_args.model_path:
-        # 用户显式指定了 model_path，优先使用
-        stage1_path = model_args.model_name_or_path
-        logger.info(f"Loading Stage 1 from specified path: {stage1_path}")
+        # 用户显式指定了 model_path，检测是否是 joint checkpoint 结构
+        specified_path = model_args.model_name_or_path
+        stage1_subdir = os.path.join(specified_path, "stage1")
+        joint_pytorch_model = os.path.join(specified_path, "pytorch_model.bin")
+
+        if os.path.isfile(os.path.join(stage1_subdir, "config.json")) and os.path.isfile(joint_pytorch_model):
+            # 是 joint checkpoint 结构
+            stage1_path = stage1_subdir
+            joint_model_path = specified_path
+            logger.info(f"Loading from joint checkpoint: {specified_path}")
+            logger.info(f"  - Stage1 config from: {stage1_path}")
+        else:
+            # 标准 LayoutXLM 目录结构
+            stage1_path = specified_path
+            logger.info(f"Loading Stage 1 from specified path: {stage1_path}")
     elif joint_checkpoint:
         # 续训且未指定 model_path，从 checkpoint 加载
         stage1_path = os.path.join(joint_checkpoint, "stage1")
@@ -1155,6 +1169,19 @@ def main():
         use_focal_loss=model_args.use_focal_loss,
         use_gru=model_args.use_gru,
     )
+
+    # 如果从 joint checkpoint 加载，加载完整权重
+    if joint_model_path:
+        joint_weights_path = os.path.join(joint_model_path, "pytorch_model.bin")
+        logger.info(f"Loading joint model weights from: {joint_weights_path}")
+        state_dict = torch.load(joint_weights_path, map_location="cpu")
+        # 加载权重，strict=False 允许部分匹配（如果模型结构略有不同）
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            logger.warning(f"Missing keys when loading joint model: {missing_keys}")
+        if unexpected_keys:
+            logger.warning(f"Unexpected keys when loading joint model: {unexpected_keys}")
+        logger.info("Joint model weights loaded successfully")
 
     # 打印模型参数量
     stage1_params = sum(p.numel() for p in model.stage1.parameters())
