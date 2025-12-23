@@ -1,0 +1,55 @@
+# 基础配置
+
+# 模型配置
+model:
+  model_path: "microsoft/layoutxlm-base"
+  hidden_size: 768
+  num_labels: 16
+  num_heads: 8
+  dropout: 0.1
+  use_visual: true
+  freeze_backbone: false
+
+  # 模块开关
+  use_detect: true
+  use_order: true
+  use_construct: true
+
+  # Order 模块
+  order_num_layers: 3
+
+  # Construct 模块
+  construct_num_layers: 2
+  use_rope: true
+
+# 数据配置
+data:
+  max_length: 512
+  max_regions: 128
+  label_all_tokens: true
+
+# 训练配置
+training:
+  batch_size: 2
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_steps: 10000
+  gradient_accumulation_steps: 4
+  fp16: true
+
+  # 损失权重
+  lambda_detect: 1.0
+  lambda_order: 1.0
+  lambda_construct: 1.0
+
+# 评估配置
+evaluation:
+  eval_steps: 500
+  save_steps: 1000
+  metric_for_best_model: "f1"
+
+# 日志配置
+logging:
+  log_level: "info"
+  log_steps: 100
