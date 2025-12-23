@@ -70,15 +70,28 @@ class JointModel(nn.Module):
         line_parent_ids: Optional[torch.Tensor] = None,
         line_relations: Optional[torch.Tensor] = None,
         line_bboxes: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
         return_dict: bool = True,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        """前向传播，返回 loss 和各阶段输出"""
+        """
+        前向传播，返回 loss 和各阶段输出
+
+        文档级别处理：
+        - input_ids: [total_chunks, seq_len]，所有文档的 chunks 展平
+        - line_ids: [total_chunks, seq_len]，每个 token 的全局 line_id
+        - line_parent_ids: [num_docs, max_lines]，文档级别的 parent_ids
+        - line_relations: [num_docs, max_lines]，文档级别的 relations
+        - num_docs: batch 中的文档数量
+        - chunks_per_doc: 每个文档的 chunk 数量列表
+        """
 
         device = input_ids.device
-        batch_size = input_ids.shape[0]
+        total_chunks = input_ids.shape[0]
 
         # ==================== Stage 1: Classification ====================
+        # 对所有 chunks 运行 Stage 1
         stage1_outputs = self.stage1(
             input_ids=input_ids,
             bbox=bbox,
@@ -98,21 +111,55 @@ class JointModel(nn.Module):
             "logits": logits,
         }
 
-        # 如果没有 line 信息，直接返回（使用 TokenClassifierOutput 格式）
+        # 如果没有 line 信息或文档信息，直接返回
         if line_ids is None or line_parent_ids is None:
             return TokenClassifierOutput(
                 loss=outputs["loss"],
                 logits=logits,
             )
 
+        # 如果没有文档级别信息，使用旧的 chunk 级别处理（兼容模式）
+        if num_docs is None or chunks_per_doc is None:
+            num_docs = total_chunks
+            chunks_per_doc = [1] * total_chunks
+
         # ==================== Stage 2: Feature Extraction ====================
-        # 保持梯度流，让 Stage 3/4 的 loss 可以回传到 Stage 1
+        # 按文档聚合 line features
         text_seq_len = input_ids.shape[1]
         text_hidden = hidden_states[:, :text_seq_len, :]
 
-        line_features, line_mask = self.feature_extractor.extract_line_features(
-            text_hidden, line_ids, pooling="mean"
-        )
+        # 对每个文档，从其所有 chunks 中提取并聚合 line features
+        doc_line_features_list = []
+        doc_line_masks_list = []
+
+        chunk_idx = 0
+        for doc_idx in range(num_docs):
+            num_chunks_in_doc = chunks_per_doc[doc_idx]
+
+            # 收集该文档所有 chunks 的 hidden states 和 line_ids
+            doc_hidden = text_hidden[chunk_idx:chunk_idx + num_chunks_in_doc]  # [num_chunks, seq_len, hidden]
+            doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks_in_doc]   # [num_chunks, seq_len]
+
+            # 聚合该文档的 line features
+            doc_features, doc_mask = self._aggregate_document_line_features(
+                doc_hidden, doc_line_ids
+            )
+            doc_line_features_list.append(doc_features)
+            doc_line_masks_list.append(doc_mask)
+
+            chunk_idx += num_chunks_in_doc
+
+        # 填充到相同长度
+        max_lines = max(f.shape[0] for f in doc_line_features_list)
+        hidden_dim = doc_line_features_list[0].shape[1]
+
+        line_features = torch.zeros(num_docs, max_lines, hidden_dim, device=device)
+        line_mask = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
+
+        for doc_idx, (features, mask) in enumerate(zip(doc_line_features_list, doc_line_masks_list)):
+            num_lines = features.shape[0]
+            line_features[doc_idx, :num_lines] = features
+            line_mask[doc_idx, :num_lines] = mask
 
         # ==================== Stage 3: Parent Finding ====================
         parent_loss = torch.tensor(0.0, device=device)
@@ -126,9 +173,9 @@ class JointModel(nn.Module):
                 parent_logits, gru_hidden = self.stage3(
                     line_features, line_mask, return_gru_hidden=True
                 )
-                # gru_hidden: [B, L+1, gru_hidden_size]，包括 ROOT
+                # gru_hidden: [num_docs, L+1, gru_hidden_size]，包括 ROOT
 
-                for b in range(batch_size):
+                for b in range(num_docs):
                     sample_parent_ids = line_parent_ids[b]
                     sample_mask = line_mask[b]
                     num_lines = int(sample_mask.sum().item())
@@ -164,7 +211,7 @@ class JointModel(nn.Module):
                         if pred_parent == target_idx:
                             parent_correct += 1
             else:
-                for b in range(batch_size):
+                for b in range(num_docs):
                     sample_features = line_features[b]
                     sample_mask = line_mask[b]
                     sample_parent_ids = line_parent_ids[b]
@@ -212,7 +259,7 @@ class JointModel(nn.Module):
             else:
                 use_gru_offset = True
 
-            for b in range(batch_size):
+            for b in range(num_docs):
                 sample_mask = line_mask[b]
                 sample_parent_ids = line_parent_ids[b]
                 sample_relations = line_relations[b]
@@ -264,3 +311,57 @@ class JointModel(nn.Module):
             loss=outputs["loss"],
             logits=outputs["logits"],
         )
+
+    def _aggregate_document_line_features(
+        self,
+        doc_hidden: torch.Tensor,
+        doc_line_ids: torch.Tensor,
+    ) -> tuple:
+        """
+        从文档的所有 chunks 中聚合 line features
+
+        Args:
+            doc_hidden: [num_chunks, seq_len, hidden_dim]
+            doc_line_ids: [num_chunks, seq_len]，每个 token 的全局 line_id
+
+        Returns:
+            features: [num_lines, hidden_dim]
+            mask: [num_lines]，有效行的 mask
+        """
+        device = doc_hidden.device
+        hidden_dim = doc_hidden.shape[-1]
+
+        # 收集所有有效的 line_id
+        valid_line_ids = doc_line_ids[doc_line_ids >= 0].unique()
+        if len(valid_line_ids) == 0:
+            # 没有有效行，返回空
+            return torch.zeros(1, hidden_dim, device=device), torch.zeros(1, dtype=torch.bool, device=device)
+
+        # 按 line_id 排序
+        valid_line_ids = valid_line_ids.sort()[0]
+        num_lines = len(valid_line_ids)
+
+        # 创建 line_id 到索引的映射
+        line_id_to_idx = {lid.item(): idx for idx, lid in enumerate(valid_line_ids)}
+
+        # 聚合每个 line 的 features（mean pooling）
+        line_features = torch.zeros(num_lines, hidden_dim, device=device)
+        line_counts = torch.zeros(num_lines, device=device)
+
+        num_chunks, seq_len, _ = doc_hidden.shape
+        for chunk_idx in range(num_chunks):
+            for token_idx in range(seq_len):
+                lid = doc_line_ids[chunk_idx, token_idx].item()
+                if lid >= 0 and lid in line_id_to_idx:
+                    line_idx = line_id_to_idx[lid]
+                    line_features[line_idx] += doc_hidden[chunk_idx, token_idx]
+                    line_counts[line_idx] += 1
+
+        # 计算平均值
+        valid_counts = line_counts.clamp(min=1)
+        line_features = line_features / valid_counts.unsqueeze(1)
+
+        # 创建 mask（所有收集到的行都是有效的）
+        line_mask = line_counts > 0
+
+        return line_features, line_mask

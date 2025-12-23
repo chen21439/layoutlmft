@@ -55,33 +55,35 @@ class HRDocConfig(datasets.BuilderConfig):
 
 
 class HRDoc(datasets.GeneratorBasedBuilder):
-    """HRDoc dataset."""
+    """HRDoc dataset - 文档级别模式（一个样本=整个文档）"""
 
     BUILDER_CONFIGS = [
-        HRDocConfig(name="hrdoc", version=datasets.Version("1.0.0"), description="HRDoc dataset"),
+        HRDocConfig(name="hrdoc", version=datasets.Version("1.0.0"), description="HRDoc dataset (document-level)"),
     ]
 
     def _info(self):
+        # 文档级别模式：一个样本 = 整个文档（多页）
+        features = datasets.Features({
+            "id": datasets.Value("string"),
+            "document_name": datasets.Value("string"),
+            "num_pages": datasets.Value("int64"),
+            # 每页的数据（列表形式）
+            "pages": datasets.Sequence({
+                "page_number": datasets.Value("int64"),
+                "tokens": datasets.Sequence(datasets.Value("string")),
+                "bboxes": datasets.Sequence(datasets.Sequence(datasets.Value("int64"))),
+                "ner_tags": datasets.Sequence(datasets.Value("int64")),  # 使用 int64 避免 ClassLabel 在嵌套中的问题
+                "image": datasets.Array3D(shape=(3, 224, 224), dtype="uint8"),
+                "line_ids": datasets.Sequence(datasets.Value("int64")),  # 全局 line_id
+            }),
+            # 文档级别的层级关系（全局索引）
+            "line_parent_ids": datasets.Sequence(datasets.Value("int64")),
+            "line_relations": datasets.Sequence(datasets.Value("string")),
+        })
+
         return datasets.DatasetInfo(
             description=_DESCRIPTION,
-            features=datasets.Features(
-                {
-                    "id": datasets.Value("string"),
-                    "tokens": datasets.Sequence(datasets.Value("string")),
-                    "bboxes": datasets.Sequence(datasets.Sequence(datasets.Value("int64"))),
-                    "ner_tags": datasets.Sequence(
-                        datasets.features.ClassLabel(names=_LABELS)
-                    ),
-                    "image": datasets.Array3D(shape=(3, 224, 224), dtype="uint8"),
-                    # 新增：层级关系信息
-                    "line_ids": datasets.Sequence(datasets.Value("int64")),  # 每个token对应的line_id
-                    "line_parent_ids": datasets.Sequence(datasets.Value("int64")),  # 每个line的parent_id
-                    "line_relations": datasets.Sequence(datasets.Value("string")),  # 每个line的relation
-                    # 新增：文档名称和页码（用于推理时区分不同文档）
-                    "document_name": datasets.Value("string"),  # 文档名称（不含扩展名）
-                    "page_number": datasets.Value("int64"),     # 页码
-                }
-            ),
+            features=features,
             supervised_keys=None,
             citation=_CITATION,
         )
@@ -194,7 +196,24 @@ class HRDoc(datasets.GeneratorBasedBuilder):
         return splits
 
     def _generate_examples(self, filepath, doc_ids=None, max_samples=None, max_docs=None):
-        logger.info("⏳ Generating examples from = %s", filepath)
+        """
+        文档级别生成器：一个样本 = 整个文档（多页）
+
+        输出格式:
+        {
+            "id": "0",
+            "document_name": "doc1",
+            "num_pages": 3,
+            "pages": [
+                {"page_number": 0, "tokens": [...], "bboxes": [...], "ner_tags": [...], "image": ..., "line_ids": [...]},
+                {"page_number": 1, ...},
+                ...
+            ],
+            "line_parent_ids": [...],  # 文档全局，不重映射
+            "line_relations": [...],   # 文档全局
+        }
+        """
+        logger.info("⏳ Generating examples from = %s (document-level)", filepath)
         if doc_ids is not None:
             logger.info(f"  Filtering to {len(doc_ids)} docs")
         if max_samples is not None:
@@ -214,9 +233,15 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             img_dir = os.path.join(os.path.dirname(filepath), "images")
 
         guid = 0
+        doc_count = 0
         for file in sorted(os.listdir(ann_dir)):
             if not file.endswith('.json'):
                 continue
+
+            # 快速模式：达到 max_docs 后停止
+            if max_docs is not None and doc_count >= max_docs:
+                logger.info(f"  Reached max_docs={max_docs}, stopping generation")
+                return
 
             # 提取文档名称（不含扩展名）
             document_name = os.path.splitext(file)[0]
@@ -247,22 +272,17 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 logger.warning(f"Unknown data format in {file_path}")
                 continue
 
-            # 处理每一页
-            for page_num in sorted(pages_data.keys()):
-                tokens = []
-                bboxes = []
-                ner_tags = []
-                line_ids = []
-                line_parent_ids = []
-                line_relations = []
+            # ==================== 文档级别处理 ====================
+            # 收集整个文档的所有页面数据
+            doc_pages = []
+            doc_line_parent_ids = []  # 文档级别的 parent_ids（全局索引）
+            doc_line_relations = []   # 文档级别的 relations
+            base_name = file.replace('.json', '')
 
+            for page_num in sorted(pages_data.keys()):
                 form_data = pages_data[page_num]
 
-                # 确定图片路径
-                # FUNSD格式：train/images/xxx_0.png
-                # HRDS格式：images/xxx/xxx_0.jpg
-                base_name = file.replace('.json', '')
-
+                # ==================== 确定图片路径 ====================
                 # 先尝试 FUNSD 格式
                 image_path = os.path.join(img_dir, f"{base_name}.png")
                 if not os.path.exists(image_path):
@@ -274,66 +294,59 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     if os.path.exists(hrds_img_path):
                         image_path = hrds_img_path
                     else:
-                        # 尝试 png
                         hrds_img_path = os.path.join(img_dir, base_name, f"{base_name}_{page_num}.png")
                         if os.path.exists(hrds_img_path):
                             image_path = hrds_img_path
 
-                # 再尝试 HRDH 格式: images/{doc_name}/{page}.png (页码无前缀)
+                # 再尝试 HRDH 格式: images/{doc_name}/{page}.png
                 if not os.path.exists(image_path):
                     hrdh_img_path = os.path.join(img_dir, base_name, f"{page_num}.png")
                     if os.path.exists(hrdh_img_path):
                         image_path = hrdh_img_path
                     else:
-                        # 尝试 jpg
                         hrdh_img_path = os.path.join(img_dir, base_name, f"{page_num}.jpg")
                         if os.path.exists(hrdh_img_path):
                             image_path = hrdh_img_path
 
                 if not os.path.exists(image_path):
-                    logger.warning(f"Image not found for {file} page {page_num}, skipping...")
+                    logger.warning(f"Image not found for {file} page {page_num}, skipping page...")
                     continue
 
                 image, size = load_image(image_path)
 
+                # ==================== 处理当前页的数据 ====================
+                page_tokens = []
+                page_bboxes = []
+                page_ner_tags = []
+                page_line_ids = []
+
                 for line_idx, item in enumerate(form_data):
                     # 使用 trans_class 将细粒度标签转换为论文14类
-                    # 传入 form_data 用于 opara 的 parent_id 查找
                     label = trans_class(
                         item.get("class", item.get("label", "paraline")),
                         all_lines=form_data,
                         unit=item
                     )
+                    # 转换为 int（因为 features 中使用 int64）
+                    if isinstance(label, str):
+                        label = LABEL2ID.get(label, 0)
 
-                    # ==================== 数据格式处理 ====================
-                    # 支持两种格式：
-                    # 1. FUNSD格式：{"words": [{"text": "word1", "box": [...]}, ...]}
-                    #    - 一行有多个 word，每个 word 有独立的 bbox
-                    # 2. HRDS格式：{"text": "整行文本", "box": [整行bbox]}
-                    #    - 整行作为一个单元，共用一个 bbox
-                    #
-                    # 重要说明：
-                    # - HRDS格式下，整行文本作为一个元素加入 tokens 列表
-                    # - 后续 tokenizer 会对整行文本进行 subword 分词
-                    # - 分词后的所有 subword tokens 共用整行的 bbox
-                    # - 这种设计保持了行级别的语义完整性
+                    # 数据格式处理
                     if "words" in item:
                         words = item["words"]
                     else:
-                        # HRDS格式：整行文本作为一个单元
-                        # 注意：这里的 "words" 实际只有一个元素，就是整行
                         words = [{
-                            "text": item["text"],  # 整行文本，如 "lect data that differs..."
-                            "box": item["box"]     # 整行的 bbox
+                            "text": item["text"],
+                            "box": item["box"]
                         }]
                     words = [w for w in words if w["text"].strip() != ""]
                     if len(words) == 0:
                         continue
 
-                    # 获取层级关系信息
-                    # HRDS格式有 line_id 字段，FUNSD格式用 id 字段
+                    # 获取全局 line_id（不重映射）
                     item_line_id = item.get("line_id", item.get("id", line_idx))
-                    # 处理空字符串和非整数的 parent_id
+
+                    # 获取 parent_id（全局索引，不重映射）
                     raw_parent_id = item.get("parent_id", -1)
                     if raw_parent_id == "" or raw_parent_id is None:
                         parent_id = -1
@@ -342,68 +355,46 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                             parent_id = int(raw_parent_id)
                         except (ValueError, TypeError):
                             parent_id = -1
-                    # 处理空字符串的 relation
+
+                    # 获取 relation
                     relation = item.get("relation", "none")
                     if relation == "" or relation is None:
                         relation = "none"
 
-                    # 记录当前line的元数据（暂存原始值，后面重映射）
-                    line_parent_ids.append(parent_id)
-                    line_relations.append(relation)
+                    # 记录文档级别的 parent_id 和 relation（每行一个）
+                    doc_line_parent_ids.append(parent_id)
+                    doc_line_relations.append(relation)
 
-                    # ==================== 构建 tokens 列表 ====================
-                    # HRDS格式：整行文本作为 tokens 列表的一个元素
-                    # 例如：tokens = ["整行1的文本", "整行2的文本", ...]
-                    # 后续传给 tokenizer 时使用 is_split_into_words=True，
-                    # tokenizer 会对每个元素（整行）进行 subword 分词
-                    # 分词后的 subword tokens 继承该行的 bbox 和 line_id
+                    # 构建当前页的 tokens 列表
                     for w in words:
-                        tokens.append(w["text"])
-                        ner_tags.append(label)  # Line级别标注，无BIO前缀
-                        bboxes.append(normalize_bbox(w["box"], size))
-                        line_ids.append(item_line_id)
+                        page_tokens.append(w["text"])
+                        page_ner_tags.append(label)
+                        page_bboxes.append(normalize_bbox(w["box"], size))
+                        page_line_ids.append(item_line_id)
 
-                # ==================== 重映射 line_parent_ids ====================
-                # 将全局 parent_id 转换为页面内的本地索引
-                # 构建 global_line_id -> local_idx 的映射
-                unique_line_ids = []
-                seen = set()
-                for lid in line_ids:
-                    if lid not in seen:
-                        unique_line_ids.append(lid)
-                        seen.add(lid)
+                # 添加当前页到文档
+                if len(page_tokens) > 0:
+                    doc_pages.append({
+                        "page_number": page_num,
+                        "tokens": page_tokens,
+                        "bboxes": page_bboxes,
+                        "ner_tags": page_ner_tags,
+                        "image": image,
+                        "line_ids": page_line_ids,
+                    })
 
-                global_to_local = {global_id: local_idx for local_idx, global_id in enumerate(unique_line_ids)}
-
-                # 重映射 parent_ids
-                remapped_parent_ids = []
-                for parent_id in line_parent_ids:
-                    if parent_id == -1:
-                        # ROOT 节点保持 -1
-                        remapped_parent_ids.append(-1)
-                    elif parent_id in global_to_local:
-                        # 父节点在当前页面内，映射到本地索引
-                        remapped_parent_ids.append(global_to_local[parent_id])
-                    else:
-                        # 父节点不在当前页面（跨页引用），标记为 -1（ROOT）
-                        remapped_parent_ids.append(-1)
-
-                # 同样重映射 line_ids 为本地索引
-                remapped_line_ids = [global_to_local[lid] for lid in line_ids]
-
+            # ==================== 生成文档级别样本 ====================
+            if len(doc_pages) > 0:
                 yield guid, {
                     "id": str(guid),
-                    "tokens": tokens,
-                    "bboxes": bboxes,
-                    "ner_tags": ner_tags,
-                    "image": image,
-                    "line_ids": remapped_line_ids,  # 使用重映射后的本地索引
-                    "line_parent_ids": remapped_parent_ids,  # 使用重映射后的本地索引
-                    "line_relations": line_relations,
-                    "document_name": document_name,  # 文档名称
-                    "page_number": page_num,         # 页码
+                    "document_name": document_name,
+                    "num_pages": len(doc_pages),
+                    "pages": doc_pages,
+                    "line_parent_ids": doc_line_parent_ids,  # 全局索引，不重映射
+                    "line_relations": doc_line_relations,
                 }
                 guid += 1
+                doc_count += 1
 
                 # 快速模式：达到 max_samples 后停止生成
                 if max_samples is not None and guid >= max_samples:

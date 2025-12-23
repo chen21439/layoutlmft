@@ -2,9 +2,11 @@
 # coding=utf-8
 """
 HRDoc 联合训练的数据整理器 (Data Collator)
-处理三个任务的标签：语义分类、父节点查找、关系分类
 
-更新：使用统一的 14 类标签定义（无 BIO 前缀）
+文档级别处理：
+- 每个样本是一个文档（包含多个 chunks）
+- Stage 1：逐 chunk 处理
+- Stage 2/3/4：使用文档级别的 parent_ids 和 relations（全局索引）
 """
 
 import os
@@ -30,16 +32,29 @@ from layoutlmft.models.relation_classifier import (
 @dataclass
 class HRDocJointDataCollator:
     """
-    联合训练的 Data Collator
+    文档级别联合训练的 Data Collator
 
-    处理的字段：
-    1. input_ids, bbox, image, attention_mask - 模型输入
-    2. labels - SubTask1 语义标签（token-level，14 类，无 BIO）
-    3. line_ids - token到line的映射
-    4. line_parent_ids - SubTask2 父节点标签（line-level）
-    5. line_relations - SubTask3 关系标签（line-level）
-    6. line_semantic_labels - line的语义类别（用于soft-mask）
-    7. line_bboxes - line的边界框坐标（用于几何特征计算）
+    输入格式（每个样本是一个文档）：
+    {
+        "document_name": "doc1",
+        "chunks": [chunk1, chunk2, ...],  # 每个 chunk 是一页的一部分
+        "line_parent_ids": [...],         # 文档级别，全局索引
+        "line_relations": [...],          # 文档级别
+    }
+
+    输出格式：
+    {
+        "num_docs": batch_size,
+        "chunks_per_doc": [n1, n2, ...],  # 每个文档的 chunk 数量
+        "input_ids": [chunk1, chunk2, ...],  # 所有 chunks 展平
+        "bbox": [...],
+        "attention_mask": [...],
+        "labels": [...],
+        "line_ids": [...],                # 全局 line_id
+        "image": [...],
+        "line_parent_ids": [...],         # 每个文档的 parent_ids（全局索引）
+        "line_relations": [...],
+    }
     """
 
     tokenizer: PreTrainedTokenizerBase
@@ -52,181 +67,143 @@ class HRDocJointDataCollator:
     relation2id: Dict[str, int] = None
 
     def __post_init__(self):
-        # 使用统一的关系映射
         if self.relation2id is None:
             self.relation2id = RELATION_LABELS
 
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
         """
-        整理一个batch的数据
+        整理一个 batch 的文档数据
 
         Args:
-            features: 一个batch的样本，每个样本是一个字典
+            features: 一个 batch 的文档样本
 
         Returns:
-            batch: 整理后的batch，所有tensor都padding到相同长度
+            batch: 整理后的 batch
         """
-        # 提取各个字段
-        input_ids = [f["input_ids"] for f in features]
-        bbox = [f["bbox"] for f in features]
-        image = [f["image"] for f in features]
-        labels = [f.get("labels", f.get("ner_tags")) for f in features]  # 支持两种命名
-
-        # line相关信息
-        line_ids = [f.get("line_ids", []) for f in features]
-        line_parent_ids = [f.get("line_parent_ids", []) for f in features]
-        line_relations = [f.get("line_relations", []) for f in features]
-        line_bboxes = [f.get("line_bboxes", []) for f in features]
-
         batch_size = len(features)
 
-        # ==================== 1. Token-level数据 ====================
-        # Padding input_ids, bbox, labels
-        max_length = max(len(ids) for ids in input_ids)
+        # 收集所有 chunks
+        all_chunks = []
+        chunks_per_doc = []
+        all_line_parent_ids = []
+        all_line_relations = []
+        document_names = []
+
+        for doc in features:
+            document_names.append(doc["document_name"])
+            chunks = doc["chunks"]
+            chunks_per_doc.append(len(chunks))
+            all_chunks.extend(chunks)
+
+            # 文档级别的 parent_ids 和 relations（全局索引）
+            all_line_parent_ids.append(doc["line_parent_ids"])
+            all_line_relations.append(doc["line_relations"])
+
+        # ==================== 1. 处理所有 chunks（用于 Stage 1）====================
+        num_chunks = len(all_chunks)
+
+        # 找出最大序列长度
+        max_seq_len = max(len(chunk["input_ids"]) for chunk in all_chunks)
         if self.max_length:
-            max_length = min(max_length, self.max_length)
+            max_seq_len = min(max_seq_len, self.max_length)
 
         padded_input_ids = []
         padded_bbox = []
         padded_labels = []
         padded_line_ids = []
-        attention_mask = []
+        attention_masks = []
+        all_images = []
 
-        for i in range(batch_size):
-            seq_len = len(input_ids[i])
-            padding_len = max_length - seq_len
+        for chunk in all_chunks:
+            seq_len = len(chunk["input_ids"])
+            padding_len = max_seq_len - seq_len
 
             # input_ids
             padded_input_ids.append(
-                input_ids[i] + [self.tokenizer.pad_token_id] * padding_len
+                list(chunk["input_ids"]) + [self.tokenizer.pad_token_id] * padding_len
             )
 
             # bbox
             padded_bbox.append(
-                bbox[i] + [[0, 0, 0, 0]] * padding_len
+                list(chunk["bbox"]) + [[0, 0, 0, 0]] * padding_len
             )
 
             # labels
-            if labels[i] is not None:
+            labels = chunk.get("labels", [])
+            if labels:
                 padded_labels.append(
-                    labels[i] + [self.label_pad_token_id] * padding_len
+                    list(labels) + [self.label_pad_token_id] * padding_len
                 )
 
-            # line_ids (即使为空也要添加，保持 batch 一致性)
-            if len(line_ids[i]) > 0:
+            # line_ids（全局 line_id）
+            line_ids = chunk.get("line_ids", [])
+            if line_ids:
                 padded_line_ids.append(
-                    line_ids[i] + [-1] * padding_len
+                    list(line_ids) + [-1] * padding_len
                 )
             else:
-                padded_line_ids.append([-1] * max_length)
+                padded_line_ids.append([-1] * max_seq_len)
 
             # attention_mask
-            attention_mask.append(
+            attention_masks.append(
                 [1] * seq_len + [0] * padding_len
             )
 
+            # image
+            if chunk.get("image") is not None:
+                all_images.append(chunk["image"])
+
         batch = {
+            "num_docs": batch_size,
+            "chunks_per_doc": chunks_per_doc,
+            "document_names": document_names,
             "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
             "bbox": torch.tensor(padded_bbox, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
+            "line_ids": torch.tensor(padded_line_ids, dtype=torch.long),
         }
 
-        if labels[0] is not None:
+        if padded_labels:
             batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
 
-        # 检查是否有任何样本包含 line_ids（不只是第一个样本）
-        has_line_ids = any(len(lid) > 0 for lid in line_ids)
-        if has_line_ids:
-            batch["line_ids"] = torch.tensor(padded_line_ids, dtype=torch.long)
-
-        # image
-        if image[0] is not None:
+        if all_images:
             batch["image"] = torch.stack([
                 torch.tensor(img) if not isinstance(img, torch.Tensor) else img
-                for img in image
+                for img in all_images
             ])
 
-        # ==================== 2. Line-level数据 ====================
-        # 检查是否有任何样本包含 line_parent_ids（不只是第一个样本）
-        has_line_parent_ids = any(len(lp) > 0 for lp in line_parent_ids)
-        if has_line_parent_ids:
-            # 找出最大line数
-            max_lines = max(len(lp) for lp in line_parent_ids)
+        # ==================== 2. 处理文档级别 parent_ids 和 relations ====================
+        # 找出最大行数
+        max_lines = max(len(pids) for pids in all_line_parent_ids) if all_line_parent_ids else 0
 
-            # Padding line_parent_ids
-            padded_line_parent_ids = []
-            padded_line_relations = []
-            padded_line_semantic_labels = []
+        if max_lines > 0:
+            padded_parent_ids = []
+            padded_relations = []
 
-            for i in range(batch_size):
-                num_lines = len(line_parent_ids[i])
+            for doc_idx in range(batch_size):
+                parent_ids = all_line_parent_ids[doc_idx]
+                relations = all_line_relations[doc_idx]
+                num_lines = len(parent_ids)
                 padding_len = max_lines - num_lines
 
-                # parent_ids
-                padded_line_parent_ids.append(
-                    line_parent_ids[i] + [-100] * padding_len  # -100会被忽略
+                # parent_ids（全局索引，不重映射）
+                padded_parent_ids.append(
+                    list(parent_ids) + [-100] * padding_len
                 )
 
-                # relations: 转换为索引（即使为空也要添加，保持 batch 一致性）
-                if len(line_relations[i]) > 0:
-                    # 论文只有 3 类关系：connect=0, contain=1, equality=2
-                    # none/meta 关系映射为 -100，会被 loss 忽略
+                # relations
+                if relations:
                     rel_indices = [
-                        self.relation2id.get(rel.lower(), -100) for rel in line_relations[i]
+                        self.relation2id.get(str(rel).lower(), -100) for rel in relations
                     ]
-                    padded_line_relations.append(
-                        rel_indices + [-100] * padding_len  # -100 会被 loss 忽略
+                    padded_relations.append(
+                        rel_indices + [-100] * padding_len
                     )
                 else:
-                    # 空样本用 -100 填充到 max_lines
-                    padded_line_relations.append([-100] * max_lines)
+                    padded_relations.append([-100] * max_lines)
 
-                # semantic_labels: 从 features 中直接获取（已经是 14 类索引）
-                if "line_semantic_labels" in features[i]:
-                    sem_labels = features[i]["line_semantic_labels"]
-                    padded_line_semantic_labels.append(
-                        sem_labels + [0] * padding_len
-                    )
-                else:
-                    # 空样本用 0 填充到 max_lines
-                    padded_line_semantic_labels.append([0] * max_lines)
-
-            batch["line_parent_ids"] = torch.tensor(padded_line_parent_ids, dtype=torch.long)
-
-            # 检查是否有任何样本包含 line_relations
-            has_line_relations = any(len(lr) > 0 for lr in line_relations)
-            if has_line_relations and len(padded_line_relations) > 0:
-                batch["line_relations"] = torch.tensor(padded_line_relations, dtype=torch.long)
-
-            if len(padded_line_semantic_labels) > 0:
-                batch["line_semantic_labels"] = torch.tensor(padded_line_semantic_labels, dtype=torch.long)
-
-        # ==================== 3. Line bboxes ====================
-        # 检查是否有任何样本包含 line_bboxes
-        has_line_bboxes = any(len(lb) > 0 for lb in line_bboxes)
-        if has_line_bboxes:
-            # 找出最大line数（与 line_parent_ids 一致）
-            max_lines = max(len(lb) for lb in line_bboxes)
-
-            padded_line_bboxes = []
-            for i in range(batch_size):
-                num_lines = len(line_bboxes[i])
-                padding_len = max_lines - num_lines
-
-                # 将每个 bbox 转换为 list（如果是 dict 或其他格式）
-                bboxes = []
-                for bb in line_bboxes[i]:
-                    if isinstance(bb, (list, tuple)):
-                        bboxes.append(list(bb))
-                    else:
-                        bboxes.append([0, 0, 0, 0])
-
-                # padding
-                padded_line_bboxes.append(
-                    bboxes + [[0, 0, 0, 0]] * padding_len
-                )
-
-            batch["line_bboxes"] = torch.tensor(padded_line_bboxes, dtype=torch.float)
+            batch["line_parent_ids"] = torch.tensor(padded_parent_ids, dtype=torch.long)
+            batch["line_relations"] = torch.tensor(padded_relations, dtype=torch.long)
 
         return batch
 

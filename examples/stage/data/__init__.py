@@ -3,14 +3,14 @@
 """
 统一数据加载模块
 
-提供 Stage 1 和联合训练共用的数据加载逻辑。
+提供文档级别的数据加载逻辑（支持跨页关系）。
 """
 
 from .hrdoc_data_loader import (
     HRDocDataLoader,
     HRDocDataLoaderConfig,
     load_hrdoc_raw_datasets,
-    tokenize_with_line_boundary,
+    tokenize_page_with_line_boundary,
     compute_line_bboxes,
     get_label2id,
     get_id2label,
@@ -22,7 +22,7 @@ __all__ = [
     "HRDocDataLoader",
     "HRDocDataLoaderConfig",
     "load_hrdoc_raw_datasets",
-    "tokenize_with_line_boundary",
+    "tokenize_page_with_line_boundary",
     "compute_line_bboxes",
     "get_label2id",
     "get_id2label",

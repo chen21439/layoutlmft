@@ -6,9 +6,10 @@ HRDoc 统一数据加载模块
 提供 Stage 1 和联合训练共用的数据加载逻辑。
 
 核心功能：
-1. 按行边界切分 tokenization（确保一行不会被截断到两个 chunk）
-2. 统一的 label 映射
-3. 支持页面级别和文档级别特征
+1. 文档级别数据加载（一个样本 = 整个文档）
+2. 按行边界切分 tokenization（确保一行不会被截断到两个 chunk）
+3. 保持全局 line_id 和 parent_id（不重映射，支持跨页关系）
+4. Stage 1 逐页处理，Stage 2/3/4 处理整个文档
 """
 
 import os
@@ -101,43 +102,38 @@ def get_id2label() -> Dict[int, str]:
 
 # ==================== 按行边界切分的 Tokenization ====================
 
-def tokenize_with_line_boundary(
+def tokenize_page_with_line_boundary(
     tokenizer,
     tokens: List[str],
     bboxes: List[List[int]],
     labels: List[Any],
+    line_ids: List[int],
     max_length: int = 512,
     label2id: Optional[Dict[str, int]] = None,
-    line_ids: Optional[List[int]] = None,
-    line_parent_ids: Optional[List[int]] = None,
-    line_relations: Optional[List[int]] = None,
     image: Optional[Any] = None,
-    document_name: Optional[str] = None,
     page_number: Optional[int] = None,
     label_all_tokens: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    按行边界切分的 tokenization
+    按行边界切分的单页 tokenization（保持全局 line_id）
 
-    关键特性：确保一行不会被截断到两个 chunk 中。
-    如果当前 chunk 放不下完整的一行，就把该行放到下一个 chunk。
+    关键特性：
+    1. 确保一行不会被截断到两个 chunk 中
+    2. 保持全局 line_id（不重映射）
 
     Args:
         tokenizer: HuggingFace tokenizer
-        tokens: 行文本列表，每个元素是一整行
+        tokens: 行文本列表
         bboxes: 每行的 bbox
         labels: 每行的标签
-        max_length: 最大序列长度（默认 512）
+        line_ids: 每行的全局 line_id（不重映射）
+        max_length: 最大序列长度
         label2id: 标签到 ID 的映射
-        line_ids: 每行的 line_id（可选）
-        line_parent_ids: 每行的 parent_id（可选）
-        line_relations: 每行的 relation（可选）
-        image: 页面图像（可选）
-        document_name: 文档名称（可选）
-        page_number: 页码（可选）
+        image: 页面图像
+        page_number: 页码
 
     Returns:
-        List[Dict]: chunk 列表，每个 chunk 包含完整的行
+        List[Dict]: chunk 列表，每个 chunk 包含完整的行，使用全局 line_id
     """
     if label2id is None:
         label2id = get_label2id()
@@ -147,62 +143,48 @@ def tokenize_with_line_boundary(
 
     # Step 1: 对每行单独 tokenize，获取每行的 token 数量
     line_token_counts = []
-    line_tokenized = []
-
     for line_text in tokens:
-        # 对单行进行 tokenize（不加特殊 token）
         encoded = tokenizer.encode(line_text, add_special_tokens=False)
         line_token_counts.append(len(encoded))
-        line_tokenized.append(encoded)
 
     # Step 2: 按行边界累积，生成 chunks
     chunks = []
-    current_chunk_lines = []  # 当前 chunk 包含的行索引
+    current_chunk_lines = []
     current_token_count = 0
 
     for line_idx, token_count in enumerate(line_token_counts):
-        # 检查单行是否超过限制
         if token_count > effective_max_length:
-            # 单行太长，需要截断（这是不得已的情况）
             logger.warning(
-                f"Line {line_idx} has {token_count} tokens, exceeding max_length {effective_max_length}. "
-                f"Will be truncated."
+                f"Line {line_idx} has {token_count} tokens, exceeding max_length. Will be truncated."
             )
-            # 如果当前 chunk 有内容，先保存
             if current_chunk_lines:
                 chunks.append(current_chunk_lines)
                 current_chunk_lines = []
                 current_token_count = 0
-            # 单行作为一个 chunk（会被截断）
             chunks.append([line_idx])
             continue
 
-        # 检查加入当前行后是否会超过限制
         if current_token_count + token_count > effective_max_length:
-            # 当前 chunk 放不下这一行，保存当前 chunk，开始新 chunk
             if current_chunk_lines:
                 chunks.append(current_chunk_lines)
             current_chunk_lines = [line_idx]
             current_token_count = token_count
         else:
-            # 可以放入当前 chunk
             current_chunk_lines.append(line_idx)
             current_token_count += token_count
 
-    # 保存最后一个 chunk
     if current_chunk_lines:
         chunks.append(current_chunk_lines)
 
-    # Step 3: 为每个 chunk 构建完整的 tokenized 输出
+    # Step 3: 为每个 chunk 构建 tokenized 输出
     results = []
 
     for chunk_idx, chunk_line_indices in enumerate(chunks):
-        # 收集当前 chunk 的行
         chunk_tokens = [tokens[i] for i in chunk_line_indices]
         chunk_bboxes = [bboxes[i] for i in chunk_line_indices]
         chunk_labels = [labels[i] for i in chunk_line_indices]
+        chunk_global_line_ids = [line_ids[i] for i in chunk_line_indices]
 
-        # Tokenize（使用 is_split_into_words=True）
         tokenized = tokenizer(
             chunk_tokens,
             padding="max_length",
@@ -212,37 +194,26 @@ def tokenize_with_line_boundary(
             return_tensors=None,
         )
 
-        # 对齐 labels, bboxes, line_ids
         word_ids = tokenized.word_ids()
 
         aligned_labels = []
         aligned_bboxes = []
-        aligned_line_ids = []  # 使用 chunk 内的本地索引（word_idx）
+        aligned_line_ids = []  # 使用全局 line_id
 
         prev_word_idx = None
         for token_idx, word_idx in enumerate(word_ids):
             if word_idx is None:
-                # 特殊 token ([CLS], [SEP], [PAD])
                 aligned_labels.append(-100)
                 aligned_bboxes.append([0, 0, 0, 0])
                 aligned_line_ids.append(-1)
             elif word_idx != prev_word_idx:
-                # 新行的第一个 token
-                # Label
                 lbl = chunk_labels[word_idx]
                 label_id = lbl if isinstance(lbl, int) else label2id.get(lbl, 0)
                 aligned_labels.append(label_id)
-
-                # Bbox
                 aligned_bboxes.append(chunk_bboxes[word_idx])
-
-                # Line ID：使用 word_idx 作为 chunk 内的本地 line_id
-                # 这样 Stage 2 的 line feature 聚合会正确工作
-                aligned_line_ids.append(word_idx)
+                # 使用全局 line_id（关键改动：不再使用 chunk 内本地索引）
+                aligned_line_ids.append(chunk_global_line_ids[word_idx])
             else:
-                # 同一行的后续 token
-                # label_all_tokens=True: 所有 token 都用真实标签（推荐，用于行级分类）
-                # label_all_tokens=False: 只有行首 token 有标签，其他 -100（NER 风格）
                 if label_all_tokens:
                     lbl = chunk_labels[word_idx]
                     label_id = lbl if isinstance(lbl, int) else label2id.get(lbl, 0)
@@ -250,67 +221,21 @@ def tokenize_with_line_boundary(
                 else:
                     aligned_labels.append(-100)
                 aligned_bboxes.append(chunk_bboxes[word_idx])
-                aligned_line_ids.append(word_idx)
+                aligned_line_ids.append(chunk_global_line_ids[word_idx])
 
             prev_word_idx = word_idx
 
-        # 构建当前 chunk 的 line-level 信息
-        # 关键：需要将 line_parent_ids 重映射到 chunk 内的本地索引
-        # 如果 parent 不在当前 chunk 中，设为 -1（ROOT）
-        chunk_line_parent_ids = []
-        chunk_line_relations = []
-
-        # 构建原始行索引 -> chunk 内本地索引的映射
-        original_to_local = {orig_idx: local_idx for local_idx, orig_idx in enumerate(chunk_line_indices)}
-
-        if line_parent_ids is not None:
-            for original_idx in chunk_line_indices:
-                if original_idx < len(line_parent_ids):
-                    original_parent = line_parent_ids[original_idx]
-                    if original_parent == -1:
-                        # ROOT 节点保持 -1
-                        chunk_line_parent_ids.append(-1)
-                    elif original_parent in original_to_local:
-                        # parent 在当前 chunk 中，映射到本地索引
-                        chunk_line_parent_ids.append(original_to_local[original_parent])
-                    else:
-                        # parent 不在当前 chunk 中（跨 chunk 引用），设为 -1
-                        chunk_line_parent_ids.append(-1)
-                else:
-                    chunk_line_parent_ids.append(-1)
-
-        if line_relations is not None:
-            for original_idx in chunk_line_indices:
-                if original_idx < len(line_relations):
-                    chunk_line_relations.append(line_relations[original_idx])
-                else:
-                    chunk_line_relations.append(-100)
-
-        # 计算 line-level bboxes
-        line_bboxes = compute_line_bboxes(aligned_bboxes, aligned_line_ids)
-
-        # 构建结果
         result = {
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "labels": aligned_labels,
             "bbox": aligned_bboxes,
-            "line_ids": aligned_line_ids,
-            "line_bboxes": line_bboxes,
-            "chunk_line_indices": chunk_line_indices,  # 记录原始行索引，用于调试
+            "line_ids": aligned_line_ids,  # 全局 line_id
+            "global_line_ids_in_chunk": chunk_global_line_ids,  # 该 chunk 包含的全局 line_id 列表
         }
 
         if image is not None:
             result["image"] = image
-
-        if chunk_line_parent_ids:
-            result["line_parent_ids"] = chunk_line_parent_ids
-
-        if chunk_line_relations:
-            result["line_relations"] = chunk_line_relations
-
-        if document_name is not None:
-            result["document_name"] = document_name
 
         if page_number is not None:
             result["page_number"] = page_number
@@ -426,190 +351,211 @@ class HRDocDataLoader:
 
     def tokenize_and_align(self, examples: Dict) -> Dict:
         """
-        批量 tokenization，使用按行边界切分
+        文档级别批量 tokenization
+
+        输入：文档级别样本（每个文档包含多页）
+        输出：文档级别结果（保持文档结构，每个文档包含多页的 chunks）
 
         Args:
-            examples: 批量样本
+            examples: 批量文档样本，格式：
+                {
+                    "pages": [[page0, page1, ...], ...],  # 每个文档的页面列表
+                    "line_parent_ids": [[...], ...],      # 文档级别的 parent_ids
+                    "line_relations": [[...], ...],       # 文档级别的 relations
+                    ...
+                }
 
         Returns:
-            tokenized 结果
+            tokenized 结果，格式：
+                {
+                    "document_name": [...],
+                    "pages": [                           # 每个文档的页面 chunks
+                        [                                # 文档 0
+                            {"input_ids": ..., "page_number": 0, ...},  # page 0 的 chunks
+                            {"input_ids": ..., "page_number": 1, ...},  # page 1 的 chunks
+                            ...
+                        ],
+                        ...
+                    ],
+                    "line_parent_ids": [[...], ...],     # 文档级别，全局索引
+                    "line_relations": [[...], ...],
+                }
         """
-        all_input_ids = []
-        all_attention_mask = []
-        all_labels = []
-        all_bboxes = []
-        all_images = []
-        all_line_ids = []
+        all_document_names = []
+        all_num_pages = []
+        all_pages = []  # 每个文档的页面 chunks 列表
         all_line_parent_ids = []
         all_line_relations = []
-        all_line_bboxes = []
-        all_document_names = []
-        all_page_numbers = []
 
-        batch_size = len(examples["tokens"])
+        batch_size = len(examples["pages"])
 
         for idx in range(batch_size):
-            tokens = examples["tokens"][idx]
-            bboxes = examples["bboxes"][idx]
-            labels = examples["ner_tags"][idx]
-            image = examples.get("image", [None] * batch_size)[idx]
+            document_name = examples["document_name"][idx]
+            pages = examples["pages"][idx]
+            line_parent_ids = examples["line_parent_ids"][idx]
+            line_relations = examples["line_relations"][idx]
 
-            # 获取 line-level 信息
-            line_ids = examples.get("line_ids", [None] * batch_size)[idx]
-            line_parent_ids = examples.get("line_parent_ids", [None] * batch_size)[idx]
-            line_relations = examples.get("line_relations", [None] * batch_size)[idx]
-            document_name = examples.get("document_name", [None] * batch_size)[idx]
-            page_number = examples.get("page_number", [None] * batch_size)[idx]
+            all_document_names.append(document_name)
+            all_num_pages.append(len(pages))
+            all_line_parent_ids.append(line_parent_ids)
+            all_line_relations.append(line_relations)
 
-            # 按行边界切分 tokenization
-            chunks = tokenize_with_line_boundary(
-                tokenizer=self.tokenizer,
-                tokens=tokens,
-                bboxes=bboxes,
-                labels=labels,
-                max_length=self.config.max_length,
-                label2id=self.label2id,
-                line_ids=line_ids if self.include_line_info else None,
-                line_parent_ids=line_parent_ids if self.include_line_info else None,
-                line_relations=line_relations if self.include_line_info else None,
-                image=image,
-                document_name=document_name,
-                page_number=page_number,
-                label_all_tokens=self.config.label_all_tokens,
-            )
+            # 处理每一页
+            doc_page_chunks = []
+            for page in pages:
+                page_number = page["page_number"]
+                tokens = page["tokens"]
+                bboxes = page["bboxes"]
+                labels = page["ner_tags"]
+                image = page["image"]
+                line_ids = page["line_ids"]
 
-            # 收集所有 chunks
-            for chunk in chunks:
-                all_input_ids.append(chunk["input_ids"])
-                all_attention_mask.append(chunk["attention_mask"])
-                all_labels.append(chunk["labels"])
-                all_bboxes.append(chunk["bbox"])
-                all_line_bboxes.append(chunk["line_bboxes"])
+                # 提取该页的唯一 line_ids（用于后续聚合）
+                unique_line_ids = []
+                seen = set()
+                for lid in line_ids:
+                    if lid not in seen:
+                        unique_line_ids.append(lid)
+                        seen.add(lid)
 
-                if image is not None:
-                    all_images.append(chunk.get("image"))
+                # 按行边界切分 tokenization（保持全局 line_id）
+                chunks = tokenize_page_with_line_boundary(
+                    tokenizer=self.tokenizer,
+                    tokens=tokens,
+                    bboxes=bboxes,
+                    labels=labels,
+                    line_ids=unique_line_ids,  # 传入全局 line_id
+                    max_length=self.config.max_length,
+                    label2id=self.label2id,
+                    image=image,
+                    page_number=page_number,
+                    label_all_tokens=self.config.label_all_tokens,
+                )
 
-                if self.include_line_info:
-                    all_line_ids.append(chunk.get("line_ids", []))
-                    all_line_parent_ids.append(chunk.get("line_parent_ids", []))
-                    all_line_relations.append(chunk.get("line_relations", []))
+                # 收集该页的所有 chunks
+                for chunk in chunks:
+                    doc_page_chunks.append(chunk)
 
-                if document_name is not None:
-                    all_document_names.append(chunk.get("document_name"))
+            all_pages.append(doc_page_chunks)
 
-                if page_number is not None:
-                    all_page_numbers.append(chunk.get("page_number"))
-
-        result = {
-            "input_ids": all_input_ids,
-            "attention_mask": all_attention_mask,
-            "labels": all_labels,
-            "bbox": all_bboxes,
-            "line_bboxes": all_line_bboxes,
+        return {
+            "document_name": all_document_names,
+            "num_pages": all_num_pages,
+            "pages": all_pages,  # 每个文档的页面 chunks
+            "line_parent_ids": all_line_parent_ids,  # 文档级别，全局索引
+            "line_relations": all_line_relations,
         }
-
-        if all_images:
-            result["image"] = all_images
-
-        if self.include_line_info:
-            result["line_ids"] = all_line_ids
-            result["line_parent_ids"] = all_line_parent_ids
-            result["line_relations"] = all_line_relations
-
-        if all_document_names:
-            result["document_name"] = all_document_names
-
-        if all_page_numbers:
-            result["page_number"] = all_page_numbers
-
-        return result
 
     def prepare_datasets(self) -> Dict:
         """
-        准备 tokenized 数据集
+        准备 tokenized 数据集（文档级别）
 
         Returns:
-            Dict of tokenized datasets
+            Dict of tokenized datasets，每个样本是一个文档
         """
         if self._raw_datasets is None:
             self.load_raw_datasets()
 
-        remove_columns = self._raw_datasets["train"].column_names
-
         tokenized_datasets = {}
 
+        def process_split(split_name, max_samples=None):
+            """处理单个数据集 split"""
+            if split_name not in self._raw_datasets:
+                return None
+
+            dataset = self._raw_datasets[split_name]
+            if max_samples is not None:
+                dataset = dataset.select(range(min(max_samples, len(dataset))))
+
+            print(f"[DataLoader] Tokenizing {split_name} dataset ({len(dataset)} documents)...", flush=True)
+
+            processed_docs = []
+            for doc_idx in range(len(dataset)):
+                doc = dataset[doc_idx]
+
+                # 处理单个文档
+                result = self._process_single_document(doc)
+                if result is not None:
+                    processed_docs.append(result)
+
+            print(f"[DataLoader] {split_name} tokenization done: {len(processed_docs)} documents", flush=True)
+            return processed_docs
+
         # 训练集
-        if "train" in self._raw_datasets:
-            train_dataset = self._raw_datasets["train"]
-            if self.config.max_train_samples is not None:
-                train_dataset = train_dataset.select(range(self.config.max_train_samples))
+        tokenized_datasets["train"] = process_split("train", self.config.max_train_samples)
 
-            print(f"[DataLoader] Tokenizing train dataset ({len(train_dataset)} samples)...", flush=True)
-            logger.info("Tokenizing train dataset...")
-            tokenized_datasets["train"] = train_dataset.map(
-                self.tokenize_and_align,
-                batched=True,
-                remove_columns=remove_columns,
-                num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
-            )
-            print(f"[DataLoader] Train tokenization done: {len(tokenized_datasets['train'])} chunks", flush=True)
-            logger.info(f"Train dataset: {len(tokenized_datasets['train'])} samples")
-
-        # 验证集（优先使用 validation，否则使用 test）
+        # 验证集
         if "validation" in self._raw_datasets:
-            val_dataset = self._raw_datasets["validation"]
-            if self.config.max_val_samples is not None:
-                val_dataset = val_dataset.select(range(self.config.max_val_samples))
-
-            print(f"[DataLoader] Tokenizing validation dataset ({len(val_dataset)} samples)...", flush=True)
-            logger.info("Tokenizing validation dataset...")
-            tokenized_datasets["validation"] = val_dataset.map(
-                self.tokenize_and_align,
-                batched=True,
-                remove_columns=remove_columns,
-                num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
-            )
-            print(f"[DataLoader] Validation tokenization done: {len(tokenized_datasets['validation'])} chunks", flush=True)
-            logger.info(f"Validation dataset: {len(tokenized_datasets['validation'])} samples")
+            tokenized_datasets["validation"] = process_split("validation", self.config.max_val_samples)
         elif "test" in self._raw_datasets:
-            val_dataset = self._raw_datasets["test"]
-            if self.config.max_val_samples is not None:
-                val_dataset = val_dataset.select(range(self.config.max_val_samples))
-
-            print(f"[DataLoader] Tokenizing validation (from test) dataset ({len(val_dataset)} samples)...", flush=True)
-            logger.info("Tokenizing validation dataset (from test split)...")
-            tokenized_datasets["validation"] = val_dataset.map(
-                self.tokenize_and_align,
-                batched=True,
-                remove_columns=remove_columns,
-                num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
-            )
-            print(f"[DataLoader] Validation tokenization done: {len(tokenized_datasets['validation'])} chunks", flush=True)
-            logger.info(f"Validation dataset (from test): {len(tokenized_datasets['validation'])} samples")
+            tokenized_datasets["validation"] = process_split("test", self.config.max_val_samples)
 
         # 测试集
         if "test" in self._raw_datasets:
-            test_dataset = self._raw_datasets["test"]
-            if self.config.max_test_samples is not None:
-                test_dataset = test_dataset.select(range(self.config.max_test_samples))
-
-            print(f"[DataLoader] Tokenizing test dataset ({len(test_dataset)} samples)...", flush=True)
-            logger.info("Tokenizing test dataset...")
-            tokenized_datasets["test"] = test_dataset.map(
-                self.tokenize_and_align,
-                batched=True,
-                remove_columns=remove_columns,
-                num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
-            )
-            print(f"[DataLoader] Test tokenization done: {len(tokenized_datasets['test'])} chunks", flush=True)
-            logger.info(f"Test dataset: {len(tokenized_datasets['test'])} samples")
+            tokenized_datasets["test"] = process_split("test", self.config.max_test_samples)
 
         self._tokenized_datasets = tokenized_datasets
         return tokenized_datasets
+
+    def _process_single_document(self, doc: Dict) -> Optional[Dict]:
+        """
+        处理单个文档
+
+        Args:
+            doc: 原始文档数据
+
+        Returns:
+            处理后的文档数据
+        """
+        document_name = doc["document_name"]
+        pages = doc["pages"]
+        line_parent_ids = doc["line_parent_ids"]
+        line_relations = doc["line_relations"]
+
+        # 处理每一页
+        all_page_chunks = []
+        for page in pages:
+            page_number = page["page_number"]
+            tokens = page["tokens"]
+            bboxes = page["bboxes"]
+            labels = page["ner_tags"]
+            image = page["image"]
+            line_ids = page["line_ids"]
+
+            # 提取该页的唯一 line_ids
+            unique_line_ids = []
+            seen = set()
+            for lid in line_ids:
+                if lid not in seen:
+                    unique_line_ids.append(lid)
+                    seen.add(lid)
+
+            # 按行边界切分 tokenization
+            chunks = tokenize_page_with_line_boundary(
+                tokenizer=self.tokenizer,
+                tokens=tokens,
+                bboxes=bboxes,
+                labels=labels,
+                line_ids=unique_line_ids,
+                max_length=self.config.max_length,
+                label2id=self.label2id,
+                image=image,
+                page_number=page_number,
+                label_all_tokens=self.config.label_all_tokens,
+            )
+
+            all_page_chunks.extend(chunks)
+
+        if len(all_page_chunks) == 0:
+            return None
+
+        return {
+            "document_name": document_name,
+            "num_pages": len(pages),
+            "chunks": all_page_chunks,  # 所有页的 chunks（按顺序）
+            "line_parent_ids": line_parent_ids,  # 文档级别，全局索引
+            "line_relations": line_relations,
+        }
 
     def get_train_dataset(self):
         """获取训练数据集"""
