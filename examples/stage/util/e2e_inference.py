@@ -279,23 +279,34 @@ def run_e2e_inference_document(
     text_hidden = hidden_states[:, :text_seq_len, :]  # [num_chunks, seq_len, hidden]
     hidden_dim = text_hidden.shape[-1]
 
-    # 收集所有有效的 line_id
-    valid_line_ids = sorted(line_classes.keys())
-    num_lines = len(valid_line_ids)
-    line_id_to_idx = {lid: idx for idx, lid in enumerate(valid_line_ids)}
+    # 收集所有有效的 line_id（向量化聚合）
+    valid_line_ids_list = sorted(line_classes.keys())
+    num_lines = len(valid_line_ids_list)
+    valid_line_ids_tensor = torch.tensor(valid_line_ids_list, device=device)
 
-    # 聚合 line features（mean pooling across all tokens of each line）
+    # 展平
+    flat_hidden = text_hidden.view(-1, hidden_dim)  # [N, hidden_dim]
+    flat_line_ids = doc_line_ids.view(-1)  # [N]
+
+    # 获取有效 token
+    valid_mask = flat_line_ids >= 0
+    valid_token_line_ids = flat_line_ids[valid_mask]
+    valid_hidden = flat_hidden[valid_mask]
+
+    # 使用 searchsorted 映射 line_id 到索引
+    line_indices = torch.searchsorted(valid_line_ids_tensor, valid_token_line_ids)
+
+    # 过滤掉不在 valid_line_ids 中的 token
+    in_bounds = (line_indices < num_lines) & (valid_line_ids_tensor[line_indices.clamp(max=num_lines-1)] == valid_token_line_ids)
+    line_indices = line_indices[in_bounds]
+    valid_hidden = valid_hidden[in_bounds]
+
+    # 使用 scatter_add 聚合
     line_features = torch.zeros(num_lines, hidden_dim, device=device)
-    line_counts = torch.zeros(num_lines, device=device)
+    line_features.scatter_add_(0, line_indices.unsqueeze(1).expand(-1, hidden_dim), valid_hidden)
 
-    for chunk_idx in range(num_chunks):
-        chunk_line_ids = doc_line_ids[chunk_idx]
-        for token_idx in range(text_seq_len):
-            lid = chunk_line_ids[token_idx].item()
-            if lid >= 0 and lid in line_id_to_idx:
-                line_idx = line_id_to_idx[lid]
-                line_features[line_idx] += text_hidden[chunk_idx, token_idx]
-                line_counts[line_idx] += 1
+    line_counts = torch.zeros(num_lines, device=device)
+    line_counts.scatter_add_(0, line_indices, torch.ones_like(line_indices, dtype=torch.float))
 
     # 计算平均值
     valid_counts = line_counts.clamp(min=1)

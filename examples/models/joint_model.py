@@ -318,7 +318,7 @@ class JointModel(nn.Module):
         doc_line_ids: torch.Tensor,
     ) -> tuple:
         """
-        从文档的所有 chunks 中聚合 line features
+        从文档的所有 chunks 中聚合 line features（向量化版本）
 
         Args:
             doc_hidden: [num_chunks, seq_len, hidden_dim]
@@ -331,37 +331,40 @@ class JointModel(nn.Module):
         device = doc_hidden.device
         hidden_dim = doc_hidden.shape[-1]
 
-        # 收集所有有效的 line_id
-        valid_line_ids = doc_line_ids[doc_line_ids >= 0].unique()
+        # 展平
+        flat_hidden = doc_hidden.view(-1, hidden_dim)  # [N, hidden_dim]
+        flat_line_ids = doc_line_ids.view(-1)  # [N]
+
+        # 获取有效 token（line_id >= 0）
+        valid_mask = flat_line_ids >= 0
+        valid_line_ids = flat_line_ids[valid_mask]
+        valid_hidden = flat_hidden[valid_mask]
+
         if len(valid_line_ids) == 0:
-            # 没有有效行，返回空
             return torch.zeros(1, hidden_dim, device=device), torch.zeros(1, dtype=torch.bool, device=device)
 
-        # 按 line_id 排序
-        valid_line_ids = valid_line_ids.sort()[0]
-        num_lines = len(valid_line_ids)
+        # 获取唯一的 line_id 并排序
+        unique_line_ids = valid_line_ids.unique()
+        unique_line_ids = unique_line_ids.sort()[0]
+        num_lines = len(unique_line_ids)
 
-        # 创建 line_id 到索引的映射
-        line_id_to_idx = {lid.item(): idx for idx, lid in enumerate(valid_line_ids)}
+        # 创建 line_id 到连续索引的映射（向量化）
+        # 使用 searchsorted 进行快速映射
+        line_indices = torch.searchsorted(unique_line_ids, valid_line_ids)
 
-        # 聚合每个 line 的 features（mean pooling）
+        # 使用 scatter_add 聚合 features
         line_features = torch.zeros(num_lines, hidden_dim, device=device)
-        line_counts = torch.zeros(num_lines, device=device)
+        line_features.scatter_add_(0, line_indices.unsqueeze(1).expand(-1, hidden_dim), valid_hidden)
 
-        num_chunks, seq_len, _ = doc_hidden.shape
-        for chunk_idx in range(num_chunks):
-            for token_idx in range(seq_len):
-                lid = doc_line_ids[chunk_idx, token_idx].item()
-                if lid >= 0 and lid in line_id_to_idx:
-                    line_idx = line_id_to_idx[lid]
-                    line_features[line_idx] += doc_hidden[chunk_idx, token_idx]
-                    line_counts[line_idx] += 1
+        # 统计每个 line 的 token 数量
+        line_counts = torch.zeros(num_lines, device=device)
+        line_counts.scatter_add_(0, line_indices, torch.ones_like(line_indices, dtype=torch.float))
 
         # 计算平均值
         valid_counts = line_counts.clamp(min=1)
         line_features = line_features / valid_counts.unsqueeze(1)
 
-        # 创建 mask（所有收集到的行都是有效的）
+        # 创建 mask
         line_mask = line_counts > 0
 
         return line_features, line_mask
