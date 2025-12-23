@@ -333,8 +333,19 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     # 获取层级关系信息
                     # HRDS格式有 line_id 字段，FUNSD格式用 id 字段
                     item_line_id = item.get("line_id", item.get("id", line_idx))
-                    parent_id = item.get("parent_id", -1)
+                    # 处理空字符串和非整数的 parent_id
+                    raw_parent_id = item.get("parent_id", -1)
+                    if raw_parent_id == "" or raw_parent_id is None:
+                        parent_id = -1
+                    else:
+                        try:
+                            parent_id = int(raw_parent_id)
+                        except (ValueError, TypeError):
+                            parent_id = -1
+                    # 处理空字符串的 relation
                     relation = item.get("relation", "none")
+                    if relation == "" or relation is None:
+                        relation = "none"
 
                     # 记录当前line的元数据（暂存原始值，后面重映射）
                     line_parent_ids.append(parent_id)
