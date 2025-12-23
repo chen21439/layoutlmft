@@ -30,6 +30,8 @@ def build_joint_model(
     lambda_rel: float = 1.0,
     use_focal_loss: bool = True,
     use_gru: bool = False,
+    stage1_micro_batch_size: int = 8,
+    stage1_no_grad: bool = False,
 ):
     """
     从各组件构建 JointModel（训练时使用）
@@ -44,6 +46,8 @@ def build_joint_model(
         lambda_rel: 关系损失权重
         use_focal_loss: 是否使用 Focal Loss
         use_gru: 是否使用 GRU
+        stage1_micro_batch_size: Stage1 micro-batch 大小（防止大文档显存爆炸）
+        stage1_no_grad: 是否对 Stage1 使用 no_grad（节省显存但不反传）
 
     Returns:
         JointModel 实例
@@ -60,6 +64,8 @@ def build_joint_model(
         lambda_rel=lambda_rel,
         use_focal_loss=use_focal_loss,
         use_gru=use_gru,
+        stage1_micro_batch_size=stage1_micro_batch_size,
+        stage1_no_grad=stage1_no_grad,
     )
 
 

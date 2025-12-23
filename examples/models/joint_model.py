@@ -39,6 +39,8 @@ class JointModel(nn.Module):
         lambda_rel: float = 1.0,
         use_focal_loss: bool = True,
         use_gru: bool = False,
+        stage1_micro_batch_size: int = 8,  # Stage1 micro-batch 大小，防止显存爆炸
+        stage1_no_grad: bool = False,  # 是否对 Stage1 使用 no_grad（节省显存但不反传）
     ):
         super().__init__()
 
@@ -51,6 +53,8 @@ class JointModel(nn.Module):
         self.lambda_parent = lambda_parent
         self.lambda_rel = lambda_rel
         self.use_gru = use_gru
+        self.stage1_micro_batch_size = stage1_micro_batch_size
+        self.stage1_no_grad = stage1_no_grad
 
         # 关系分类损失
         if use_focal_loss:
@@ -86,24 +90,91 @@ class JointModel(nn.Module):
         - num_docs: batch 中的文档数量
         - chunks_per_doc: 每个文档的 chunk 数量列表
         """
+        import torch
+        print(f"[DEBUG JointModel.forward] ENTER - input_ids: {input_ids.shape}, num_docs={num_docs}", flush=True)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            print(f"[DEBUG JointModel.forward] CUDA synced at ENTER", flush=True)
 
         device = input_ids.device
         total_chunks = input_ids.shape[0]
 
-        # ==================== Stage 1: Classification ====================
-        # 对所有 chunks 运行 Stage 1
-        stage1_outputs = self.stage1(
-            input_ids=input_ids,
-            bbox=bbox,
-            attention_mask=attention_mask,
-            image=image,
-            labels=labels,
-            output_hidden_states=True,
-        )
+        # ==================== Stage 1: Classification (with micro-batching) ====================
+        micro_bs = self.stage1_micro_batch_size
+        print(f"[DEBUG JointModel.forward] Stage 1 START - {total_chunks} chunks, micro_batch_size={micro_bs}", flush=True)
 
-        cls_loss = stage1_outputs.loss
-        logits = stage1_outputs.logits
-        hidden_states = stage1_outputs.hidden_states[-1]
+        if total_chunks <= micro_bs:
+            # 小 batch，直接处理
+            stage1_outputs = self.stage1(
+                input_ids=input_ids,
+                bbox=bbox,
+                attention_mask=attention_mask,
+                image=image,
+                labels=labels,
+                output_hidden_states=True,
+            )
+            cls_loss = stage1_outputs.loss
+            logits = stage1_outputs.logits
+            hidden_states = stage1_outputs.hidden_states[-1]
+        else:
+            # 大 batch，分批处理
+            all_logits = []
+            all_hidden = []
+            total_cls_loss = 0.0
+            num_micro_batches = 0
+
+            for start_idx in range(0, total_chunks, micro_bs):
+                end_idx = min(start_idx + micro_bs, total_chunks)
+
+                # 切分 micro-batch
+                mb_input_ids = input_ids[start_idx:end_idx]
+                mb_bbox = bbox[start_idx:end_idx]
+                mb_attention_mask = attention_mask[start_idx:end_idx]
+                mb_image = image[start_idx:end_idx] if image is not None else None
+                mb_labels = labels[start_idx:end_idx] if labels is not None else None
+
+                # 根据配置决定是否使用 no_grad
+                if self.stage1_no_grad:
+                    with torch.no_grad():
+                        mb_outputs = self.stage1(
+                            input_ids=mb_input_ids,
+                            bbox=mb_bbox,
+                            attention_mask=mb_attention_mask,
+                            image=mb_image,
+                            labels=mb_labels,
+                            output_hidden_states=True,
+                        )
+                else:
+                    mb_outputs = self.stage1(
+                        input_ids=mb_input_ids,
+                        bbox=mb_bbox,
+                        attention_mask=mb_attention_mask,
+                        image=mb_image,
+                        labels=mb_labels,
+                        output_hidden_states=True,
+                    )
+
+                all_logits.append(mb_outputs.logits)
+                # 如果使用 no_grad，需要 detach hidden states
+                if self.stage1_no_grad:
+                    all_hidden.append(mb_outputs.hidden_states[-1])
+                else:
+                    all_hidden.append(mb_outputs.hidden_states[-1])
+
+                if mb_outputs.loss is not None:
+                    total_cls_loss = total_cls_loss + mb_outputs.loss
+                    num_micro_batches += 1
+
+                print(f"[DEBUG JointModel.forward] Stage 1 micro-batch {start_idx}:{end_idx} done", flush=True)
+
+            # 合并结果
+            logits = torch.cat(all_logits, dim=0)
+            hidden_states = torch.cat(all_hidden, dim=0)
+            cls_loss = total_cls_loss / max(num_micro_batches, 1)
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        print(f"[DEBUG JointModel.forward] Stage 1 DONE, cls_loss={cls_loss.item():.4f}", flush=True)
 
         outputs = {
             "loss": cls_loss * self.lambda_cls,
@@ -307,6 +378,9 @@ class JointModel(nn.Module):
 
         # 保存完整的 outputs 供 compute_loss 使用
         self._outputs_dict = outputs
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        print(f"[DEBUG JointModel.forward] Stage 2/3/4 DONE, total_loss={outputs['loss'].item():.4f}", flush=True)
         return TokenClassifierOutput(
             loss=outputs["loss"],
             logits=outputs["logits"],

@@ -135,6 +135,11 @@ def tokenize_page_with_line_boundary(
     Returns:
         List[Dict]: chunk 列表，每个 chunk 包含完整的行，使用全局 line_id
     """
+    # DEBUG: 检查输入维度
+    print(f"[DEBUG tokenize] tokens={len(tokens)}, bboxes={len(bboxes)}, labels={len(labels)}, line_ids={len(line_ids)}", flush=True)
+    if len(tokens) != len(line_ids):
+        print(f"[ERROR] Dimension mismatch! tokens={len(tokens)} vs line_ids={len(line_ids)}", flush=True)
+
     if label2id is None:
         label2id = get_label2id()
 
@@ -142,10 +147,13 @@ def tokenize_page_with_line_boundary(
     effective_max_length = max_length - 2
 
     # Step 1: 对每行单独 tokenize，获取每行的 token 数量
+    # 注意：如果 tokens 是 word-level，这里会对每个 word 调用一次 encode
+    print(f"[DEBUG tokenize] Step 1: counting tokens for {len(tokens)} items...", flush=True)
     line_token_counts = []
     for line_text in tokens:
         encoded = tokenizer.encode(line_text, add_special_tokens=False)
         line_token_counts.append(len(encoded))
+    print(f"[DEBUG tokenize] Step 1 done, total subwords: {sum(line_token_counts)}", flush=True)
 
     # Step 2: 按行边界累积，生成 chunks
     chunks = []
@@ -435,35 +443,31 @@ class HRDocDataLoader:
         Returns:
             文档级别的处理结果
         """
+        print(f"[DEBUG _process_document_pages] Processing doc: {document_name}, pages: {len(pages)}", flush=True)
         all_chunks = []
         all_parent_ids = []
         all_relations = []
 
-        for page in pages:
+        for page_idx, page in enumerate(pages):
             page_number = page["page_number"]
-            tokens = page["tokens"]
-            bboxes = page["bboxes"]
-            labels = page["ner_tags"]
+            tokens = page["tokens"]           # word-level tokens
+            bboxes = page["bboxes"]           # word-level bboxes
+            labels = page["ner_tags"]         # word-level labels
             image = page["image"]
-            line_ids = page["line_ids"]
+            line_ids = page["line_ids"]       # word-level line_ids（不去重！）
             page_parent_ids = page["line_parent_ids"]
             page_relations = page["line_relations"]
 
-            # 提取该页的唯一 line_ids（保持顺序）
-            unique_line_ids = []
-            seen = set()
-            for lid in line_ids:
-                if lid not in seen:
-                    unique_line_ids.append(lid)
-                    seen.add(lid)
+            print(f"[DEBUG] Page {page_idx}/{len(pages)}: tokens={len(tokens)}, line_ids={len(line_ids)}", flush=True)
 
             # 按行边界切分 tokenization
+            # 注意：line_ids 是 word-level 的，和 tokens 维度一致
             chunks = tokenize_page_with_line_boundary(
                 tokenizer=self.tokenizer,
                 tokens=tokens,
                 bboxes=bboxes,
                 labels=labels,
-                line_ids=unique_line_ids,
+                line_ids=line_ids,  # word-level，不去重
                 max_length=self.config.max_length,
                 label2id=self.label2id,
                 image=image,

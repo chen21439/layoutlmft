@@ -156,6 +156,8 @@ class JointModelArguments:
     lambda_cls: float = field(default=1.0, metadata={"help": "Classification loss weight"})
     lambda_parent: float = field(default=1.0, metadata={"help": "Parent loss weight"})
     lambda_rel: float = field(default=1.0, metadata={"help": "Relation loss weight"})
+    stage1_micro_batch_size: int = field(default=8, metadata={"help": "Stage1 micro-batch size (prevents OOM for large documents)"})
+    stage1_no_grad: bool = field(default=False, metadata={"help": "Use no_grad for Stage1 (saves memory but no backprop to Stage1)"})
 
 
 @dataclass
@@ -210,6 +212,9 @@ class JointTrainingArguments(TrainingArguments):
 
     # 兼容旧参数
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
+
+    # DataLoader 设置（默认单进程，避免多进程数据加载问题）
+    dataloader_num_workers: int = field(default=0, metadata={"help": "Number of dataloader workers (0=single process)"})
 
 
 # ==================== 自定义 Trainer ====================
@@ -271,8 +276,36 @@ class JointTrainer(Trainer):
         self.optimizer = AdamW(optimizer_grouped_parameters)
         return self.optimizer
 
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        """重写 training_step 添加调试点"""
+        import torch
+        print(f"[DEBUG training_step] START - before _prepare_inputs", flush=True)
+
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        print(f"[DEBUG training_step] AFTER _prepare_inputs", flush=True)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            print(f"[DEBUG training_step] CUDA synced after _prepare_inputs", flush=True)
+
+        # 调用 compute_loss
+        with self.compute_loss_context_manager():
+            loss = self.compute_loss(model, inputs)
+
+        print(f"[DEBUG training_step] AFTER compute_loss, loss={loss.item():.4f}", flush=True)
+
+        # 反向传播
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        loss.backward()
+
+        return loss.detach()
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
+        print(f"[DEBUG compute_loss] inputs keys: {list(inputs.keys())}", flush=True)
 
         outputs = model(**inputs)
         loss = outputs.loss  # TokenClassifierOutput 使用属性访问
@@ -952,7 +985,10 @@ def main():
         lambda_rel=model_args.lambda_rel if not training_args.disable_stage34 else 0.0,
         use_focal_loss=model_args.use_focal_loss,
         use_gru=model_args.use_gru,
+        stage1_micro_batch_size=model_args.stage1_micro_batch_size,
+        stage1_no_grad=model_args.stage1_no_grad,
     )
+    logger.info(f"Stage1 micro-batch size: {model_args.stage1_micro_batch_size}, no_grad: {model_args.stage1_no_grad}")
 
     # 如果从 joint checkpoint 加载，加载完整权重
     if joint_model_path:
