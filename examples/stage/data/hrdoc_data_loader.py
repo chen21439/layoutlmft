@@ -349,106 +349,14 @@ class HRDocDataLoader:
         )
         return self._raw_datasets
 
-    def tokenize_and_align(self, examples: Dict) -> Dict:
-        """
-        文档级别批量 tokenization
-
-        输入：文档级别样本（每个文档包含多页）
-        输出：文档级别结果（保持文档结构，每个文档包含多页的 chunks）
-
-        Args:
-            examples: 批量文档样本，格式：
-                {
-                    "pages": [[page0, page1, ...], ...],  # 每个文档的页面列表
-                    "line_parent_ids": [[...], ...],      # 文档级别的 parent_ids
-                    "line_relations": [[...], ...],       # 文档级别的 relations
-                    ...
-                }
-
-        Returns:
-            tokenized 结果，格式：
-                {
-                    "document_name": [...],
-                    "pages": [                           # 每个文档的页面 chunks
-                        [                                # 文档 0
-                            {"input_ids": ..., "page_number": 0, ...},  # page 0 的 chunks
-                            {"input_ids": ..., "page_number": 1, ...},  # page 1 的 chunks
-                            ...
-                        ],
-                        ...
-                    ],
-                    "line_parent_ids": [[...], ...],     # 文档级别，全局索引
-                    "line_relations": [[...], ...],
-                }
-        """
-        all_document_names = []
-        all_num_pages = []
-        all_pages = []  # 每个文档的页面 chunks 列表
-        all_line_parent_ids = []
-        all_line_relations = []
-
-        batch_size = len(examples["pages"])
-
-        for idx in range(batch_size):
-            document_name = examples["document_name"][idx]
-            pages = examples["pages"][idx]
-            line_parent_ids = examples["line_parent_ids"][idx]
-            line_relations = examples["line_relations"][idx]
-
-            all_document_names.append(document_name)
-            all_num_pages.append(len(pages))
-            all_line_parent_ids.append(line_parent_ids)
-            all_line_relations.append(line_relations)
-
-            # 处理每一页
-            doc_page_chunks = []
-            for page in pages:
-                page_number = page["page_number"]
-                tokens = page["tokens"]
-                bboxes = page["bboxes"]
-                labels = page["ner_tags"]
-                image = page["image"]
-                line_ids = page["line_ids"]
-
-                # 提取该页的唯一 line_ids（用于后续聚合）
-                unique_line_ids = []
-                seen = set()
-                for lid in line_ids:
-                    if lid not in seen:
-                        unique_line_ids.append(lid)
-                        seen.add(lid)
-
-                # 按行边界切分 tokenization（保持全局 line_id）
-                chunks = tokenize_page_with_line_boundary(
-                    tokenizer=self.tokenizer,
-                    tokens=tokens,
-                    bboxes=bboxes,
-                    labels=labels,
-                    line_ids=unique_line_ids,  # 传入全局 line_id
-                    max_length=self.config.max_length,
-                    label2id=self.label2id,
-                    image=image,
-                    page_number=page_number,
-                    label_all_tokens=self.config.label_all_tokens,
-                )
-
-                # 收集该页的所有 chunks
-                for chunk in chunks:
-                    doc_page_chunks.append(chunk)
-
-            all_pages.append(doc_page_chunks)
-
-        return {
-            "document_name": all_document_names,
-            "num_pages": all_num_pages,
-            "pages": all_pages,  # 每个文档的页面 chunks
-            "line_parent_ids": all_line_parent_ids,  # 文档级别，全局索引
-            "line_relations": all_line_relations,
-        }
-
     def prepare_datasets(self) -> Dict:
         """
         准备 tokenized 数据集（文档级别）
+
+        数据流：
+        1. hrdoc.py 输出页级别样本（每页一个样本）
+        2. 本方法按 document_name 聚合页面
+        3. 输出文档级别样本（每个文档一个样本）
 
         Returns:
             Dict of tokenized datasets，每个样本是一个文档
@@ -464,17 +372,36 @@ class HRDocDataLoader:
                 return None
 
             dataset = self._raw_datasets[split_name]
-            if max_samples is not None:
-                dataset = dataset.select(range(min(max_samples, len(dataset))))
 
-            print(f"[DataLoader] Tokenizing {split_name} dataset ({len(dataset)} documents)...", flush=True)
+            # Step 1: 按 document_name 分组页面
+            print(f"[DataLoader] Grouping {split_name} pages by document...", flush=True)
+            doc_pages = {}  # {document_name: [page1, page2, ...]}
+
+            for page_idx in range(len(dataset)):
+                page = dataset[page_idx]
+                doc_name = page["document_name"]
+
+                if doc_name not in doc_pages:
+                    doc_pages[doc_name] = []
+                doc_pages[doc_name].append(page)
+
+            print(f"[DataLoader] Found {len(doc_pages)} documents from {len(dataset)} pages", flush=True)
+
+            # Step 2: 限制文档数量（如果指定）
+            doc_names = list(doc_pages.keys())
+            if max_samples is not None:
+                doc_names = doc_names[:max_samples]
+
+            # Step 3: 处理每个文档
+            print(f"[DataLoader] Tokenizing {split_name} dataset ({len(doc_names)} documents)...", flush=True)
 
             processed_docs = []
-            for doc_idx in range(len(dataset)):
-                doc = dataset[doc_idx]
+            for doc_name in doc_names:
+                pages = doc_pages[doc_name]
+                # 按 page_number 排序
+                pages = sorted(pages, key=lambda p: p["page_number"])
 
-                # 处理单个文档
-                result = self._process_single_document(doc)
+                result = self._process_document_pages(doc_name, pages)
                 if result is not None:
                     processed_docs.append(result)
 
@@ -497,23 +424,21 @@ class HRDocDataLoader:
         self._tokenized_datasets = tokenized_datasets
         return tokenized_datasets
 
-    def _process_single_document(self, doc: Dict) -> Optional[Dict]:
+    def _process_document_pages(self, document_name: str, pages: List[Dict]) -> Optional[Dict]:
         """
-        处理单个文档
+        处理一个文档的所有页面，聚合为文档级别样本
 
         Args:
-            doc: 原始文档数据
+            document_name: 文档名称
+            pages: 该文档的所有页面（已按 page_number 排序）
 
         Returns:
-            处理后的文档数据
+            文档级别的处理结果
         """
-        document_name = doc["document_name"]
-        pages = doc["pages"]
-        line_parent_ids = doc["line_parent_ids"]
-        line_relations = doc["line_relations"]
+        all_chunks = []
+        all_parent_ids = []
+        all_relations = []
 
-        # 处理每一页
-        all_page_chunks = []
         for page in pages:
             page_number = page["page_number"]
             tokens = page["tokens"]
@@ -521,8 +446,10 @@ class HRDocDataLoader:
             labels = page["ner_tags"]
             image = page["image"]
             line_ids = page["line_ids"]
+            page_parent_ids = page["line_parent_ids"]
+            page_relations = page["line_relations"]
 
-            # 提取该页的唯一 line_ids
+            # 提取该页的唯一 line_ids（保持顺序）
             unique_line_ids = []
             seen = set()
             for lid in line_ids:
@@ -544,17 +471,21 @@ class HRDocDataLoader:
                 label_all_tokens=self.config.label_all_tokens,
             )
 
-            all_page_chunks.extend(chunks)
+            all_chunks.extend(chunks)
 
-        if len(all_page_chunks) == 0:
+            # 聚合 parent_ids 和 relations（全局索引）
+            all_parent_ids.extend(page_parent_ids)
+            all_relations.extend(page_relations)
+
+        if len(all_chunks) == 0:
             return None
 
         return {
             "document_name": document_name,
             "num_pages": len(pages),
-            "chunks": all_page_chunks,  # 所有页的 chunks（按顺序）
-            "line_parent_ids": line_parent_ids,  # 文档级别，全局索引
-            "line_relations": line_relations,
+            "chunks": all_chunks,  # 所有页的 chunks（按顺序）
+            "line_parent_ids": all_parent_ids,  # 文档级别，全局索引
+            "line_relations": all_relations,
         }
 
     def get_train_dataset(self):

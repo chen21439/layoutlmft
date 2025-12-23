@@ -55,28 +55,25 @@ class HRDocConfig(datasets.BuilderConfig):
 
 
 class HRDoc(datasets.GeneratorBasedBuilder):
-    """HRDoc dataset - 文档级别模式（一个样本=整个文档）"""
+    """HRDoc dataset - 页级别模式（一个样本=一页，保持全局 line_id）"""
 
     BUILDER_CONFIGS = [
-        HRDocConfig(name="hrdoc", version=datasets.Version("1.0.0"), description="HRDoc dataset (document-level)"),
+        HRDocConfig(name="hrdoc", version=datasets.Version("1.0.0"), description="HRDoc dataset (page-level)"),
     ]
 
     def _info(self):
-        # 文档级别模式：一个样本 = 整个文档（多页）
+        # 页级别模式：一个样本 = 一页（兼容 LayoutLM 输入格式）
+        # 注意：line_id 和 parent_id 保持全局索引，不重映射
         features = datasets.Features({
             "id": datasets.Value("string"),
             "document_name": datasets.Value("string"),
-            "num_pages": datasets.Value("int64"),
-            # 每页的数据（列表形式）
-            "pages": datasets.Sequence({
-                "page_number": datasets.Value("int64"),
-                "tokens": datasets.Sequence(datasets.Value("string")),
-                "bboxes": datasets.Sequence(datasets.Sequence(datasets.Value("int64"))),
-                "ner_tags": datasets.Sequence(datasets.Value("int64")),  # 使用 int64 避免 ClassLabel 在嵌套中的问题
-                "image": datasets.Array3D(shape=(3, 224, 224), dtype="uint8"),
-                "line_ids": datasets.Sequence(datasets.Value("int64")),  # 全局 line_id
-            }),
-            # 文档级别的层级关系（全局索引）
+            "page_number": datasets.Value("int64"),
+            "tokens": datasets.Sequence(datasets.Value("string")),
+            "bboxes": datasets.Sequence(datasets.Sequence(datasets.Value("int64"))),
+            "ner_tags": datasets.Sequence(datasets.Value("int64")),
+            "image": datasets.Array3D(shape=(3, 224, 224), dtype="uint8"),
+            "line_ids": datasets.Sequence(datasets.Value("int64")),  # 全局 line_id（不重映射）
+            # 该页涉及的行的 parent_id 和 relation（全局索引）
             "line_parent_ids": datasets.Sequence(datasets.Value("int64")),
             "line_relations": datasets.Sequence(datasets.Value("string")),
         })
@@ -197,23 +194,23 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
     def _generate_examples(self, filepath, doc_ids=None, max_samples=None, max_docs=None):
         """
-        文档级别生成器：一个样本 = 整个文档（多页）
+        页级别生成器：一个样本 = 一页（保持全局 line_id）
 
         输出格式:
         {
             "id": "0",
             "document_name": "doc1",
-            "num_pages": 3,
-            "pages": [
-                {"page_number": 0, "tokens": [...], "bboxes": [...], "ner_tags": [...], "image": ..., "line_ids": [...]},
-                {"page_number": 1, ...},
-                ...
-            ],
-            "line_parent_ids": [...],  # 文档全局，不重映射
-            "line_relations": [...],   # 文档全局
+            "page_number": 0,
+            "tokens": [...],
+            "bboxes": [...],
+            "ner_tags": [...],
+            "image": ...,
+            "line_ids": [...],       # 全局 line_id（不重映射）
+            "line_parent_ids": [...], # 该页行的 parent_id（全局索引）
+            "line_relations": [...],  # 该页行的 relation
         }
         """
-        logger.info("⏳ Generating examples from = %s (document-level)", filepath)
+        logger.info("⏳ Generating examples from = %s (page-level, global line_id)", filepath)
         if doc_ids is not None:
             logger.info(f"  Filtering to {len(doc_ids)} docs")
         if max_samples is not None:
@@ -272,13 +269,10 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 logger.warning(f"Unknown data format in {file_path}")
                 continue
 
-            # ==================== 文档级别处理 ====================
-            # 收集整个文档的所有页面数据
-            doc_pages = []
-            doc_line_parent_ids = []  # 文档级别的 parent_ids（全局索引）
-            doc_line_relations = []   # 文档级别的 relations
             base_name = file.replace('.json', '')
+            doc_has_valid_page = False
 
+            # ==================== 逐页生成样本 ====================
             for page_num in sorted(pages_data.keys()):
                 form_data = pages_data[page_num]
 
@@ -319,6 +313,8 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 page_bboxes = []
                 page_ner_tags = []
                 page_line_ids = []
+                page_parent_ids = []  # 该页行的 parent_id
+                page_relations = []   # 该页行的 relation
 
                 for line_idx, item in enumerate(form_data):
                     # 使用 trans_class 将细粒度标签转换为论文14类
@@ -361,9 +357,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     if relation == "" or relation is None:
                         relation = "none"
 
-                    # 记录文档级别的 parent_id 和 relation（每行一个）
-                    doc_line_parent_ids.append(parent_id)
-                    doc_line_relations.append(relation)
+                    # 记录该页的 parent_id 和 relation（每行一个）
+                    page_parent_ids.append(parent_id)
+                    page_relations.append(relation)
 
                     # 构建当前页的 tokens 列表
                     for w in words:
@@ -372,31 +368,28 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         page_bboxes.append(normalize_bbox(w["box"], size))
                         page_line_ids.append(item_line_id)
 
-                # 添加当前页到文档
+                # ==================== 生成页级别样本 ====================
                 if len(page_tokens) > 0:
-                    doc_pages.append({
+                    yield guid, {
+                        "id": str(guid),
+                        "document_name": document_name,
                         "page_number": page_num,
                         "tokens": page_tokens,
                         "bboxes": page_bboxes,
                         "ner_tags": page_ner_tags,
                         "image": image,
-                        "line_ids": page_line_ids,
-                    })
+                        "line_ids": page_line_ids,  # 全局 line_id
+                        "line_parent_ids": page_parent_ids,  # 该页行的 parent_id（全局索引）
+                        "line_relations": page_relations,
+                    }
+                    guid += 1
+                    doc_has_valid_page = True
 
-            # ==================== 生成文档级别样本 ====================
-            if len(doc_pages) > 0:
-                yield guid, {
-                    "id": str(guid),
-                    "document_name": document_name,
-                    "num_pages": len(doc_pages),
-                    "pages": doc_pages,
-                    "line_parent_ids": doc_line_parent_ids,  # 全局索引，不重映射
-                    "line_relations": doc_line_relations,
-                }
-                guid += 1
+                    # 快速模式：达到 max_samples 后停止生成
+                    if max_samples is not None and guid >= max_samples:
+                        logger.info(f"  Reached max_samples={max_samples}, stopping generation")
+                        return
+
+            # 统计文档数
+            if doc_has_valid_page:
                 doc_count += 1
-
-                # 快速模式：达到 max_samples 后停止生成
-                if max_samples is not None and guid >= max_samples:
-                    logger.info(f"  Reached max_samples={max_samples}, stopping generation")
-                    return
