@@ -113,48 +113,61 @@ def extract_gt_from_batch(batch, id2label=None) -> List[Dict]:
     """
     从 batch 中提取 ground truth，转换为 HRDoc JSON 格式
 
+    文档级别 batch 结构：
+    - num_docs: 文档数量
+    - chunks_per_doc: 每个文档的 chunk 数量
+    - input_ids: [total_chunks, seq_len]
+    - line_parent_ids: [num_docs, max_lines]  # 按文档组织
+
     Returns:
         每个文档的 GT 列表，每个元素是 [{"class": ..., "parent_id": ..., "relation": ...}, ...]
     """
     if id2label is None:
         id2label = ID2CLASS
 
-    batch_size = batch["input_ids"].shape[0]
+    # 文档级别：使用 num_docs；chunk 级别：使用 input_ids.shape[0]
+    num_docs = batch.get("num_docs", batch["input_ids"].shape[0])
+    chunks_per_doc = batch.get("chunks_per_doc", [1] * num_docs)
+
+    line_parent_ids = batch.get("line_parent_ids")
+    line_relations = batch.get("line_relations")
+
     results = []
+    chunk_idx = 0
 
-    for b in range(batch_size):
-        labels = batch["labels"][b]  # [seq_len]
-        line_ids = batch.get("line_ids")
-        line_parent_ids = batch.get("line_parent_ids")
-        line_relations = batch.get("line_relations")
+    for doc_idx in range(num_docs):
+        num_chunks = chunks_per_doc[doc_idx]
 
-        if line_ids is None:
-            results.append([])
-            continue
+        # 收集该文档所有 chunks 的 labels 和 line_ids
+        all_labels = []
+        all_line_ids = []
+        for c in range(num_chunks):
+            labels = batch["labels"][chunk_idx + c].cpu().tolist()
+            line_ids = batch["line_ids"][chunk_idx + c].cpu().tolist()
+            all_labels.extend(labels)
+            all_line_ids.extend(line_ids)
 
-        line_ids_b = line_ids[b]  # [seq_len]
+        chunk_idx += num_chunks
 
         # 使用统一的聚合函数获取每行的 GT 标签
-        line_labels = aggregate_token_to_line_labels(
-            labels.cpu().tolist(), line_ids_b.cpu().tolist()
-        )
+        line_labels = aggregate_token_to_line_labels(all_labels, all_line_ids)
 
         num_lines = len(line_labels)
         if num_lines == 0:
             results.append([])
             continue
 
-        # 获取 parent_ids 和 relations
+        # 获取 parent_ids 和 relations（按文档索引）
         parent_ids = [-1] * num_lines
         relations = ["none"] * num_lines
 
-        if line_parent_ids is not None:
-            parent_ids_b = line_parent_ids[b].cpu().tolist()
+        if line_parent_ids is not None and doc_idx < line_parent_ids.shape[0]:
+            parent_ids_b = line_parent_ids[doc_idx].cpu().tolist()
             for i in range(min(num_lines, len(parent_ids_b))):
                 parent_ids[i] = parent_ids_b[i]
 
-        if line_relations is not None:
-            relations_b = line_relations[b].cpu().tolist()
+        if line_relations is not None and doc_idx < line_relations.shape[0]:
+            relations_b = line_relations[doc_idx].cpu().tolist()
             for i in range(min(num_lines, len(relations_b))):
                 relations[i] = ID2RELATION.get(relations_b[i], "none")
 
