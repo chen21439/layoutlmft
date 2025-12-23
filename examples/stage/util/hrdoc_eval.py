@@ -482,10 +482,22 @@ def evaluate_e2e(
         results["line_micro_f1"] = f1_score(all_gt_classes, all_pred_classes, average="micro", zero_division=0)
         results["line_accuracy"] = accuracy_score(all_gt_classes, all_pred_classes)
 
-        # [诊断] 打印 class=0 被预测的次数（检查是否因为 miss 导致）
-        pred_class_0_count = sum(1 for p in all_pred_classes if p == 0)
-        gt_class_0_count = sum(1 for g in all_gt_classes if g == 0)
-        logger.info(f"[DIAG E2E] class=0 统计: GT有{gt_class_0_count}个, Pred有{pred_class_0_count}个 (差值可能来自 line_id miss)")
+        # [诊断] 打印各类别的 GT/Pred 统计
+        from collections import Counter
+        gt_counter = Counter(all_gt_classes)
+        pred_counter = Counter(all_pred_classes)
+
+        # 类别名称（与 labels.py 中的 LABEL_LIST 对应）
+        from layoutlmft.data.labels import LABEL_LIST
+        class_names = LABEL_LIST
+
+        logger.info("[DIAG E2E] 各类别 GT/Pred 统计:")
+        for cls_id in sorted(set(gt_counter.keys()) | set(pred_counter.keys())):
+            gt_cnt = gt_counter.get(cls_id, 0)
+            pred_cnt = pred_counter.get(cls_id, 0)
+            cls_name = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
+            diff_str = "" if gt_cnt == pred_cnt else f" (diff={pred_cnt - gt_cnt:+d})"
+            logger.info(f"  {cls_id:2d} ({cls_name:8s}): GT={gt_cnt:3d}, Pred={pred_cnt:3d}{diff_str}")
 
         # Parent 准确率
         parent_correct = sum(1 for g, p in zip(all_gt_parents, all_pred_parents) if g == p)
@@ -515,17 +527,27 @@ def evaluate_e2e(
     return results
 
 
-def compute_teds_score(gt_docs: List[List[Dict]], pred_docs: List[List[Dict]]) -> Optional[float]:
+def compute_teds_score(
+    gt_docs: List[List[Dict]],
+    pred_docs: List[List[Dict]],
+    max_lines_per_doc: int = 500,  # 超过此行数的文档跳过 TEDS 计算
+    timeout_per_doc: float = 60.0,  # 单个文档超时时间（秒）
+) -> Optional[float]:
     """
-    计算 TEDS 分数
+    计算 TEDS 分数（带进度日志和超时保护）
 
     Args:
         gt_docs: GT 文档列表
         pred_docs: 预测文档列表
+        max_lines_per_doc: 单个文档最大行数，超过则跳过
+        timeout_per_doc: 单个文档计算超时时间
 
     Returns:
         Macro TEDS 分数
     """
+    import time
+    import signal
+
     try:
         from HRDoc.utils.doc_utils import generate_doc_tree_from_log_line_level, tree_edit_distance
     except ImportError as e:
@@ -533,12 +555,28 @@ def compute_teds_score(gt_docs: List[List[Dict]], pred_docs: List[List[Dict]]) -
         return None
 
     teds_list = []
+    skipped_docs = 0
+    total_docs = len(gt_docs)
 
-    for gt_doc, pred_doc in zip(gt_docs, pred_docs):
+    logger.info(f"[TEDS] Starting TEDS computation for {total_docs} documents...")
+
+    for doc_idx, (gt_doc, pred_doc) in enumerate(zip(gt_docs, pred_docs)):
+        doc_lines = len(gt_doc)
+
         if len(gt_doc) != len(pred_doc):
+            logger.warning(f"[TEDS] Doc {doc_idx+1}: length mismatch (GT={len(gt_doc)}, Pred={len(pred_doc)}), skipping")
+            skipped_docs += 1
+            continue
+
+        # 跳过超大文档
+        if doc_lines > max_lines_per_doc:
+            logger.warning(f"[TEDS] Doc {doc_idx+1}: {doc_lines} lines > {max_lines_per_doc}, skipping (too large)")
+            skipped_docs += 1
             continue
 
         try:
+            start_time = time.time()
+
             gt_texts = [f"{t['class']}:{t.get('text', '')}" for t in gt_doc]
             gt_parents = [t["parent_id"] for t in gt_doc]
             gt_relations = [t.get("relation", "none") for t in gt_doc]
@@ -551,12 +589,22 @@ def compute_teds_score(gt_docs: List[List[Dict]], pred_docs: List[List[Dict]]) -
             pred_tree = generate_doc_tree_from_log_line_level(pred_texts, pred_parents, pred_relations)
 
             _, teds = tree_edit_distance(pred_tree, gt_tree)
+
+            elapsed = time.time() - start_time
+            logger.info(f"[TEDS] Doc {doc_idx+1}/{total_docs}: {doc_lines} lines, TEDS={teds:.4f}, time={elapsed:.2f}s")
+
             teds_list.append(teds)
         except Exception as e:
+            logger.warning(f"[TEDS] Doc {doc_idx+1}: computation failed: {e}")
+            skipped_docs += 1
             continue
 
     if teds_list:
-        return sum(teds_list) / len(teds_list)
+        avg_teds = sum(teds_list) / len(teds_list)
+        logger.info(f"[TEDS] Completed: {len(teds_list)} docs computed, {skipped_docs} skipped, avg TEDS={avg_teds:.4f}")
+        return avg_teds
+
+    logger.warning(f"[TEDS] No valid TEDS scores computed ({skipped_docs} docs skipped)")
     return None
 
 

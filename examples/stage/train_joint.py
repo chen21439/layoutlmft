@@ -166,6 +166,7 @@ class JointDataArguments:
     covmatch: Optional[str] = field(default=None, metadata={"help": "Covmatch split name (e.g., doc_covmatch_dev50_seed42). If not specified, uses config default."})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
+    use_cache: bool = field(default=False, metadata={"help": "Use cached dataset (default: False, always rebuild)"})
 
 
 @dataclass
@@ -191,6 +192,9 @@ class JointTrainingArguments(TrainingArguments):
 
     # 快速测试
     quick: bool = field(default=False, metadata={"help": "Quick test mode"})
+
+    # 最小训练步数（小数据集时自动增加epoch）
+    min_steps: int = field(default=1000, metadata={"help": "Minimum training steps. If calculated steps < min_steps, epochs will be increased."})
 
     # Stage 3/4 单独学习率
     learning_rate_stage34: float = field(default=5e-4, metadata={"help": "Learning rate for Stage 3/4"})
@@ -829,6 +833,7 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
         overwrite_cache=False,
         max_train_samples=data_args.max_train_samples if data_args.max_train_samples > 0 else None,
         max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
+        force_rebuild=not data_args.use_cache,  # use_cache=False -> force_rebuild=True
     )
 
     # 创建数据加载器（统一使用 HRDocDataLoader）
@@ -1028,6 +1033,7 @@ def main():
     logger.info("-" * 60)
     logger.info("Training Parameters:")
     logger.info(f"  max_steps:     {training_args.max_steps}")
+    logger.info(f"  min_steps:     {training_args.min_steps}")
     logger.info(f"  batch_size:    {training_args.per_device_train_batch_size}")
     logger.info(f"  grad_accum:    {training_args.gradient_accumulation_steps}")
     logger.info(f"  learning_rate: {training_args.learning_rate} (Stage 1)")
@@ -1053,6 +1059,30 @@ def main():
     logger.info("Preparing datasets...")
     train_dataset, eval_dataset, raw_train_dataset = prepare_datasets(tokenizer, data_args, training_args)
     logger.info(f"Train samples: {len(train_dataset)}, Eval samples: {len(eval_dataset) if eval_dataset else 0}")
+
+    # 如果 eval_dataset 为空，禁用评估
+    if eval_dataset is None or len(eval_dataset) == 0:
+        logger.warning("No eval dataset available, disabling evaluation during training")
+        training_args.evaluation_strategy = "no"
+        training_args.eval_steps = None
+
+    # 自动调整 epoch（小数据集时确保达到最小训练步数）
+    if not training_args.quick and train_dataset is not None and training_args.max_steps <= 0:
+        # 计算当前配置下的总训练步数
+        effective_batch_size = training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
+        steps_per_epoch = max(len(train_dataset) // effective_batch_size, 1)
+        current_total_steps = steps_per_epoch * int(training_args.num_train_epochs)
+
+        # 如果总步数小于 min_steps，自动增加 epoch
+        if current_total_steps < training_args.min_steps:
+            # 计算需要多少个 epoch 才能达到 min_steps
+            required_epochs = (training_args.min_steps + steps_per_epoch - 1) // steps_per_epoch
+            new_total_steps = steps_per_epoch * required_epochs
+            logger.info(f"Auto-adjusting for small dataset (min_steps={training_args.min_steps}):")
+            logger.info(f"  steps_per_epoch: {steps_per_epoch}")
+            logger.info(f"  current_steps:   {current_total_steps} (epochs={int(training_args.num_train_epochs)})")
+            logger.info(f"  adjusted_steps:  {new_total_steps} (epochs={required_epochs})")
+            training_args.num_train_epochs = float(required_epochs)
 
     # Data collator
     data_collator = HRDocJointDataCollator(
@@ -1148,9 +1178,9 @@ def main():
         )
 
         if model_args.use_soft_mask:
-            if joint_checkpoint:
-                # 续训：M_cp 会从 checkpoint 的 state_dict 恢复，跳过构建
-                logger.info("Resuming: M_cp will be restored from checkpoint (skipping build)")
+            if joint_checkpoint or joint_model_path:
+                # 续训或从 joint checkpoint 加载：M_cp 会从 checkpoint 的 state_dict 恢复，跳过构建
+                logger.info("M_cp will be restored from checkpoint (skipping build)")
             else:
                 # 首次训练：从数据集构建 M_cp
                 logger.info("Building Child-Parent Distribution Matrix (M_cp)...")

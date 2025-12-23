@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== 独立数据集加载函数 ====================
 
-def load_hrdoc_raw_datasets(data_dir: str = None):
+def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = True):
     """
     独立的数据集加载函数（不需要 tokenizer）
 
@@ -32,6 +32,7 @@ def load_hrdoc_raw_datasets(data_dir: str = None):
 
     Args:
         data_dir: 数据目录路径，如果为 None 则使用环境变量 HRDOC_DATA_DIR
+        force_rebuild: 是否强制重新构建数据集（默认 True，不使用缓存）
 
     Returns:
         datasets: HuggingFace datasets 对象
@@ -45,7 +46,15 @@ def load_hrdoc_raw_datasets(data_dir: str = None):
     print(f"[DataLoader] Loading HRDoc dataset from: {actual_dir}", flush=True)
     logger.info(f"Loading HRDoc dataset from {actual_dir}")
 
-    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
+    # 根据 force_rebuild 决定是否使用缓存（使用字符串兼容旧版本 datasets）
+    if force_rebuild:
+        print(f"[DataLoader] Force rebuild enabled, ignoring cache", flush=True)
+        datasets = load_dataset(
+            os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__),
+            download_mode="force_redownload",
+        )
+    else:
+        datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
 
     # 打印加载结果
     train_count = len(datasets.get("train", []))
@@ -376,6 +385,7 @@ class HRDocDataLoaderConfig:
     max_test_samples: Optional[int] = None
     label_all_tokens: bool = True  # True: 行内所有 token 都用真实标签参与训练
     pad_to_max_length: bool = True
+    force_rebuild: bool = True  # 默认强制重建数据集（不使用缓存）
 
 
 class HRDocDataLoader:
@@ -408,7 +418,10 @@ class HRDocDataLoader:
 
     def load_raw_datasets(self) -> Dict:
         """加载原始数据集（使用统一的加载函数）"""
-        self._raw_datasets = load_hrdoc_raw_datasets(data_dir=self.config.data_dir)
+        self._raw_datasets = load_hrdoc_raw_datasets(
+            data_dir=self.config.data_dir,
+            force_rebuild=self.config.force_rebuild,
+        )
         return self._raw_datasets
 
     def tokenize_and_align(self, examples: Dict) -> Dict:
