@@ -1,5 +1,6 @@
 # models - 网络结构定义
 # embeddings.py: 多模态嵌入 (visual, text, 2D positional, RoPE)
+# intra_region.py: Intra-region Head (行级别后继预测, Section 4.2.3)
 # order.py: Order 模块 (阅读顺序预测)
 # construct.py: Construct 模块 (层级结构构建)
 # doc_model.py: 统一的 DOC 模型
@@ -49,6 +50,16 @@ from .order_only import (
     load_order_only_model,
 )
 
+from .intra_region import (
+    IntraRegionHead,
+    IntraRegionLoss,
+    IntraRegionModule,
+    MultiModalLineEncoder,
+    UnionFind,
+    predict_successors,
+    group_lines_to_regions,
+)
+
 __all__ = [
     # Embeddings
     'PositionalEmbedding2D',
@@ -81,4 +92,12 @@ __all__ = [
     'build_order_only_model',
     'save_order_only_model',
     'load_order_only_model',
+    # Intra-region Module
+    'IntraRegionHead',
+    'IntraRegionLoss',
+    'IntraRegionModule',
+    'MultiModalLineEncoder',
+    'UnionFind',
+    'predict_successors',
+    'group_lines_to_regions',
 ]

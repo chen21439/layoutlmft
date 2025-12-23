@@ -276,16 +276,25 @@ def evaluate(
             parent_labels=parent_ids,
         )
 
-        total_loss += outputs["loss"].item()
+        loss_val = outputs["loss"].item()
         order_loss = outputs.get("order_loss", outputs.get("loss", torch.tensor(0.0)))
         if isinstance(order_loss, torch.Tensor):
             order_loss = order_loss.item()
-        total_order_loss += order_loss
-
         construct_loss = outputs.get("construct_loss", torch.tensor(0.0))
         if isinstance(construct_loss, torch.Tensor):
             construct_loss = construct_loss.item()
-        total_construct_loss += construct_loss
+
+        # Skip NaN losses and report
+        import math
+        if math.isnan(loss_val) or math.isnan(construct_loss):
+            logger.warning(f"NaN in eval batch {num_batches}: loss={loss_val}, order={order_loss}, construct={construct_loss}")
+            if not math.isnan(order_loss):
+                total_loss += order_loss
+                total_order_loss += order_loss
+        else:
+            total_loss += loss_val
+            total_order_loss += order_loss
+            total_construct_loss += construct_loss
 
         # Compute order predictions
         order_logits = outputs["order_logits"]

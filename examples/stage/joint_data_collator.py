@@ -3,10 +3,9 @@
 """
 HRDoc 联合训练的数据整理器 (Data Collator)
 
-文档级别处理：
-- 每个样本是一个文档（包含多个 chunks）
-- Stage 1：逐 chunk 处理
-- Stage 2/3/4：使用文档级别的 parent_ids 和 relations（全局索引）
+支持两种模式：
+- 页面级别（document_level=False）：每个样本是一个 chunk，快速训练
+- 文档级别（document_level=True）：每个样本是一个文档，用于推理
 """
 
 import os
@@ -17,7 +16,6 @@ from typing import Dict, List, Optional, Union
 from transformers.file_utils import PaddingStrategy
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
-# 添加项目根目录到路径
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
@@ -32,29 +30,12 @@ from layoutlmft.models.relation_classifier import (
 @dataclass
 class HRDocJointDataCollator:
     """
-    文档级别联合训练的 Data Collator
+    联合训练的 Data Collator（页面级别模式）
 
-    输入格式（每个样本是一个文档）：
-    {
-        "document_name": "doc1",
-        "chunks": [chunk1, chunk2, ...],  # 每个 chunk 是一页的一部分
-        "line_parent_ids": [...],         # 文档级别，全局索引
-        "line_relations": [...],          # 文档级别
-    }
-
-    输出格式：
-    {
-        "num_docs": batch_size,
-        "chunks_per_doc": [n1, n2, ...],  # 每个文档的 chunk 数量
-        "input_ids": [chunk1, chunk2, ...],  # 所有 chunks 展平
-        "bbox": [...],
-        "attention_mask": [...],
-        "labels": [...],
-        "line_ids": [...],                # 全局 line_id
-        "image": [...],
-        "line_parent_ids": [...],         # 每个文档的 parent_ids（全局索引）
-        "line_relations": [...],
-    }
+    每个样本是一个 chunk，包含：
+    - input_ids, bbox, image, attention_mask
+    - labels (token-level)
+    - line_ids, line_parent_ids, line_relations (line-level，本地索引)
     """
 
     tokenizer: PreTrainedTokenizerBase
@@ -62,12 +43,142 @@ class HRDocJointDataCollator:
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
     label_pad_token_id: int = -100
-
-    # 关系类型到索引的映射
     relation2id: Dict[str, int] = None
 
-    # 每个文档最多取多少个 chunks（防止显存爆炸）
-    # 设为 0 或 None 表示不限制
+    def __post_init__(self):
+        if self.relation2id is None:
+            self.relation2id = RELATION_LABELS
+
+    def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
+        """整理一个 batch 的 chunk 数据"""
+        input_ids = [f["input_ids"] for f in features]
+        bbox = [f["bbox"] for f in features]
+        image = [f.get("image") for f in features]
+        labels = [f.get("labels", f.get("ner_tags")) for f in features]
+
+        line_ids = [f.get("line_ids", []) for f in features]
+        line_parent_ids = [f.get("line_parent_ids", []) for f in features]
+        line_relations = [f.get("line_relations", []) for f in features]
+        line_bboxes = [f.get("line_bboxes", []) for f in features]
+
+        batch_size = len(features)
+
+        # Token-level padding
+        max_length = max(len(ids) for ids in input_ids)
+        if self.max_length:
+            max_length = min(max_length, self.max_length)
+
+        padded_input_ids = []
+        padded_bbox = []
+        padded_labels = []
+        padded_line_ids = []
+        attention_mask = []
+
+        for i in range(batch_size):
+            seq_len = len(input_ids[i])
+            padding_len = max_length - seq_len
+
+            padded_input_ids.append(
+                list(input_ids[i]) + [self.tokenizer.pad_token_id] * padding_len
+            )
+            padded_bbox.append(
+                list(bbox[i]) + [[0, 0, 0, 0]] * padding_len
+            )
+            if labels[i] is not None:
+                padded_labels.append(
+                    list(labels[i]) + [self.label_pad_token_id] * padding_len
+                )
+            if len(line_ids[i]) > 0:
+                padded_line_ids.append(
+                    list(line_ids[i]) + [-1] * padding_len
+                )
+            else:
+                padded_line_ids.append([-1] * max_length)
+            attention_mask.append(
+                [1] * seq_len + [0] * padding_len
+            )
+
+        batch = {
+            "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
+            "bbox": torch.tensor(padded_bbox, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+        }
+
+        if labels[0] is not None:
+            batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
+
+        has_line_ids = any(len(lid) > 0 for lid in line_ids)
+        if has_line_ids:
+            batch["line_ids"] = torch.tensor(padded_line_ids, dtype=torch.long)
+
+        # Image
+        if image[0] is not None:
+            batch["image"] = torch.stack([
+                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                for img in image
+            ])
+
+        # Line-level padding
+        has_line_parent_ids = any(len(lp) > 0 for lp in line_parent_ids)
+        if has_line_parent_ids:
+            max_lines = max(len(lp) for lp in line_parent_ids)
+
+            padded_line_parent_ids = []
+            padded_line_relations = []
+
+            for i in range(batch_size):
+                num_lines = len(line_parent_ids[i])
+                padding_len = max_lines - num_lines
+
+                padded_line_parent_ids.append(
+                    list(line_parent_ids[i]) + [-100] * padding_len
+                )
+
+                if len(line_relations[i]) > 0:
+                    rel_indices = [
+                        self.relation2id.get(str(rel).lower(), -100) for rel in line_relations[i]
+                    ]
+                    padded_line_relations.append(
+                        rel_indices + [-100] * padding_len
+                    )
+                else:
+                    padded_line_relations.append([-100] * max_lines)
+
+            batch["line_parent_ids"] = torch.tensor(padded_line_parent_ids, dtype=torch.long)
+
+            has_line_relations = any(len(lr) > 0 for lr in line_relations)
+            if has_line_relations:
+                batch["line_relations"] = torch.tensor(padded_line_relations, dtype=torch.long)
+
+        # Line bboxes
+        has_line_bboxes = any(len(lb) > 0 for lb in line_bboxes)
+        if has_line_bboxes:
+            max_lines = max(len(lb) for lb in line_bboxes)
+            padded_line_bboxes = []
+            for i in range(batch_size):
+                num_lines = len(line_bboxes[i])
+                padding_len = max_lines - num_lines
+                bboxes = [list(bb) if isinstance(bb, (list, tuple)) else [0, 0, 0, 0] for bb in line_bboxes[i]]
+                padded_line_bboxes.append(bboxes + [[0, 0, 0, 0]] * padding_len)
+            batch["line_bboxes"] = torch.tensor(padded_line_bboxes, dtype=torch.float)
+
+        return batch
+
+
+@dataclass
+class HRDocDocumentLevelCollator:
+    """
+    文档级别联合训练的 Data Collator
+
+    每个样本是一个文档，包含多个 chunks
+    """
+
+    tokenizer: PreTrainedTokenizerBase
+    padding: Union[bool, str, PaddingStrategy] = True
+    max_length: Optional[int] = None
+    pad_to_multiple_of: Optional[int] = None
+    label_pad_token_id: int = -100
+    relation2id: Dict[str, int] = None
     max_chunks_per_doc: int = 0
 
     def __post_init__(self):
@@ -75,18 +186,9 @@ class HRDocJointDataCollator:
             self.relation2id = RELATION_LABELS
 
     def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
-        """
-        整理一个 batch 的文档数据
-
-        Args:
-            features: 一个 batch 的文档样本
-
-        Returns:
-            batch: 整理后的 batch
-        """
+        """整理一个 batch 的文档数据"""
         batch_size = len(features)
 
-        # 收集所有 chunks
         all_chunks = []
         chunks_per_doc = []
         all_line_parent_ids = []
@@ -98,15 +200,10 @@ class HRDocJointDataCollator:
             chunks = doc["chunks"]
             chunks_per_doc.append(len(chunks))
             all_chunks.extend(chunks)
-
-            # 文档级别的 parent_ids 和 relations（全局索引）
             all_line_parent_ids.append(doc["line_parent_ids"])
             all_line_relations.append(doc["line_relations"])
 
-        # ==================== 1. 处理所有 chunks（用于 Stage 1）====================
         num_chunks = len(all_chunks)
-
-        # 找出最大序列长度
         max_seq_len = max(len(chunk["input_ids"]) for chunk in all_chunks)
         if self.max_length:
             max_seq_len = min(max_seq_len, self.max_length)
@@ -122,24 +219,19 @@ class HRDocJointDataCollator:
             seq_len = len(chunk["input_ids"])
             padding_len = max_seq_len - seq_len
 
-            # input_ids
             padded_input_ids.append(
                 list(chunk["input_ids"]) + [self.tokenizer.pad_token_id] * padding_len
             )
-
-            # bbox
             padded_bbox.append(
                 list(chunk["bbox"]) + [[0, 0, 0, 0]] * padding_len
             )
 
-            # labels
             labels = chunk.get("labels", [])
             if labels:
                 padded_labels.append(
                     list(labels) + [self.label_pad_token_id] * padding_len
                 )
 
-            # line_ids（全局 line_id）
             line_ids = chunk.get("line_ids", [])
             if line_ids:
                 padded_line_ids.append(
@@ -148,12 +240,10 @@ class HRDocJointDataCollator:
             else:
                 padded_line_ids.append([-1] * max_seq_len)
 
-            # attention_mask
             attention_masks.append(
                 [1] * seq_len + [0] * padding_len
             )
 
-            # image
             if chunk.get("image") is not None:
                 all_images.append(chunk["image"])
 
@@ -171,13 +261,10 @@ class HRDocJointDataCollator:
             batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
 
         if all_images:
-            batch["image"] = torch.stack([
-                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
-                for img in all_images
-            ])
+            # 保持为 list，不 stack，在 joint_model.py 中按需加载到 GPU
+            batch["image"] = all_images
 
-        # ==================== 2. 处理文档级别 parent_ids 和 relations ====================
-        # 找出最大行数
+        # 文档级别 parent_ids 和 relations
         max_lines = max(len(pids) for pids in all_line_parent_ids) if all_line_parent_ids else 0
 
         if max_lines > 0:
@@ -190,12 +277,10 @@ class HRDocJointDataCollator:
                 num_lines = len(parent_ids)
                 padding_len = max_lines - num_lines
 
-                # parent_ids（全局索引，不重映射）
                 padded_parent_ids.append(
                     list(parent_ids) + [-100] * padding_len
                 )
 
-                # relations
                 if relations:
                     rel_indices = [
                         self.relation2id.get(str(rel).lower(), -100) for rel in relations
@@ -213,25 +298,12 @@ class HRDocJointDataCollator:
 
 
 def get_line_semantic_label(token_labels: List[int], line_ids: List[int], target_line_id: int) -> int:
-    """
-    从 token-level 标签中提取指定行的语义标签
-
-    当前使用 14 类标签（无 BIO 前缀），直接取第一个 token 的标签
-
-    Args:
-        token_labels: token-level 标签列表
-        line_ids: 每个 token 对应的 line_id
-        target_line_id: 目标行 ID
-
-    Returns:
-        语义类别索引（0-13）
-    """
+    """从 token-level 标签中提取指定行的语义标签"""
     for label, line_id in zip(token_labels, line_ids):
         if line_id == target_line_id and label >= 0:
             return label
-    return 0  # 默认返回第一个类别
+    return 0
 
 
-# 使用统一的标签定义
 SEMANTIC_CLASSES = LABEL_LIST
 SEMANTIC_CLASS2ID = LABEL2ID

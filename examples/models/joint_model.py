@@ -56,6 +56,11 @@ class JointModel(nn.Module):
         self.stage1_micro_batch_size = stage1_micro_batch_size
         self.stage1_no_grad = stage1_no_grad
 
+        # 如果冻结 Stage 1，同时冻结其参数（不计算梯度）
+        if stage1_no_grad:
+            for param in self.stage1.parameters():
+                param.requires_grad = False
+
         # 关系分类损失
         if use_focal_loss:
             from layoutlmft.models.relation_classifier import FocalLoss
@@ -93,17 +98,27 @@ class JointModel(nn.Module):
         device = input_ids.device
         total_chunks = input_ids.shape[0]
 
+        # 检查 image 是 list 还是 tensor
+        # Collator 现在保持 image 为 list，避免一次性加载所有图片到 GPU
+        image_is_list = isinstance(image, list) if image is not None else False
+
         # ==================== Stage 1: Classification (逐 chunk 处理) ====================
-        # 强制每次只给 LayoutLM 一个 chunk，避免显存爆炸
-        micro_bs = 1
+        # 使用配置的 micro_batch_size，冻结 Stage 1 时可以用更大的 batch
+        micro_bs = self.stage1_micro_batch_size
 
         if total_chunks <= micro_bs:
             # 小 batch，直接处理
+            if image_is_list and image:
+                # 将单张图片转为 tensor 并移到 GPU
+                img_tensor = torch.tensor(image[0]) if not isinstance(image[0], torch.Tensor) else image[0]
+                img_tensor = img_tensor.unsqueeze(0).to(device)
+            else:
+                img_tensor = image
             stage1_outputs = self.stage1(
                 input_ids=input_ids,
                 bbox=bbox,
                 attention_mask=attention_mask,
-                image=image,
+                image=img_tensor,
                 labels=labels,
                 output_hidden_states=True,
             )
@@ -124,8 +139,19 @@ class JointModel(nn.Module):
                 mb_input_ids = input_ids[start_idx:end_idx]
                 mb_bbox = bbox[start_idx:end_idx]
                 mb_attention_mask = attention_mask[start_idx:end_idx]
-                mb_image = image[start_idx:end_idx] if image is not None else None
                 mb_labels = labels[start_idx:end_idx] if labels is not None else None
+
+                # 图片按需加载到 GPU（关键：避免 OOM）
+                if image_is_list and image:
+                    mb_images = image[start_idx:end_idx]
+                    mb_image = torch.stack([
+                        torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                        for img in mb_images
+                    ]).to(device)
+                elif image is not None:
+                    mb_image = image[start_idx:end_idx]
+                else:
+                    mb_image = None
 
                 # 根据配置决定是否使用 no_grad
                 if self.stage1_no_grad:
@@ -149,26 +175,33 @@ class JointModel(nn.Module):
                     )
 
                 all_logits.append(mb_outputs.logits)
-                # 如果使用 no_grad，需要 detach hidden states
-                if self.stage1_no_grad:
-                    all_hidden.append(mb_outputs.hidden_states[-1])
-                else:
-                    all_hidden.append(mb_outputs.hidden_states[-1])
+                all_hidden.append(mb_outputs.hidden_states[-1])
 
                 if mb_outputs.loss is not None:
                     total_cls_loss = total_cls_loss + mb_outputs.loss
                     num_micro_batches += 1
+
+                # 释放当前 micro-batch 的图片显存
+                del mb_image
 
             # 合并结果
             logits = torch.cat(all_logits, dim=0)
             hidden_states = torch.cat(all_hidden, dim=0)
             cls_loss = total_cls_loss / max(num_micro_batches, 1)
 
-        outputs = {
-            "loss": cls_loss * self.lambda_cls,
-            "cls_loss": cls_loss,
-            "logits": logits,
-        }
+        # 当冻结 Stage 1 时，cls_loss 只用于监控，不加入总 loss
+        if self.stage1_no_grad:
+            outputs = {
+                "loss": torch.tensor(0.0, device=device, requires_grad=True),  # 初始化为0，后续加 parent_loss/rel_loss
+                "cls_loss": cls_loss.detach() if cls_loss is not None else torch.tensor(0.0),  # 仅监控
+                "logits": logits,
+            }
+        else:
+            outputs = {
+                "loss": cls_loss * self.lambda_cls,
+                "cls_loss": cls_loss,
+                "logits": logits,
+            }
 
         # 如果没有 line 信息或文档信息，直接返回
         if line_ids is None or line_parent_ids is None:

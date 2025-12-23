@@ -275,19 +275,17 @@ class TreeRelationHead(nn.Module):
         # Root prediction
         root_logits = self.root_classifier(features).squeeze(-1)  # [B, N]
 
-        # Apply mask
+        # Apply mask with large negative value instead of -inf for numerical stability
         if mask is not None:
             row_mask = ~mask.unsqueeze(2)
             col_mask = ~mask.unsqueeze(1)
             combined_mask = row_mask | col_mask
 
-            parent_logits = parent_logits.masked_fill(combined_mask, float('-inf'))
+            # Use -1e9 instead of -inf to avoid NaN in softmax
+            parent_logits = parent_logits.masked_fill(combined_mask, -1e9)
             # Diagonal: node cannot be its own parent
             diag = torch.eye(num_nodes, dtype=torch.bool, device=features.device)
-            parent_logits = parent_logits.masked_fill(diag.unsqueeze(0), float('-inf'))
-
-            # Don't mask root_logits with -inf (causes NaN in BCE)
-            # The mask will be applied in loss calculation
+            parent_logits = parent_logits.masked_fill(diag.unsqueeze(0), -1e9)
 
         return {
             'parent_logits': parent_logits,
@@ -423,18 +421,12 @@ class ConstructLoss(nn.Module):
             parent_labels_flat = parent_labels_clamped.view(-1)
             valid_parent_flat = valid_parent.view(-1)
 
-            # Handle all-inf rows to avoid NaN in softmax
-            all_inf_rows = torch.isinf(parent_logits_flat).all(dim=1)
-            parent_logits_safe = parent_logits_flat.clone()
-            parent_logits_safe[all_inf_rows] = 0.0
-            parent_labels_safe = parent_labels_flat.clone()
-            parent_labels_safe[all_inf_rows] = 0
-
             loss_flat = F.cross_entropy(
-                parent_logits_safe,
-                parent_labels_safe,
+                parent_logits_flat,
+                parent_labels_flat,
                 reduction='none'
             )
+
             loss_flat = loss_flat * valid_parent_flat.float()
             parent_loss = loss_flat.sum() / valid_parent_flat.sum().clamp(min=1)
 

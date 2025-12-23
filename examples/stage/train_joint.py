@@ -109,7 +109,7 @@ from layoutlmft.models.relation_classifier import (
     NUM_RELATIONS,
 )
 
-from joint_data_collator import HRDocJointDataCollator
+from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
 from train_parent_finder import (
     SimpleParentFinder,
     ParentFinderGRU,
@@ -156,8 +156,8 @@ class JointModelArguments:
     lambda_cls: float = field(default=1.0, metadata={"help": "Classification loss weight"})
     lambda_parent: float = field(default=1.0, metadata={"help": "Parent loss weight"})
     lambda_rel: float = field(default=1.0, metadata={"help": "Relation loss weight"})
-    stage1_micro_batch_size: int = field(default=8, metadata={"help": "Stage1 micro-batch size (prevents OOM for large documents)"})
-    stage1_no_grad: bool = field(default=False, metadata={"help": "Use no_grad for Stage1 (saves memory but no backprop to Stage1)"})
+    stage1_micro_batch_size: int = field(default=16, metadata={"help": "Stage1 micro-batch size (can be larger when Stage1 is frozen)"})
+    stage1_no_grad: bool = field(default=True, metadata={"help": "Freeze Stage1 (saves memory, only train Stage3/4)"})
 
 
 @dataclass
@@ -169,6 +169,7 @@ class JointDataArguments:
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
     use_cache: bool = field(default=False, metadata={"help": "Use cached dataset (default: False, always rebuild)"})
+    document_level: bool = field(default=False, metadata={"help": "Use document-level batching (slow but preserves cross-page relations). Default: False (page-level, fast training)"})
 
 
 @dataclass
@@ -580,6 +581,7 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
         max_train_samples=data_args.max_train_samples if data_args.max_train_samples > 0 else None,
         max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
         force_rebuild=not data_args.use_cache,  # use_cache=False -> force_rebuild=True
+        document_level=data_args.document_level,  # False=页面级别（快），True=文档级别（慢）
     )
 
     # 创建数据加载器（统一使用 HRDocDataLoader）
@@ -830,12 +832,21 @@ def main():
             logger.info(f"  adjusted_steps:  {new_total_steps} (epochs={required_epochs})")
             training_args.num_train_epochs = float(required_epochs)
 
-    # Data collator
-    data_collator = HRDocJointDataCollator(
-        tokenizer=tokenizer,
-        padding=True,
-        max_length=512,
-    )
+    # Data collator（根据模式选择）
+    if data_args.document_level:
+        logger.info("Using DOCUMENT-LEVEL collator (slow, for inference)")
+        data_collator = HRDocDocumentLevelCollator(
+            tokenizer=tokenizer,
+            padding=True,
+            max_length=512,
+        )
+    else:
+        logger.info("Using PAGE-LEVEL collator (fast training)")
+        data_collator = HRDocJointDataCollator(
+            tokenizer=tokenizer,
+            padding=True,
+            max_length=512,
+        )
 
     # 加载模型
     logger.info("Loading models...")
