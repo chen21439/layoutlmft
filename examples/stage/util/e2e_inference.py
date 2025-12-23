@@ -192,3 +192,174 @@ def run_e2e_inference_batch(
         results.append(result)
 
     return results
+
+
+def run_e2e_inference_document(
+    model,
+    batch: Dict[str, torch.Tensor],
+    doc_idx: int = 0,
+    device: torch.device = None,
+) -> E2EInferenceOutput:
+    """
+    文档级别端到端推理 (Stage 1/2/3/4)
+
+    处理一个文档的所有 chunks，聚合后进行 Stage 2/3/4 推理。
+
+    Args:
+        model: JointModel，包含 stage1, stage3, stage4, feature_extractor, use_gru
+        batch: 文档级别 batch，包含:
+            - input_ids: [total_chunks, seq_len]
+            - num_docs: 文档数量
+            - chunks_per_doc: 每个文档的 chunk 数量
+            - line_ids: [total_chunks, seq_len]，全局 line_id
+        doc_idx: 要推理的文档索引（batch 中可能有多个文档）
+        device: 设备
+
+    Returns:
+        E2EInferenceOutput: 文档级别的预测结果
+    """
+    if device is None:
+        device = next(model.stage1.parameters()).device
+
+    num_docs = batch.get("num_docs", 1)
+    chunks_per_doc = batch.get("chunks_per_doc", [batch["input_ids"].shape[0]])
+
+    # 计算该文档的 chunks 范围
+    chunk_start = sum(chunks_per_doc[:doc_idx])
+    chunk_end = chunk_start + chunks_per_doc[doc_idx]
+    num_chunks = chunks_per_doc[doc_idx]
+
+    # ==================== Stage 1: Classification ====================
+    # 只处理该文档的 chunks
+    doc_input_ids = batch["input_ids"][chunk_start:chunk_end]
+    doc_bbox = batch["bbox"][chunk_start:chunk_end]
+    doc_attention_mask = batch["attention_mask"][chunk_start:chunk_end]
+    doc_image = batch.get("image")
+    if doc_image is not None:
+        doc_image = doc_image[chunk_start:chunk_end]
+    doc_line_ids = batch["line_ids"][chunk_start:chunk_end]
+
+    stage1_outputs = model.stage1(
+        input_ids=doc_input_ids,
+        bbox=doc_bbox,
+        attention_mask=doc_attention_mask,
+        image=doc_image,
+        output_hidden_states=True,
+    )
+
+    logits = stage1_outputs.logits  # [num_chunks, seq_len, num_classes]
+    hidden_states = stage1_outputs.hidden_states[-1]  # [num_chunks, seq_len+?, hidden]
+
+    # 从所有 chunks 收集 line_classes（使用全局 line_id）
+    line_classes = {}
+    line_votes = {}  # {line_id: Counter of class votes}
+
+    for chunk_idx in range(num_chunks):
+        chunk_line_ids = doc_line_ids[chunk_idx].cpu().tolist()
+        chunk_logits = logits[chunk_idx]
+        chunk_preds = [chunk_logits[i].argmax().item() for i in range(chunk_logits.shape[0])]
+
+        for token_idx, (line_id, pred) in enumerate(zip(chunk_line_ids, chunk_preds)):
+            if line_id < 0:
+                continue
+            if line_id not in line_votes:
+                line_votes[line_id] = Counter()
+            line_votes[line_id][pred] += 1
+
+    # 多数投票确定每行的类别
+    for line_id, votes in line_votes.items():
+        line_classes[line_id] = votes.most_common(1)[0][0]
+
+    if not line_classes:
+        return E2EInferenceOutput()
+
+    # ==================== Stage 2: Feature Extraction ====================
+    # 从所有 chunks 聚合 line features
+    text_seq_len = doc_input_ids.shape[1]
+    text_hidden = hidden_states[:, :text_seq_len, :]  # [num_chunks, seq_len, hidden]
+    hidden_dim = text_hidden.shape[-1]
+
+    # 收集所有有效的 line_id
+    valid_line_ids = sorted(line_classes.keys())
+    num_lines = len(valid_line_ids)
+    line_id_to_idx = {lid: idx for idx, lid in enumerate(valid_line_ids)}
+
+    # 聚合 line features（mean pooling across all tokens of each line）
+    line_features = torch.zeros(num_lines, hidden_dim, device=device)
+    line_counts = torch.zeros(num_lines, device=device)
+
+    for chunk_idx in range(num_chunks):
+        chunk_line_ids = doc_line_ids[chunk_idx]
+        for token_idx in range(text_seq_len):
+            lid = chunk_line_ids[token_idx].item()
+            if lid >= 0 and lid in line_id_to_idx:
+                line_idx = line_id_to_idx[lid]
+                line_features[line_idx] += text_hidden[chunk_idx, token_idx]
+                line_counts[line_idx] += 1
+
+    # 计算平均值
+    valid_counts = line_counts.clamp(min=1)
+    line_features = line_features / valid_counts.unsqueeze(1)
+
+    # 创建 mask
+    line_mask = line_counts > 0
+
+    actual_num_lines = int(line_mask.sum().item())
+    if actual_num_lines == 0:
+        return E2EInferenceOutput(line_classes=line_classes)
+
+    # ==================== Stage 3: Parent Finding ====================
+    pred_parents = [-1] * actual_num_lines
+    gru_hidden = None
+
+    use_gru = getattr(model, 'use_gru', False)
+
+    if use_gru:
+        parent_logits, gru_hidden = model.stage3(
+            line_features.unsqueeze(0),
+            line_mask.unsqueeze(0),
+            return_gru_hidden=True
+        )
+        gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
+
+        for child_idx in range(actual_num_lines):
+            child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]
+            pred_parent_idx = child_logits.argmax().item()
+            pred_parents[child_idx] = pred_parent_idx - 1  # -1 means ROOT
+    else:
+        for child_idx in range(1, actual_num_lines):
+            parent_candidates = line_features[:child_idx]
+            child_feat = line_features[child_idx]
+            scores = model.stage3(parent_candidates, child_feat)
+            pred_parents[child_idx] = scores.argmax().item()
+
+    # ==================== Stage 4: Relation Classification ====================
+    pred_relations = [0] * actual_num_lines  # Default: connect (0)
+
+    for child_idx in range(actual_num_lines):
+        parent_idx = pred_parents[child_idx]
+        if parent_idx < 0 or parent_idx >= actual_num_lines:
+            continue
+
+        if gru_hidden is not None:
+            parent_gru_idx = parent_idx + 1
+            child_gru_idx = child_idx + 1
+            parent_feat = gru_hidden[parent_gru_idx]
+            child_feat = gru_hidden[child_gru_idx]
+        else:
+            parent_feat = line_features[parent_idx]
+            child_feat = line_features[child_idx]
+
+        rel_logits = model.stage4(
+            parent_feat.unsqueeze(0),
+            child_feat.unsqueeze(0),
+        )
+        pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
+
+    return E2EInferenceOutput(
+        line_classes=line_classes,
+        line_parents=pred_parents,
+        line_relations=pred_relations,
+        num_lines=actual_num_lines,
+        line_ids=valid_line_ids,
+    )
