@@ -1,0 +1,67 @@
+# Order 模块训练配置
+
+# 环境配置
+env: dev  # dev 或 test
+
+# GPU 配置
+gpu:
+  # dev 环境不指定 GPU（使用默认）
+  dev: null
+  # test 环境使用 GPU 1
+  test: "1"
+
+# 数据路径（根据 env 自动选择）
+data:
+  # dev 环境
+  dev:
+    root: "/mnt/e/models/data/Section/Comp_HRDoc"
+    train_dir: "/mnt/e/models/data/Section/Comp_HRDoc/HRDH_MSRA_POD_TRAIN"
+    test_dir: "/mnt/e/models/data/Section/Comp_HRDoc/HRDH_MSRA_POD_TEST"
+
+  # test 环境（服务器）
+  test:
+    root: "/data/LLM_group/layoutlmft/data/Comp_HRDoc"
+    train_dir: "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TRAIN"
+    test_dir: "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TEST"
+
+  # 通用配置
+  max_length: 512
+  max_regions: 128
+  image_size: [224, 224]
+  use_images: false  # 是否加载图像
+  val_split_ratio: 0.1  # 验证集比例
+
+# 模型配置
+model:
+  model_path: "microsoft/layoutxlm-base"
+  hidden_size: 768
+  num_labels: 4  # Comp_HRDoc 有 4 个类别
+  num_heads: 8
+  dropout: 0.1
+
+  # Order 模块
+  order_num_layers: 3
+  use_biaffine: true
+
+  # 损失权重
+  lambda_cls: 0.0   # 不使用分类损失（直接使用区域特征）
+  lambda_order: 1.0
+
+# 训练配置
+training:
+  batch_size: 4
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  num_epochs: 20
+  gradient_accumulation_steps: 2
+  fp16: true
+
+  # 保存和日志
+  save_steps: 500
+  log_steps: 50
+  eval_steps: 200
+
+# 输出配置
+output:
+  output_dir: "outputs/order_comp_hrdoc"
