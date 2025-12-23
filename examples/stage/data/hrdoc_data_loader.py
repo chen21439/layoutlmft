@@ -135,11 +135,6 @@ def tokenize_page_with_line_boundary(
     Returns:
         List[Dict]: chunk 列表，每个 chunk 包含完整的行，使用全局 line_id
     """
-    # DEBUG: 检查输入维度
-    print(f"[DEBUG tokenize] tokens={len(tokens)}, bboxes={len(bboxes)}, labels={len(labels)}, line_ids={len(line_ids)}", flush=True)
-    if len(tokens) != len(line_ids):
-        print(f"[ERROR] Dimension mismatch! tokens={len(tokens)} vs line_ids={len(line_ids)}", flush=True)
-
     if label2id is None:
         label2id = get_label2id()
 

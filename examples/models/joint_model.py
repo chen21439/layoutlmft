@@ -90,19 +90,12 @@ class JointModel(nn.Module):
         - num_docs: batch 中的文档数量
         - chunks_per_doc: 每个文档的 chunk 数量列表
         """
-        import torch
-        print(f"[DEBUG JointModel.forward] ENTER - input_ids: {input_ids.shape}, num_docs={num_docs}", flush=True)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            print(f"[DEBUG JointModel.forward] CUDA synced at ENTER", flush=True)
-
         device = input_ids.device
         total_chunks = input_ids.shape[0]
 
         # ==================== Stage 1: Classification (逐 chunk 处理) ====================
         # 强制每次只给 LayoutLM 一个 chunk，避免显存爆炸
         micro_bs = 1
-        print(f"[DEBUG JointModel.forward] Stage 1 START - {total_chunks} chunks, processing one-by-one", flush=True)
 
         if total_chunks <= micro_bs:
             # 小 batch，直接处理
@@ -166,16 +159,10 @@ class JointModel(nn.Module):
                     total_cls_loss = total_cls_loss + mb_outputs.loss
                     num_micro_batches += 1
 
-                print(f"[DEBUG JointModel.forward] Stage 1 micro-batch {start_idx}:{end_idx} done", flush=True)
-
             # 合并结果
             logits = torch.cat(all_logits, dim=0)
             hidden_states = torch.cat(all_hidden, dim=0)
             cls_loss = total_cls_loss / max(num_micro_batches, 1)
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        print(f"[DEBUG JointModel.forward] Stage 1 DONE, cls_loss={cls_loss.item():.4f}", flush=True)
 
         outputs = {
             "loss": cls_loss * self.lambda_cls,
@@ -379,9 +366,6 @@ class JointModel(nn.Module):
 
         # 保存完整的 outputs 供 compute_loss 使用
         self._outputs_dict = outputs
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        print(f"[DEBUG JointModel.forward] Stage 2/3/4 DONE, total_loss={outputs['loss'].item():.4f}", flush=True)
         return TokenClassifierOutput(
             loss=outputs["loss"],
             logits=outputs["logits"],

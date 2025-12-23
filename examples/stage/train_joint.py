@@ -216,7 +216,7 @@ class JointTrainingArguments(TrainingArguments):
     # DataLoader 设置（默认单进程，禁用预取，避免内存爆炸）
     dataloader_num_workers: int = field(default=0, metadata={"help": "Number of dataloader workers (0=single process)"})
     dataloader_pin_memory: bool = field(default=False, metadata={"help": "Pin memory for faster GPU transfer"})
-    dataloader_drop_last: bool = field(default=True, metadata={"help": "Drop last incomplete batch"})
+    dataloader_drop_last: bool = field(default=False, metadata={"help": "Drop last incomplete batch"})
 
 
 # ==================== 自定义 Trainer ====================
@@ -278,36 +278,8 @@ class JointTrainer(Trainer):
         self.optimizer = AdamW(optimizer_grouped_parameters)
         return self.optimizer
 
-    def training_step(self, model, inputs, num_items_in_batch=None):
-        """重写 training_step 添加调试点"""
-        import torch
-        print(f"[DEBUG training_step] START - before _prepare_inputs", flush=True)
-
-        model.train()
-        inputs = self._prepare_inputs(inputs)
-
-        print(f"[DEBUG training_step] AFTER _prepare_inputs", flush=True)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-            print(f"[DEBUG training_step] CUDA synced after _prepare_inputs", flush=True)
-
-        # 调用 compute_loss
-        with self.compute_loss_context_manager():
-            loss = self.compute_loss(model, inputs)
-
-        print(f"[DEBUG training_step] AFTER compute_loss, loss={loss.item():.4f}", flush=True)
-
-        # 反向传播
-        if self.args.gradient_accumulation_steps > 1:
-            loss = loss / self.args.gradient_accumulation_steps
-
-        loss.backward()
-
-        return loss.detach()
-
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
-        print(f"[DEBUG compute_loss] inputs keys: {list(inputs.keys())}", flush=True)
 
         outputs = model(**inputs)
         loss = outputs.loss  # TokenClassifierOutput 使用属性访问

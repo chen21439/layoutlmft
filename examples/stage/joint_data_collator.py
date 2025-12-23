@@ -66,6 +66,10 @@ class HRDocJointDataCollator:
     # 关系类型到索引的映射
     relation2id: Dict[str, int] = None
 
+    # 每个文档最多取多少个 chunks（防止显存爆炸）
+    # 设为 0 或 None 表示不限制
+    max_chunks_per_doc: int = 0
+
     def __post_init__(self):
         if self.relation2id is None:
             self.relation2id = RELATION_LABELS
@@ -80,7 +84,6 @@ class HRDocJointDataCollator:
         Returns:
             batch: 整理后的 batch
         """
-        print(f"[DEBUG Collator] __call__ with {len(features)} features", flush=True)
         batch_size = len(features)
 
         # 收集所有 chunks
@@ -154,7 +157,6 @@ class HRDocJointDataCollator:
             if chunk.get("image") is not None:
                 all_images.append(chunk["image"])
 
-        print(f"[DEBUG Collator] Creating tensors: {num_chunks} chunks, max_seq_len={max_seq_len}", flush=True)
         batch = {
             "num_docs": batch_size,
             "chunks_per_doc": chunks_per_doc,
@@ -164,7 +166,6 @@ class HRDocJointDataCollator:
             "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
             "line_ids": torch.tensor(padded_line_ids, dtype=torch.long),
         }
-        print(f"[DEBUG Collator] Tensors created, input_ids shape: {batch['input_ids'].shape}", flush=True)
 
         if padded_labels:
             batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
@@ -208,13 +209,6 @@ class HRDocJointDataCollator:
             batch["line_parent_ids"] = torch.tensor(padded_parent_ids, dtype=torch.long)
             batch["line_relations"] = torch.tensor(padded_relations, dtype=torch.long)
 
-        # 打印每个字段的类型，用于调试
-        print(f"[DEBUG Collator] Done, batch fields:", flush=True)
-        for k, v in batch.items():
-            if isinstance(v, torch.Tensor):
-                print(f"  {k}: Tensor {v.shape}", flush=True)
-            else:
-                print(f"  {k}: {type(v).__name__}", flush=True)
         return batch
 
 
