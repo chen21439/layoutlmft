@@ -213,8 +213,10 @@ class JointTrainingArguments(TrainingArguments):
     # 兼容旧参数
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
 
-    # DataLoader 设置（默认单进程，避免多进程数据加载问题）
+    # DataLoader 设置（默认单进程，禁用预取，避免内存爆炸）
     dataloader_num_workers: int = field(default=0, metadata={"help": "Number of dataloader workers (0=single process)"})
+    dataloader_pin_memory: bool = field(default=False, metadata={"help": "Pin memory for faster GPU transfer"})
+    dataloader_drop_last: bool = field(default=True, metadata={"help": "Drop last incomplete batch"})
 
 
 # ==================== 自定义 Trainer ====================

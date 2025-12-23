@@ -99,9 +99,10 @@ class JointModel(nn.Module):
         device = input_ids.device
         total_chunks = input_ids.shape[0]
 
-        # ==================== Stage 1: Classification (with micro-batching) ====================
-        micro_bs = self.stage1_micro_batch_size
-        print(f"[DEBUG JointModel.forward] Stage 1 START - {total_chunks} chunks, micro_batch_size={micro_bs}", flush=True)
+        # ==================== Stage 1: Classification (逐 chunk 处理) ====================
+        # 强制每次只给 LayoutLM 一个 chunk，避免显存爆炸
+        micro_bs = 1
+        print(f"[DEBUG JointModel.forward] Stage 1 START - {total_chunks} chunks, processing one-by-one", flush=True)
 
         if total_chunks <= micro_bs:
             # 小 batch，直接处理
@@ -405,9 +406,9 @@ class JointModel(nn.Module):
         device = doc_hidden.device
         hidden_dim = doc_hidden.shape[-1]
 
-        # 展平
-        flat_hidden = doc_hidden.view(-1, hidden_dim)  # [N, hidden_dim]
-        flat_line_ids = doc_line_ids.view(-1)  # [N]
+        # 展平（使用 reshape 兼容非连续 tensor）
+        flat_hidden = doc_hidden.reshape(-1, hidden_dim)  # [N, hidden_dim]
+        flat_line_ids = doc_line_ids.reshape(-1)  # [N]
 
         # 获取有效 token（line_id >= 0）
         valid_mask = flat_line_ids >= 0
