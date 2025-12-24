@@ -49,7 +49,7 @@ from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 from models.build import load_joint_model, get_latest_joint_checkpoint
 
 from e2e_inference import run_e2e_inference_single, run_e2e_inference_document
-from joint_data_collator import HRDocJointDataCollator
+from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
 
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
@@ -75,7 +75,7 @@ def get_data_dir(config, dataset: str) -> str:
 
 
 
-def run_inference(model_path: str, data_dir: str, output_dir: str = None, config=None, max_test_samples: int = None):
+def run_inference(model_path: str, data_dir: str, output_dir: str = None, config=None, max_test_samples: int = None, dataset_name: str = "hrdoc"):
     """Run end-to-end inference using shared e2e_inference module.
 
     文档级别推理：
@@ -89,6 +89,7 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
         output_dir: Deprecated, ignored (runs are saved to data_dir/runs/)
         config: Configuration object
         max_test_samples: Limit number of test samples (documents)
+        dataset_name: 数据集名称，用于区分缓存（hrds, hrdh, tender 等）
 
     Returns:
         runs_dir: Path to the run directory containing results
@@ -100,6 +101,7 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
     logger.info("=" * 60)
     logger.info(f"Model:      {model_path}")
     logger.info(f"Data Dir:   {data_dir}")
+    logger.info(f"Dataset:    {dataset_name}")
 
     # Set environment
     os.environ["HRDOC_DATA_DIR"] = data_dir
@@ -116,10 +118,12 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
     # 使用统一的数据加载器（文档级别）
     loader_config = HRDocDataLoaderConfig(
         data_dir=data_dir,
+        dataset_name=dataset_name,  # 使用数据集名称区分缓存
         max_length=512,
         preprocessing_num_workers=1,
         max_test_samples=max_test_samples,
         force_rebuild=True,
+        document_level=True,  # 推理时使用文档级别，保留跨页关系
     )
 
     data_loader = HRDocDataLoader(
@@ -139,8 +143,8 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
 
     logger.info(f"Test documents: {len(test_docs)}")
 
-    # Data collator
-    data_collator = HRDocJointDataCollator(tokenizer=tokenizer, padding=True, max_length=512)
+    # Data collator（文档级别）
+    data_collator = HRDocDocumentLevelCollator(tokenizer=tokenizer, padding=True, max_length=512)
 
     # 文档级别预测结果：{doc_name: {line_id: {...}}}
     doc_predictions = defaultdict(dict)
@@ -347,7 +351,7 @@ def main():
 
     max_test_samples = 10 if args.quick else args.max_test_samples
 
-    runs_dir = run_inference(model_path, data_dir, None, config, max_test_samples)
+    runs_dir = run_inference(model_path, data_dir, None, config, max_test_samples, dataset_name=args.dataset)
 
     if runs_dir and not args.skip_eval:
         enriched_dir = os.path.join(runs_dir, "enriched")
