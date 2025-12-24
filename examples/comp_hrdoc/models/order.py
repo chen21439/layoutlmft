@@ -675,6 +675,287 @@ class OrderLoss(nn.Module):
 # Prediction utilities
 # =============================================================================
 
+# =============================================================================
+# DOCPipeline: Complete 4.2 + 4.3 Integration
+# =============================================================================
+
+class DOCPipeline(nn.Module):
+    """Complete DOC Pipeline integrating Detect (4.2) and Order (4.3) modules.
+
+    This is the main entry point for the "Detect-Order-Construct" paper's
+    reading order prediction system.
+
+    Flow:
+        LayoutXLM Output → DetectModule (4.2) → OrderModule (4.3) → Reading Order
+
+    4.2 DetectModule:
+        - Intra-region reading order prediction (grouping lines into regions)
+        - Logical role classification for each line/region
+
+    4.3 OrderModule:
+        - Inter-region reading order prediction
+        - Relation type classification between regions
+    """
+
+    def __init__(
+        self,
+        # Input dimension from LayoutXLM
+        input_size: int = 768,
+        # Shared dimensions
+        hidden_size: int = 768,
+        proj_size: int = 2048,
+        mlp_hidden: int = 1024,
+        # DetectModule (4.2) params
+        detect_num_heads: int = 12,
+        detect_num_layers: int = 1,
+        detect_ffn_dim: int = 2048,
+        num_roles: int = 10,
+        # OrderModule (4.3) params
+        order_num_heads: int = 12,
+        order_num_layers: int = 3,
+        order_ffn_dim: int = 2048,
+        num_relations: int = 3,
+        # General params
+        dropout: float = 0.1,
+        use_spatial: bool = True,
+    ):
+        """
+        Args:
+            input_size: Feature dimension from LayoutXLM (768)
+            hidden_size: Transformer hidden dimension (768)
+            proj_size: FC projection size for biaffine (2048)
+            mlp_hidden: Spatial MLP hidden dimension (1024)
+            detect_num_heads: Heads for Detect Transformer (12)
+            detect_num_layers: Layers for Detect Transformer (1)
+            detect_ffn_dim: FFN dim for Detect Transformer (2048)
+            num_roles: Number of logical role categories
+            order_num_heads: Heads for Order Transformer (12)
+            order_num_layers: Layers for Order Transformer (3)
+            order_ffn_dim: FFN dim for Order Transformer (2048)
+            num_relations: Number of relation type categories
+            dropout: Dropout rate
+            use_spatial: Whether to use spatial features
+        """
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # 4.2: Detect Module
+        from .intra_region import DetectModule
+        self.detect = DetectModule(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            proj_size=proj_size,
+            num_heads=detect_num_heads,
+            num_layers=detect_num_layers,
+            ffn_dim=detect_ffn_dim,
+            mlp_hidden=mlp_hidden,
+            num_roles=num_roles,
+            dropout=dropout,
+            use_spatial=use_spatial,
+        )
+
+        # 4.3: Order Module
+        self.order = OrderModule(
+            hidden_size=hidden_size,
+            num_categories=num_roles,
+            num_heads=order_num_heads,
+            num_layers=order_num_layers,
+            ffn_dim=order_ffn_dim,
+            proj_size=proj_size,
+            mlp_hidden=mlp_hidden,
+            num_relations=num_relations,
+            dropout=dropout,
+            use_spatial=use_spatial,
+        )
+
+        # Order loss
+        self.order_loss_fn = OrderLoss()
+
+    def forward(
+        self,
+        line_features: torch.Tensor,  # [batch, num_lines, input_size]
+        line_bboxes: torch.Tensor,  # [batch, num_lines, 4]
+        line_mask: torch.Tensor = None,  # [batch, num_lines]
+        # 4.2 labels
+        successor_labels: torch.Tensor = None,  # [batch, num_lines]
+        role_labels: torch.Tensor = None,  # [batch, num_lines]
+        # 4.3 labels
+        region_order_labels: torch.Tensor = None,  # [batch, max_regions]
+        relation_labels: torch.Tensor = None,  # [batch, max_regions, max_regions]
+        # Loss weights
+        lambda_detect: float = 1.0,
+        lambda_order: float = 1.0,
+        lambda_relation: float = 0.5,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass through complete DOC pipeline.
+
+        Args:
+            line_features: [batch, num_lines, input_size] from LayoutXLM
+            line_bboxes: [batch, num_lines, 4] line bounding boxes
+            line_mask: [batch, num_lines] valid line mask
+            successor_labels: [batch, num_lines] GT successor indices for 4.2
+            role_labels: [batch, num_lines] GT role labels for 4.2
+            region_order_labels: [batch, max_regions] GT region order for 4.3
+            relation_labels: [batch, N, N] GT relation types for 4.3
+            lambda_detect: Weight for detect module loss
+            lambda_order: Weight for order prediction loss
+            lambda_relation: Weight for relation classification loss
+
+        Returns:
+            Dict containing outputs from both modules and combined loss
+        """
+        batch_size = line_features.size(0)
+        device = line_features.device
+        outputs = {}
+
+        # =====================================================================
+        # 4.2: Detect Module - Intra-region order + Logical role
+        # =====================================================================
+        detect_outputs = self.detect(
+            line_features=line_features,
+            line_bboxes=line_bboxes,
+            line_mask=line_mask,
+            successor_labels=successor_labels,
+            role_labels=role_labels,
+        )
+
+        outputs['detect_loss'] = detect_outputs['loss']
+        outputs['intra_loss'] = detect_outputs['intra_loss']
+        outputs['role_loss'] = detect_outputs['role_loss']
+        outputs['successor_logits'] = detect_outputs['successor_logits']
+        outputs['role_logits'] = detect_outputs['role_logits']
+        outputs['enhanced_features'] = detect_outputs['enhanced_features']
+
+        # Get region predictions from Detect module
+        detect_predictions = self.detect.predict(
+            line_features=line_features,
+            line_bboxes=line_bboxes,
+            line_mask=line_mask,
+        )
+
+        regions = detect_predictions['regions']  # List[List[List[int]]]
+        region_roles = detect_predictions['region_roles']  # List[List[int]]
+        outputs['regions'] = regions
+        outputs['region_roles'] = region_roles
+
+        # =====================================================================
+        # Compute region bounding boxes from line bboxes
+        # =====================================================================
+        max_regions = max(len(r) for r in regions) if regions else 1
+        region_bboxes = torch.zeros(batch_size, max_regions, 4, device=device)
+
+        for b in range(batch_size):
+            for r_idx, line_indices in enumerate(regions[b]):
+                if len(line_indices) == 0:
+                    continue
+                # Union of line bboxes
+                idx_tensor = torch.tensor(line_indices, device=device)
+                region_line_bboxes = line_bboxes[b, idx_tensor]
+                region_bboxes[b, r_idx, 0] = region_line_bboxes[:, 0].min()  # x1
+                region_bboxes[b, r_idx, 1] = region_line_bboxes[:, 1].min()  # y1
+                region_bboxes[b, r_idx, 2] = region_line_bboxes[:, 2].max()  # x2
+                region_bboxes[b, r_idx, 3] = region_line_bboxes[:, 3].max()  # y2
+
+        outputs['region_bboxes'] = region_bboxes
+
+        # =====================================================================
+        # 4.3: Order Module - Inter-region order + Relation type
+        # =====================================================================
+        order_outputs = self.order(
+            line_features=detect_outputs['enhanced_features'],
+            regions=regions,
+            region_roles=region_roles,
+            region_bboxes=region_bboxes,
+            line_mask=line_mask,
+        )
+
+        outputs['order_logits'] = order_outputs['order_logits']
+        outputs['relation_logits'] = order_outputs['relation_logits']
+        outputs['region_features'] = order_outputs['region_features']
+        outputs['object_mask'] = order_outputs['object_mask']
+
+        # =====================================================================
+        # Compute Order loss if labels provided
+        # =====================================================================
+        order_loss = torch.tensor(0.0, device=device)
+        relation_loss = torch.tensor(0.0, device=device)
+
+        if region_order_labels is not None:
+            order_loss_dict = self.order_loss_fn(
+                order_logits=order_outputs['order_logits'],
+                relation_logits=order_outputs['relation_logits'],
+                order_labels=region_order_labels,
+                relation_labels=relation_labels,
+                mask=order_outputs['object_mask'],
+            )
+            order_loss = order_loss_dict['order_loss']
+            relation_loss = order_loss_dict['relation_loss']
+
+        outputs['order_loss'] = order_loss
+        outputs['relation_loss'] = relation_loss
+
+        # =====================================================================
+        # Combined loss
+        # =====================================================================
+        total_loss = (
+            lambda_detect * detect_outputs['loss'] +
+            lambda_order * order_loss +
+            lambda_relation * relation_loss
+        )
+        outputs['loss'] = total_loss
+
+        return outputs
+
+    def predict(
+        self,
+        line_features: torch.Tensor,  # [batch, num_lines, input_size]
+        line_bboxes: torch.Tensor,  # [batch, num_lines, 4]
+        line_mask: torch.Tensor = None,
+    ) -> Dict[str, any]:
+        """Inference mode - full pipeline prediction.
+
+        Returns:
+            Dict with:
+                - regions: List of text regions (line groupings)
+                - region_roles: Logical role for each region
+                - line_roles: Role for each line
+                - reading_order: Global reading order indices
+                - relation_types: Predicted relation types between regions
+        """
+        with torch.no_grad():
+            outputs = self.forward(
+                line_features=line_features,
+                line_bboxes=line_bboxes,
+                line_mask=line_mask,
+            )
+
+        batch_size = line_features.size(0)
+
+        # Get reading order from order logits
+        reading_orders = predict_reading_order(
+            outputs['order_logits'],
+            outputs['object_mask'],
+        )
+
+        # Get relation predictions
+        relation_preds = outputs['relation_logits'].argmax(dim=-1)
+
+        return {
+            # From 4.2 Detect
+            'regions': outputs['regions'],
+            'region_roles': outputs['region_roles'],
+            'line_roles': outputs['role_logits'].argmax(dim=-1),
+            'successor_logits': outputs['successor_logits'],
+            # From 4.3 Order
+            'reading_order': reading_orders,
+            'relation_types': relation_preds,
+            'order_logits': outputs['order_logits'],
+            # Features
+            'region_features': outputs['region_features'],
+            'region_bboxes': outputs['region_bboxes'],
+        }
+
+
 def predict_reading_order(
     order_logits: torch.Tensor,  # [batch, N, N]
     mask: torch.Tensor = None,

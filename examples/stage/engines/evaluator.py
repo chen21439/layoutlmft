@@ -201,30 +201,25 @@ class Evaluator:
 
         # 打印调试信息
         if debug or verbose:
-            print(f"\n[Evaluator Debug] Parent statistics:")
-            print(f"  Total parent entries: {debug_parent_total}")
-            print(f"  Skipped (padding): {debug_parent_skipped_padding}")
-            print(f"  Skipped (invalid): {debug_parent_skipped_invalid}")
-            print(f"  Evaluated: {len(all_gt_parents)}")
+            print(f"\n[Evaluator Debug] Parent: evaluated={len(all_gt_parents)}, skipped_padding={debug_parent_skipped_padding}, skipped_invalid={debug_parent_skipped_invalid}")
 
-            if all_gt_parents:
-                # 统计 GT 分布
+            # Relation 统计
+            if all_gt_relations:
                 from collections import Counter
-                gt_counter = Counter(all_gt_parents)
-                pred_counter = Counter(all_pred_parents)
-                print(f"  GT parent distribution (top 5): {gt_counter.most_common(5)}")
-                print(f"  Pred parent distribution (top 5): {pred_counter.most_common(5)}")
-
-                # 计算 ROOT 预测比例
-                gt_root = sum(1 for p in all_gt_parents if p == -1)
-                pred_root = sum(1 for p in all_pred_parents if p == -1)
-                print(f"  GT ROOT count: {gt_root} ({100*gt_root/len(all_gt_parents):.1f}%)")
-                print(f"  Pred ROOT count: {pred_root} ({100*pred_root/len(all_pred_parents):.1f}%)")
-
-            if debug_first_samples:
-                print(f"\n[Evaluator Debug] First samples:")
-                for s in debug_first_samples:
-                    print(f"  {s}")
+                gt_rel_counter = Counter(all_gt_relations)
+                pred_rel_counter = Counter(all_pred_relations)
+                # 转换为英文名称
+                gt_rel_named = {ID2RELATION.get(k, f"rel_{k}"): v for k, v in gt_rel_counter.items()}
+                pred_rel_named = {ID2RELATION.get(k, f"rel_{k}"): v for k, v in pred_rel_counter.items()}
+                print(f"[Evaluator Debug] Relation: evaluated={len(all_gt_relations)}")
+                print(f"  GT:   {gt_rel_named}")
+                print(f"  Pred: {pred_rel_named}")
+                # 计算每类 Recall
+                for rel_id in sorted(gt_rel_counter.keys()):
+                    gt_count = gt_rel_counter[rel_id]
+                    correct = sum(1 for g, p in zip(all_gt_relations, all_pred_relations) if g == rel_id and p == rel_id)
+                    rel_name = ID2RELATION.get(rel_id, f"rel_{rel_id}")
+                    print(f"  {rel_name}: GT={gt_count}, Correct={correct}, Recall={100*correct/gt_count:.1f}%")
 
         # 计算指标
         output = self._compute_metrics(

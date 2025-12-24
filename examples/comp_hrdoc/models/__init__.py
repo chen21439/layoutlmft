@@ -20,10 +20,13 @@ from .embeddings import (
 from .order import (
     OrderModule,
     OrderTransformerEncoder,
-    ReadingOrderHead,
+    InterRegionOrderHead,
     RelationTypeHead,
     OrderLoss,
     predict_reading_order,
+    TextRegionAttentionFusion,
+    RegionFeatureBuilder,
+    DOCPipeline,
 )
 
 from .construct import (
@@ -58,6 +61,11 @@ from .intra_region import (
     UnionFind,
     predict_successors,
     group_lines_to_regions,
+    DetectModule,
+    FeatureProjection,
+    SpatialCompatibilityFeatures as IntraSpatialFeatures,
+    LogicalRoleHead,
+    LogicalRoleLoss,
 )
 
 __all__ = [
@@ -70,10 +78,13 @@ __all__ = [
     # Order Module
     'OrderModule',
     'OrderTransformerEncoder',
-    'ReadingOrderHead',
+    'InterRegionOrderHead',
     'RelationTypeHead',
     'OrderLoss',
     'predict_reading_order',
+    'TextRegionAttentionFusion',
+    'RegionFeatureBuilder',
+    'DOCPipeline',
     # Construct Module
     'ConstructModule',
     'RoPETransformerEncoder',
@@ -92,7 +103,7 @@ __all__ = [
     'build_order_only_model',
     'save_order_only_model',
     'load_order_only_model',
-    # Intra-region Module
+    # Intra-region Module (4.2)
     'IntraRegionHead',
     'IntraRegionLoss',
     'IntraRegionModule',
@@ -100,4 +111,9 @@ __all__ = [
     'UnionFind',
     'predict_successors',
     'group_lines_to_regions',
+    'DetectModule',
+    'FeatureProjection',
+    'IntraSpatialFeatures',
+    'LogicalRoleHead',
+    'LogicalRoleLoss',
 ]

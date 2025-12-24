@@ -156,8 +156,10 @@ class JointModelArguments:
     lambda_cls: float = field(default=1.0, metadata={"help": "Classification loss weight"})
     lambda_parent: float = field(default=1.0, metadata={"help": "Parent loss weight"})
     lambda_rel: float = field(default=1.0, metadata={"help": "Relation loss weight"})
-    stage1_micro_batch_size: int = field(default=16, metadata={"help": "Stage1 micro-batch size (can be larger when Stage1 is frozen)"})
+    stage1_micro_batch_size: int = field(default=1, metadata={"help": "Stage1 micro-batch size (can be larger when Stage1 is frozen)"})
     stage1_no_grad: bool = field(default=True, metadata={"help": "Freeze Stage1 (saves memory, only train Stage3/4)"})
+    gradient_checkpointing: bool = field(default=False, metadata={"help": "Enable gradient checkpointing for Stage1 (saves ~50-70% GPU memory, slower training)"})
+    freeze_visual: bool = field(default=False, metadata={"help": "Freeze visual encoder (ResNet) while training Transformer. Use with stage1_no_grad=False."})
 
 
 @dataclass
@@ -168,8 +170,8 @@ class JointDataArguments:
     covmatch: Optional[str] = field(default=None, metadata={"help": "Covmatch split name (e.g., doc_covmatch_dev50_seed42). If not specified, uses config default."})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
-    use_cache: bool = field(default=False, metadata={"help": "Use cached dataset (default: False, always rebuild)"})
-    document_level: bool = field(default=False, metadata={"help": "Use document-level batching (slow but preserves cross-page relations). Default: False (page-level, fast training)"})
+    use_cache: bool = field(default=True, metadata={"help": "Use cached dataset"})
+    document_level: bool = field(default=True, metadata={"help": "Use document-level batching (preserves cross-page relations)"})
 
 
 @dataclass
@@ -464,6 +466,8 @@ class E2EEvaluationCallback(TrainerCallback):
         self.data_collator = data_collator
         self.compute_teds = compute_teds
         self._evaluator = None
+        # 历史评估记录：[(step, line_f1, parent_acc, rel_f1), ...]
+        self.history = []
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         """在 Trainer.evaluate() 之后运行端到端评估"""
@@ -496,16 +500,52 @@ class E2EEvaluationCallback(TrainerCallback):
         rel_macro = output.relation_macro_f1 * 100
         num_lines = output.num_lines
 
-        logger.info("┌─────────────────────────────────────────────────────────┐")
-        logger.info(f"│  Stage1(Line) │ MacroF1: {line_macro:5.2f}% │ Acc: {line_acc:5.2f}%          │")
-        logger.info(f"│  Stage3(Par)  │ Accuracy: {parent_acc:5.2f}%                           │")
-        logger.info(f"│  Stage4(Rel)  │ MacroF1: {rel_macro:5.2f}% │ Acc: {rel_acc:5.2f}%          │")
-        logger.info(f"│  Lines: {num_lines:<6}                                          │")
-        logger.info("└─────────────────────────────────────────────────────────┘")
+        # 计算与历史平均值的对比
+        avg_n = min(3, len(self.history))
+        if avg_n > 0:
+            recent = self.history[-avg_n:]
+            avg_line = sum(h[1] for h in recent) / avg_n
+            avg_parent = sum(h[2] for h in recent) / avg_n
+            avg_rel = sum(h[3] for h in recent) / avg_n
 
-        # 一行摘要（方便快速对比）
-        summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
+            delta_line = line_macro - avg_line
+            delta_parent = parent_acc - avg_parent
+            delta_rel = rel_macro - avg_rel
+
+            # 格式化 delta（带符号）
+            def fmt_delta(d):
+                if d >= 0:
+                    return f"+{d:.1f}"
+                else:
+                    return f"{d:.1f}"
+
+            # 表格式输出（带对比）
+            logger.info("┌───────────────────────────────────────────────────────────┐")
+            logger.info(f"│  Metric       │ Current │ Avg({avg_n})  │ Delta  │")
+            logger.info("├───────────────────────────────────────────────────────────┤")
+            logger.info(f"│  Line(F1)     │  {line_macro:5.1f}%  │  {avg_line:5.1f}%  │ {fmt_delta(delta_line):>6} │")
+            logger.info(f"│  Parent(Acc)  │  {parent_acc:5.1f}%  │  {avg_parent:5.1f}%  │ {fmt_delta(delta_parent):>6} │")
+            logger.info(f"│  Rel(F1)      │  {rel_macro:5.1f}%  │  {avg_rel:5.1f}%  │ {fmt_delta(delta_rel):>6} │")
+            logger.info("└───────────────────────────────────────────────────────────┘")
+
+            # 一行摘要（带 delta）
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel)})"
+        else:
+            # 第一次评估，无历史对比
+            logger.info("┌───────────────────────────────────────────────────────────┐")
+            logger.info(f"│  Metric       │ Current │")
+            logger.info("├───────────────────────────────────────────────────────────┤")
+            logger.info(f"│  Line(F1)     │  {line_macro:5.1f}%  │")
+            logger.info(f"│  Parent(Acc)  │  {parent_acc:5.1f}%  │")
+            logger.info(f"│  Rel(F1)      │  {rel_macro:5.1f}%  │")
+            logger.info("└───────────────────────────────────────────────────────────┘")
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
+
+        logger.info(f"  Lines evaluated: {num_lines}")
         logger.info(summary)
+
+        # 保存到历史记录
+        self.history.append((global_step, line_macro, parent_acc, rel_macro))
 
     def _evaluate_e2e_legacy(self, model, device, global_step: int) -> Dict[str, float]:
         """运行端到端评估 - 调用共享的 hrdoc_eval.evaluate_e2e"""
@@ -790,6 +830,12 @@ def main():
         training_args.save_steps = 10
         training_args.logging_steps = 5
 
+    # Document-level 模式：调整 eval/save steps（文档级别训练较慢）
+    if data_args.document_level and not training_args.quick:
+        training_args.eval_steps = 25
+        training_args.save_steps = 25
+        training_args.logging_steps = 10
+
     # 设置随机种子
     set_seed(training_args.seed)
 
@@ -816,6 +862,12 @@ def main():
     logger.info(f"  learning_rate: {training_args.learning_rate} (Stage 1)")
     logger.info(f"  lr_stage34:    {training_args.learning_rate_stage34} (Stage 3/4)")
     logger.info(f"  fp16:          {training_args.fp16}")
+    logger.info(f"  eval_steps:    {training_args.eval_steps}")
+    logger.info(f"  save_steps:    {training_args.save_steps}")
+    logger.info(f"  logging_steps: {training_args.logging_steps}")
+    logger.info(f"  doc_level:     {data_args.document_level}")
+    logger.info(f"  stage1_no_grad:       {model_args.stage1_no_grad}")
+    logger.info(f"  gradient_checkpoint:  {model_args.gradient_checkpointing}")
     logger.info("=" * 60)
 
     if training_args.dry_run:
@@ -947,6 +999,12 @@ def main():
             config=stage1_config,
         )
 
+    # Enable Gradient Checkpointing for Stage1 (saves ~50-70% GPU memory)
+    if model_args.gradient_checkpointing:
+        # LayoutXLM/LayoutLMv2 使用 config.gradient_checkpointing 而不是方法
+        stage1_model.config.gradient_checkpointing = True
+        logger.info("Gradient Checkpointing ENABLED for Stage1 (memory saving mode)")
+
     # Stage 2: Feature Extractor
     feature_extractor = LineFeatureExtractor()
 
@@ -1000,9 +1058,10 @@ def main():
         use_focal_loss=model_args.use_focal_loss,
         use_gru=model_args.use_gru,
         stage1_micro_batch_size=model_args.stage1_micro_batch_size,
+        freeze_visual=model_args.freeze_visual,
         stage1_no_grad=model_args.stage1_no_grad,
     )
-    logger.info(f"Stage1 micro-batch size: {model_args.stage1_micro_batch_size}, no_grad: {model_args.stage1_no_grad}")
+    logger.info(f"Stage1: micro_batch={model_args.stage1_micro_batch_size}, no_grad={model_args.stage1_no_grad}, grad_ckpt={model_args.gradient_checkpointing}, freeze_visual={model_args.freeze_visual}")
 
     # 如果从 joint checkpoint 加载，加载完整权重
     if joint_model_path:

@@ -41,6 +41,7 @@ class JointModel(nn.Module):
         use_gru: bool = False,
         stage1_micro_batch_size: int = 8,  # Stage1 micro-batch 大小，防止显存爆炸
         stage1_no_grad: bool = False,  # 是否对 Stage1 使用 no_grad（节省显存但不反传）
+        freeze_visual: bool = False,  # 冻结视觉编码器（ResNet），只训练 Transformer
     ):
         super().__init__()
 
@@ -60,6 +61,9 @@ class JointModel(nn.Module):
         if stage1_no_grad:
             for param in self.stage1.parameters():
                 param.requires_grad = False
+        elif freeze_visual:
+            # 只冻结视觉编码器（ResNet），Transformer 仍然训练
+            self._freeze_visual_encoder()
 
         # 关系分类损失
         if use_focal_loss:
@@ -67,6 +71,24 @@ class JointModel(nn.Module):
             self.relation_criterion = FocalLoss(gamma=2.0)
         else:
             self.relation_criterion = nn.CrossEntropyLoss(ignore_index=-100)
+
+    def _freeze_visual_encoder(self):
+        """冻结视觉编码器（ResNet + visual_proj），只训练 Transformer"""
+        frozen_count = 0
+        # LayoutLMv2/LayoutXLM 的视觉编码器在 layoutlmv2.visual 和 layoutlmv2.visual_proj
+        if hasattr(self.stage1, 'layoutlmv2'):
+            layoutlmv2 = self.stage1.layoutlmv2
+            # 冻结 ResNet backbone
+            if hasattr(layoutlmv2, 'visual'):
+                for param in layoutlmv2.visual.parameters():
+                    param.requires_grad = False
+                    frozen_count += param.numel()
+            # 冻结 visual projection
+            if hasattr(layoutlmv2, 'visual_proj'):
+                for param in layoutlmv2.visual_proj.parameters():
+                    param.requires_grad = False
+                    frozen_count += param.numel()
+        print(f"[JointModel] Frozen visual encoder: {frozen_count:,} parameters")
 
     def forward(
         self,

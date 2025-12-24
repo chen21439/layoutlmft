@@ -435,21 +435,20 @@ class LayoutLMv2Encoder(nn.Module):
                     )
                     use_cache = False
 
-                def create_custom_forward(module):
+                # 通过闭包捕获关键字参数，兼容旧版 PyTorch checkpoint
+                def create_custom_forward(module, _rel_pos, _rel_2d_pos):
                     def custom_forward(*inputs):
-                        return module(*inputs, past_key_value, output_attentions)
+                        return module(*inputs, past_key_value, output_attentions, rel_pos=_rel_pos, rel_2d_pos=_rel_2d_pos)
 
                     return custom_forward
 
                 layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(layer_module),
+                    create_custom_forward(layer_module, rel_pos, rel_2d_pos),
                     hidden_states,
                     attention_mask,
                     layer_head_mask,
                     encoder_hidden_states,
                     encoder_attention_mask,
-                    rel_pos=rel_pos,
-                    rel_2d_pos=rel_2d_pos,
                 )
             else:
                 layer_outputs = layer_module(

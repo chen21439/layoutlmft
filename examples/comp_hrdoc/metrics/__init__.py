@@ -16,6 +16,7 @@ from .teds import (
     transfer_tree_to_chain,
     split_chain_by_tag,
     min_edit_distance_between_groups,
+    HAS_APTED,
 )
 
 from .classification import (
@@ -54,6 +55,7 @@ __all__ = [
     'transfer_tree_to_chain',
     'split_chain_by_tag',
     'min_edit_distance_between_groups',
+    'HAS_APTED',
     # Classification
     'ClassificationMetric',
     'ClassificationResult',

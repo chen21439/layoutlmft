@@ -227,6 +227,48 @@ def train_epoch(
     }
 
 
+def compute_kendall_tau(pred_order: torch.Tensor, gt_order: torch.Tensor, mask: torch.Tensor) -> float:
+    """计算 Kendall Tau 相关性
+
+    Args:
+        pred_order: [N] 预测的顺序索引
+        gt_order: [N] 真实的顺序索引
+        mask: [N] 有效位置掩码
+
+    Returns:
+        Kendall Tau 相关系数 [-1, 1]
+    """
+    # 只考虑有效位置
+    valid_indices = mask.nonzero().squeeze(-1)
+    if len(valid_indices) < 2:
+        return 1.0  # 无法计算，返回完美相关
+
+    pred_valid = pred_order[valid_indices].cpu().numpy()
+    gt_valid = gt_order[valid_indices].cpu().numpy()
+
+    # 计算一致对和不一致对
+    n = len(pred_valid)
+    concordant = 0
+    discordant = 0
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            pred_diff = pred_valid[i] - pred_valid[j]
+            gt_diff = gt_valid[i] - gt_valid[j]
+
+            if pred_diff * gt_diff > 0:
+                concordant += 1
+            elif pred_diff * gt_diff < 0:
+                discordant += 1
+            # ties 不计入
+
+    total_pairs = concordant + discordant
+    if total_pairs == 0:
+        return 1.0
+
+    return (concordant - discordant) / total_pairs
+
+
 def evaluate(model: OrderOnlyModel, dataloader, device) -> Dict[str, float]:
     """评估模型"""
     model.eval()
@@ -235,6 +277,11 @@ def evaluate(model: OrderOnlyModel, dataloader, device) -> Dict[str, float]:
     total_order_loss = 0.0
     total_order_correct = 0
     total_order_pairs = 0
+
+    # 额外指标
+    total_kendall_tau = 0.0
+    total_samples = 0
+    perfect_order_count = 0  # 完全正确的样本数
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Evaluating"):
@@ -256,9 +303,8 @@ def evaluate(model: OrderOnlyModel, dataloader, device) -> Dict[str, float]:
             total_loss += outputs["loss"].item()
             total_order_loss += outputs["order_loss"].item()
 
-            # 计算阅读顺序准确率
+            # 计算阅读顺序准确率 (pairwise)
             order_logits = outputs["order_logits"]
-            # 预测：logits > 0 表示 i 在 j 之前
             predictions = (order_logits > 0).float()
 
             # Ground truth
@@ -276,6 +322,40 @@ def evaluate(model: OrderOnlyModel, dataloader, device) -> Dict[str, float]:
             total_order_correct += correct
             total_order_pairs += valid_mask.sum().item()
 
+            # 计算额外指标（逐样本）
+            batch_size = bboxes.shape[0]
+            for b in range(batch_size):
+                sample_mask = region_mask[b]
+                sample_logits = order_logits[b]
+                sample_gt = reading_orders[b]
+
+                # 预测顺序：基于 pairwise 得分
+                # 每个区域的得分 = 它比多少其他区域靠前
+                scores = (sample_logits > 0).float().sum(dim=1)  # [N]
+                _, pred_order_indices = scores.sort(descending=True)
+
+                # 创建预测的顺序（0=第一个，1=第二个，...）
+                pred_order = torch.zeros_like(scores, dtype=torch.long)
+                for rank, idx in enumerate(pred_order_indices):
+                    pred_order[idx] = rank
+
+                # Kendall Tau
+                tau = compute_kendall_tau(pred_order, sample_gt, sample_mask)
+                total_kendall_tau += tau
+                total_samples += 1
+
+                # 检查是否完全正确
+                valid_pred = pred_order[sample_mask]
+                valid_gt = sample_gt[sample_mask]
+                # 将 GT 转换为排名格式
+                _, gt_sorted_indices = valid_gt.sort()
+                gt_ranks = torch.zeros_like(valid_gt)
+                for rank, idx in enumerate(gt_sorted_indices):
+                    gt_ranks[idx] = rank
+
+                if torch.equal(valid_pred, gt_ranks):
+                    perfect_order_count += 1
+
     num_batches = len(dataloader)
     metrics = {
         "loss": total_loss / num_batches,
@@ -284,7 +364,13 @@ def evaluate(model: OrderOnlyModel, dataloader, device) -> Dict[str, float]:
     }
 
     if total_order_pairs > 0:
-        metrics["order_accuracy"] = total_order_correct / total_order_pairs
+        metrics["pairwise_accuracy"] = total_order_correct / total_order_pairs
+        # 保留旧名称以兼容
+        metrics["order_accuracy"] = metrics["pairwise_accuracy"]
+
+    if total_samples > 0:
+        metrics["kendall_tau"] = total_kendall_tau / total_samples
+        metrics["perfect_order_rate"] = perfect_order_count / total_samples
 
     return metrics
 
@@ -426,8 +512,12 @@ def main():
             f"CLS: {val_metrics['cls_loss']:.4f}, "
             f"Order: {val_metrics['order_loss']:.4f}"
         )
-        if "order_accuracy" in val_metrics:
-            logger.info(f"Val - Order Accuracy: {val_metrics['order_accuracy']:.4f}")
+        if "pairwise_accuracy" in val_metrics:
+            logger.info(
+                f"Val - Pairwise Acc: {val_metrics['pairwise_accuracy']:.4f}, "
+                f"Kendall Tau: {val_metrics.get('kendall_tau', 0):.4f}, "
+                f"Perfect Rate: {val_metrics.get('perfect_order_rate', 0):.4f}"
+            )
 
         # 保存最佳模型
         if val_metrics["loss"] < best_val_loss:
