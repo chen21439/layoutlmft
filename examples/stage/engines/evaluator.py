@@ -99,6 +99,7 @@ class Evaluator:
         dataloader,
         compute_teds: bool = False,
         verbose: bool = True,
+        debug: bool = False,
     ) -> EvaluationOutput:
         """
         评估整个数据集
@@ -107,6 +108,7 @@ class Evaluator:
             dataloader: DataLoader，返回 raw batch dict
             compute_teds: 是否计算 TEDS（较慢）
             verbose: 是否显示进度条
+            debug: 是否打印调试信息
 
         Returns:
             EvaluationOutput: 评估结果
@@ -122,6 +124,12 @@ class Evaluator:
         all_pred_relations = []
 
         num_samples = 0
+
+        # 调试统计
+        debug_parent_skipped_padding = 0
+        debug_parent_skipped_invalid = 0
+        debug_parent_total = 0
+        debug_first_samples = []
 
         iterator = tqdm(dataloader, desc="Evaluating") if verbose else dataloader
 
@@ -147,20 +155,76 @@ class Evaluator:
                         all_pred_classes.append(pred_class)
 
                     # 收集 Parent 结果
+                    # 注意：gt_parent = -1 表示 ROOT，也是有效目标
+                    # gt_parent = -100 表示 padding，应该跳过
                     for idx, (gt_parent, pred_parent) in enumerate(zip(
                         gt["parents"], pred.line_parents
                     )):
-                        if gt_parent >= 0:  # 只评估有效的 parent
-                            all_gt_parents.append(gt_parent)
-                            all_pred_parents.append(pred_parent)
+                        debug_parent_total += 1
+                        if gt_parent == -100:
+                            debug_parent_skipped_padding += 1
+                            continue
+                        if idx >= len(pred.line_parents):
+                            continue
+                        # 训练时跳过 gt_parent >= child_idx 的情况
+                        # 这里 idx 就是 child_idx
+                        if gt_parent >= idx:
+                            debug_parent_skipped_invalid += 1
+                            continue
+                        all_gt_parents.append(gt_parent)
+                        all_pred_parents.append(pred_parent)
+
+                        # 调试：收集前几个样本的详情
+                        if debug and len(debug_first_samples) < 5 and num_samples <= 2:
+                            debug_first_samples.append({
+                                "sample": num_samples,
+                                "child_idx": idx,
+                                "gt_parent": gt_parent,
+                                "pred_parent": pred_parent,
+                                "num_lines_gt": len(gt["parents"]),
+                                "num_lines_pred": len(pred.line_parents),
+                            })
 
                     # 收集 Relation 结果
+                    # 注意：relation 只在 parent >= 0 且 parent < child_idx 时有效
                     for idx, (gt_rel, gt_parent, pred_rel) in enumerate(zip(
                         gt["relations"], gt["parents"], pred.line_relations
                     )):
-                        if gt_parent >= 0 and gt_rel >= 0:  # 只评估有效的 relation
-                            all_gt_relations.append(gt_rel)
-                            all_pred_relations.append(pred_rel)
+                        if gt_parent == -100 or gt_rel == -100:
+                            continue
+                        if idx >= len(pred.line_relations):
+                            continue
+                        if gt_parent < 0 or gt_parent >= idx:
+                            continue
+                        all_gt_relations.append(gt_rel)
+                        all_pred_relations.append(pred_rel)
+
+        # 打印调试信息
+        if debug or verbose:
+            print(f"\n[Evaluator Debug] Parent statistics:")
+            print(f"  Total parent entries: {debug_parent_total}")
+            print(f"  Skipped (padding): {debug_parent_skipped_padding}")
+            print(f"  Skipped (invalid): {debug_parent_skipped_invalid}")
+            print(f"  Evaluated: {len(all_gt_parents)}")
+
+            if all_gt_parents:
+                # 统计 GT 分布
+                from collections import Counter
+                gt_counter = Counter(all_gt_parents)
+                pred_counter = Counter(all_pred_parents)
+                print(f"  GT parent distribution (top 5): {gt_counter.most_common(5)}")
+                print(f"  Pred parent distribution (top 5): {pred_counter.most_common(5)}")
+
+                # 计算 ROOT 预测比例
+                gt_root = sum(1 for p in all_gt_parents if p == -1)
+                pred_root = sum(1 for p in all_pred_parents if p == -1)
+                print(f"  GT ROOT count: {gt_root} ({100*gt_root/len(all_gt_parents):.1f}%)")
+                print(f"  Pred ROOT count: {pred_root} ({100*pred_root/len(all_pred_parents):.1f}%)")
+
+            if debug_first_samples:
+                print(f"\n[Evaluator Debug] First samples:")
+                for s in debug_first_samples:
+                    print(f"  {s}")
 
         # 计算指标
         output = self._compute_metrics(

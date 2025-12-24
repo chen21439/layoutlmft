@@ -159,13 +159,18 @@ class Predictor:
             return PredictionOutput()
 
         # ==================== Stage 2: Feature Extraction ====================
-        # 聚合所有 chunks 的 hidden states
-        all_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])  # [total_tokens, H]
-        all_line_ids_flat = line_ids.reshape(-1)  # [total_tokens]
+        # 注意：hidden_states 包含视觉 tokens (7x7=49)，需要截取文本部分
+        # 与 JointModel.forward() 中的处理保持一致
+        seq_len = input_ids.shape[1]  # 文本序列长度 (512)
+        text_hidden = hidden_states[:, :seq_len, :]  # [num_chunks, seq_len, H]
+
+        # 展平后提取行特征
+        all_hidden = text_hidden.reshape(-1, text_hidden.shape[-1])  # [total_text_tokens, H]
+        all_line_ids_flat = line_ids.reshape(-1)  # [total_text_tokens]
 
         line_features, line_mask = self.model.feature_extractor.extract_line_features(
-            all_hidden.unsqueeze(0),  # [1, total_tokens, H]
-            all_line_ids_flat.unsqueeze(0),  # [1, total_tokens]
+            all_hidden.unsqueeze(0),  # [1, total_text_tokens, H]
+            all_line_ids_flat.unsqueeze(0),  # [1, total_text_tokens]
             pooling="mean"
         )
 

@@ -31,11 +31,12 @@ class LineFeatureAggregator(nn.Module):
         self.aggregation = aggregation
 
         if aggregation == "attention":
-            # 注意力聚合
+            # 注意力聚合 (论文公式10: α = FC1(tanh(FC2(F))))
+            # FC2: hidden_size -> 1024, FC1: 1024 -> 1
             self.attention = nn.Sequential(
-                nn.Linear(hidden_size, hidden_size // 4),
+                nn.Linear(hidden_size, 1024),  # FC2: 1024 nodes (per paper)
                 nn.Tanh(),
-                nn.Linear(hidden_size // 4, 1),
+                nn.Linear(1024, 1),  # FC1: 1 node (per paper)
             )
 
     def forward(

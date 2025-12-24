@@ -65,3 +65,8 @@ training:
 # 输出配置
 output:
   output_dir: "outputs/order_comp_hrdoc"
+
+# Artifact 路径（实验管理）
+artifact:
+  dev: "/mnt/e/models/data/layoutlmft/artifact"
+  test: "/data/LLM_group/layoutlmft/artifact"

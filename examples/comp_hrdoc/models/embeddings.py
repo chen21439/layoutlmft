@@ -88,6 +88,7 @@ class RegionTypeEmbedding(nn.Module):
     """Region Type Embedding
 
     Learned embedding from logical role category.
+    Based on paper Eq. (13): R = LN(ReLU(FC(Embedding(r))))
     """
 
     def __init__(
@@ -96,7 +97,11 @@ class RegionTypeEmbedding(nn.Module):
         hidden_size: int = 1024,
     ):
         super().__init__()
+        # Embedding layer with 1024 hidden dimension (per paper)
         self.embedding = nn.Embedding(num_categories, hidden_size, padding_idx=0)
+        # FC + ReLU + LayerNorm (per paper Eq. 13)
+        self.fc = nn.Linear(hidden_size, hidden_size)
+        self.layer_norm = nn.LayerNorm(hidden_size)
 
     def forward(self, categories: torch.Tensor) -> torch.Tensor:
         """
@@ -107,7 +112,12 @@ class RegionTypeEmbedding(nn.Module):
             [batch, num_regions, hidden_size] category embeddings
         """
         categories = categories.clamp(0, self.embedding.num_embeddings - 1)
-        return self.embedding(categories)
+        # Eq. (13): R = LN(ReLU(FC(Embedding(r))))
+        emb = self.embedding(categories)
+        emb = self.fc(emb)
+        emb = F.relu(emb)
+        emb = self.layer_norm(emb)
+        return emb
 
 
 class SpatialCompatibilityFeatures(nn.Module):

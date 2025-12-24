@@ -28,7 +28,7 @@ class OrderHead(nn.Module):
     def __init__(
         self,
         hidden_size: int = 768,
-        num_heads: int = 8,
+        num_heads: int = 12,  # 12 heads per paper
         num_layers: int = 3,
         dropout: float = 0.1,
         use_biaffine: bool = True,
@@ -36,7 +36,7 @@ class OrderHead(nn.Module):
         """
         Args:
             hidden_size: 输入特征维度
-            num_heads: Transformer 注意力头数
+            num_heads: Transformer 注意力头数 (论文使用12)
             num_layers: Transformer 层数
             dropout: Dropout 比例
             use_biaffine: 是否使用双仿射变换计算关系分数

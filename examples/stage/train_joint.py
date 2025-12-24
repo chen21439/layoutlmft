@@ -180,6 +180,9 @@ class JointTrainingArguments(TrainingArguments):
     # 覆盖 output_dir 添加默认值
     output_dir: str = field(default="./output/joint", metadata={"help": "Output directory"})
 
+    # 禁用 TensorBoard（Python 3.12 移除了 distutils，TensorBoard 初始化会报错）
+    report_to: str = field(default="none", metadata={"help": "Disable TensorBoard to avoid distutils.version issue in Python 3.12+"})
+
     # 评估设置（覆盖默认值）
     evaluation_strategy: str = field(default="steps", metadata={"help": "Evaluation strategy"})
     eval_steps: int = field(default=500, metadata={"help": "Evaluation steps"})

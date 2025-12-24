@@ -1,27 +1,264 @@
-"""Order Module for DOC Model
+"""Order Module for DOC Model (Section 4.3)
 
 Based on "Detect-Order-Construct" paper.
 Implements inter-region reading order prediction.
+
+Key components:
+- 4.3.1: Multi-modal Feature Extraction (Attention Fusion for text regions)
+- 4.3.2: Multi-modal Feature Enhancement (3-layer Transformer)
+- 4.3.3: Inter-region Reading Order Prediction Head
+- 4.3.4: Relation Type Classification Head
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 from .embeddings import (
-    MultiModalEmbedding,
-    SpatialCompatibilityFeatures,
     PositionalEmbedding2D,
     RegionTypeEmbedding,
 )
+from .intra_region import SpatialCompatibilityFeatures
 
+
+# =============================================================================
+# 4.3.1: Text Region Attention Fusion (Eq. 10-12)
+# =============================================================================
+
+class TextRegionAttentionFusion(nn.Module):
+    """Attention-based fusion of text line features into region features.
+
+    Based on paper Eq. (10), (11), (12):
+        α_j = FC1(tanh(FC2(F_t_j)))           # Eq. 10
+        w_j = softmax(α_j)                     # Eq. 11
+        U_region = Σ w_j * F_t_j              # Eq. 12
+
+    where:
+        - FC1: 1 node (outputs attention score)
+        - FC2: 1024 nodes (projects features)
+        - F_t_j: text line features from Detect module
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        attention_hidden: int = 1024,  # FC2 has 1024 nodes per paper
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # FC2: hidden_size -> 1024 (per paper)
+        self.fc2 = nn.Linear(hidden_size, attention_hidden)
+        # FC1: 1024 -> 1 (per paper)
+        self.fc1 = nn.Linear(attention_hidden, 1)
+
+    def forward(
+        self,
+        line_features: torch.Tensor,  # [batch, num_lines, hidden_size]
+        regions: List[List[List[int]]],  # [batch][num_regions][line_indices]
+        line_mask: torch.Tensor = None,  # [batch, num_lines]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fuse text line features into region features using attention.
+
+        Args:
+            line_features: [batch, num_lines, hidden_size] from Detect module
+            regions: List of regions per batch, each region is a list of line indices
+            line_mask: [batch, num_lines] valid line mask
+
+        Returns:
+            region_features: [batch, max_regions, hidden_size]
+            region_mask: [batch, max_regions] valid region mask
+        """
+        batch_size = line_features.size(0)
+        device = line_features.device
+
+        # Find max number of regions across batch
+        max_regions = max(len(r) for r in regions) if regions else 1
+
+        # Initialize output tensors
+        region_features = torch.zeros(
+            batch_size, max_regions, self.hidden_size, device=device
+        )
+        region_mask = torch.zeros(
+            batch_size, max_regions, dtype=torch.bool, device=device
+        )
+
+        # Process each batch
+        for b in range(batch_size):
+            batch_regions = regions[b]
+
+            for r_idx, line_indices in enumerate(batch_regions):
+                if len(line_indices) == 0:
+                    continue
+
+                # Get line features for this region
+                line_idx_tensor = torch.tensor(line_indices, device=device, dtype=torch.long)
+                region_line_features = line_features[b, line_idx_tensor]  # [num_lines_in_region, H]
+
+                # Check line mask if provided
+                if line_mask is not None:
+                    valid_lines = line_mask[b, line_idx_tensor]
+                    if not valid_lines.any():
+                        continue
+                    # Only use valid lines
+                    region_line_features = region_line_features[valid_lines]
+
+                if region_line_features.size(0) == 0:
+                    continue
+
+                # Compute attention scores (Eq. 10)
+                # α = FC1(tanh(FC2(F_t)))
+                projected = self.fc2(region_line_features)  # [num_lines, 1024]
+                alpha = self.fc1(torch.tanh(projected))  # [num_lines, 1]
+
+                # Compute attention weights (Eq. 11)
+                weights = F.softmax(alpha, dim=0)  # [num_lines, 1]
+
+                # Weighted sum (Eq. 12)
+                fused = (region_line_features * weights).sum(dim=0)  # [H]
+
+                region_features[b, r_idx] = fused
+                region_mask[b, r_idx] = True
+
+        return region_features, region_mask
+
+
+class RegionFeatureBuilder(nn.Module):
+    """Build final region representations by combining multi-modal features.
+
+    Based on paper Eq. (13) and (14):
+        R = LN(ReLU(FC(Embedding(r))))        # Eq. 13 (region type embedding)
+        U_hat = FC(concat(U, R))              # Eq. 14 (final representation)
+
+    For text regions: U comes from attention fusion (Eq. 12)
+    For graphical objects: U comes from visual + positional features
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        num_categories: int = 10,  # Number of logical role categories
+        attention_hidden: int = 1024,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # Attention fusion for text regions (Eq. 10-12)
+        self.attention_fusion = TextRegionAttentionFusion(
+            hidden_size=hidden_size,
+            attention_hidden=attention_hidden,
+        )
+
+        # Region type embedding (Eq. 13)
+        self.type_embedding = RegionTypeEmbedding(
+            num_categories=num_categories,
+            hidden_size=hidden_size,
+        )
+
+        # 2D positional embedding for graphical objects
+        self.pos_embedding = PositionalEmbedding2D(
+            hidden_size=hidden_size,
+            use_learned=True,
+        )
+
+        # Final combination (Eq. 14): FC(concat(U, R))
+        self.combine = nn.Linear(hidden_size * 2, hidden_size)
+
+    def forward(
+        self,
+        line_features: torch.Tensor,  # [batch, num_lines, hidden_size] from Detect
+        regions: List[List[List[int]]],  # [batch][num_regions][line_indices]
+        region_roles: List[List[int]],  # [batch][num_regions] logical roles
+        region_bboxes: torch.Tensor,  # [batch, max_regions, 4]
+        line_mask: torch.Tensor = None,
+        graphical_features: torch.Tensor = None,  # [batch, num_graphical, hidden_size]
+        graphical_bboxes: torch.Tensor = None,  # [batch, num_graphical, 4]
+        graphical_roles: torch.Tensor = None,  # [batch, num_graphical]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build region features from text line features and graphical objects.
+
+        Args:
+            line_features: [batch, num_lines, hidden_size] from Detect module
+            regions: Text region groupings from Detect module
+            region_roles: Logical roles for each text region
+            region_bboxes: [batch, max_regions, 4] bounding boxes
+            line_mask: [batch, num_lines] valid line mask
+            graphical_features: Optional graphical object features
+            graphical_bboxes: Optional graphical object bounding boxes
+            graphical_roles: Optional graphical object roles
+
+        Returns:
+            all_features: [batch, num_objects, hidden_size] all page object features
+            all_bboxes: [batch, num_objects, 4] all bounding boxes
+            all_mask: [batch, num_objects] valid mask
+        """
+        batch_size = line_features.size(0)
+        device = line_features.device
+
+        # 1. Fuse text line features into region features (Eq. 10-12)
+        text_region_features, text_region_mask = self.attention_fusion(
+            line_features, regions, line_mask
+        )
+        num_text_regions = text_region_features.size(1)
+
+        # 2. Get region type embeddings (Eq. 13)
+        # Convert region_roles list to tensor
+        max_regions = num_text_regions
+        role_tensor = torch.zeros(batch_size, max_regions, dtype=torch.long, device=device)
+        for b in range(batch_size):
+            for r_idx, role in enumerate(region_roles[b]):
+                if r_idx < max_regions:
+                    role_tensor[b, r_idx] = role
+
+        type_emb = self.type_embedding(role_tensor)  # [B, num_regions, H]
+
+        # 3. Combine features (Eq. 14): U_hat = FC(concat(U, R))
+        combined = torch.cat([text_region_features, type_emb], dim=-1)  # [B, N, 2H]
+        text_region_features = self.combine(combined)  # [B, N, H]
+
+        # 4. Handle graphical objects if provided
+        if graphical_features is not None and graphical_bboxes is not None:
+            num_graphical = graphical_features.size(1)
+
+            # Get positional embedding for graphical objects
+            pos_emb = self.pos_embedding(graphical_bboxes)
+
+            # Get type embedding for graphical objects
+            if graphical_roles is not None:
+                graph_type_emb = self.type_embedding(graphical_roles)
+            else:
+                graph_type_emb = torch.zeros_like(graphical_features)
+
+            # Combine graphical features
+            graph_combined = torch.cat([graphical_features + pos_emb, graph_type_emb], dim=-1)
+            graphical_features = self.combine(graph_combined)
+
+            # Concatenate text regions and graphical objects
+            all_features = torch.cat([text_region_features, graphical_features], dim=1)
+            all_bboxes = torch.cat([region_bboxes[:, :num_text_regions], graphical_bboxes], dim=1)
+
+            graphical_mask = torch.ones(batch_size, num_graphical, dtype=torch.bool, device=device)
+            all_mask = torch.cat([text_region_mask, graphical_mask], dim=1)
+        else:
+            all_features = text_region_features
+            all_bboxes = region_bboxes[:, :num_text_regions]
+            all_mask = text_region_mask
+
+        return all_features, all_bboxes, all_mask
+
+
+# =============================================================================
+# 4.3.2: Transformer Encoder (3-layer)
+# =============================================================================
 
 class OrderTransformerEncoder(nn.Module):
-    """3-layer Transformer Encoder for Order Module
+    """3-layer Transformer Encoder for Order Module.
+
+    Based on paper Section 4.3.2:
+    "we utilize a three-layer Transformer encoder"
 
     Enhances page object representations via self-attention.
-    Architecture: 3 layers, 12 heads, 768 hidden dim (per paper)
     """
 
     def __init__(
@@ -29,13 +266,10 @@ class OrderTransformerEncoder(nn.Module):
         hidden_size: int = 768,
         num_heads: int = 12,
         num_layers: int = 3,
+        ffn_dim: int = 2048,
         dropout: float = 0.1,
-        ffn_dim: int = None,
     ):
         super().__init__()
-
-        if ffn_dim is None:
-            ffn_dim = hidden_size * 4
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_size,
@@ -44,7 +278,7 @@ class OrderTransformerEncoder(nn.Module):
             dropout=dropout,
             activation='gelu',
             batch_first=True,
-            norm_first=True,  # Pre-norm for stability
+            norm_first=True,
         )
 
         self.encoder = nn.TransformerEncoder(
@@ -66,27 +300,31 @@ class OrderTransformerEncoder(nn.Module):
             [batch, num_regions, hidden_size] enhanced features
         """
         if mask is not None:
-            # TransformerEncoder expects True = ignore
-            src_key_padding_mask = ~mask
+            src_key_padding_mask = ~mask  # True = ignore
         else:
             src_key_padding_mask = None
 
         return self.encoder(features, src_key_padding_mask=src_key_padding_mask)
 
 
-class ReadingOrderHead(nn.Module):
-    """Inter-region Reading Order Prediction Head
+# =============================================================================
+# 4.3.3: Inter-region Reading Order Prediction Head
+# =============================================================================
 
-    Predicts succeeding page objects using dependency parsing style.
-    Combines:
-    - Dot product of query/key projections
-    - MLP of spatial compatibility features
+class InterRegionOrderHead(nn.Module):
+    """Inter-region Reading Order Prediction Head.
+
+    Based on paper Section 4.3.3, similar to 4.2.3 but for regions:
+    s(i,j) = FC_q(F_i) · FC_k(F_j) + MLP(g_ij)
+
+    FC_q, FC_k have 2048 nodes each.
     """
 
     def __init__(
         self,
         hidden_size: int = 768,
-        spatial_dim: int = 128,
+        proj_size: int = 2048,
+        mlp_hidden: int = 1024,
         dropout: float = 0.1,
         use_spatial: bool = True,
     ):
@@ -94,93 +332,92 @@ class ReadingOrderHead(nn.Module):
         self.hidden_size = hidden_size
         self.use_spatial = use_spatial
 
-        # Query/Key projections for attention-style scoring
-        self.query_proj = nn.Linear(hidden_size, hidden_size)
-        self.key_proj = nn.Linear(hidden_size, hidden_size)
+        # FC_q and FC_k: 2048 nodes each
+        self.head_proj = nn.Linear(hidden_size, proj_size)
+        self.dep_proj = nn.Linear(hidden_size, proj_size)
 
-        # Biaffine transformation for pairwise scoring
-        self.biaffine_weight = nn.Parameter(torch.zeros(hidden_size, hidden_size))
-        nn.init.xavier_uniform_(self.biaffine_weight)
-        self.biaffine_bias = nn.Parameter(torch.zeros(1))
+        # Biaffine weight matrix
+        self.biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
+        nn.init.xavier_uniform_(self.biaffine)
 
-        # Spatial compatibility MLP
+        # Spatial compatibility features
         if use_spatial:
-            self.spatial_features = SpatialCompatibilityFeatures(spatial_dim)
-            self.spatial_score = nn.Linear(spatial_dim, 1)
+            self.spatial_features = SpatialCompatibilityFeatures(mlp_hidden_size=mlp_hidden)
 
+        self.scale = proj_size ** -0.5
         self.dropout = nn.Dropout(dropout)
-        self.scale = hidden_size ** -0.5
 
     def forward(
         self,
-        features: torch.Tensor,      # [batch, num_regions, hidden_size]
-        bbox: torch.Tensor = None,   # [batch, num_regions, 4]
-        mask: torch.Tensor = None,   # [batch, num_regions]
+        features: torch.Tensor,  # [batch, num_regions, hidden_size]
+        bbox: torch.Tensor = None,  # [batch, num_regions, 4]
+        mask: torch.Tensor = None,  # [batch, num_regions]
     ) -> torch.Tensor:
         """
-        Args:
-            features: [batch, num_regions, hidden_size] enhanced region features
-            bbox: [batch, num_regions, 4] bounding boxes for spatial features
-            mask: [batch, num_regions] valid region mask
-
         Returns:
             [batch, num_regions, num_regions] order logits
-            order_logits[i,j] > 0 means region i comes before region j
         """
         batch_size, num_regions, _ = features.shape
+        device = features.device
 
-        # Query/Key projections
-        query = self.query_proj(features)  # [B, N, H]
-        key = self.key_proj(features)      # [B, N, H]
+        # FC_q and FC_k projections
+        head_repr = self.dropout(self.head_proj(features))  # [B, N, 2048]
+        dep_repr = self.dropout(self.dep_proj(features))    # [B, N, 2048]
 
-        # Biaffine scoring: query @ W @ key^T
-        # [B, N, H] @ [H, H] @ [B, H, N] -> [B, N, N]
-        scores = torch.einsum('bih,hd,bjd->bij', query, self.biaffine_weight, key)
-        scores = scores * self.scale + self.biaffine_bias
+        # Biaffine scoring
+        scores = torch.einsum('bih,hd,bjd->bij', head_repr, self.biaffine, dep_repr)
+        scores = scores * self.scale
 
-        # Add spatial compatibility scores
+        # Add spatial scores
         if self.use_spatial and bbox is not None:
-            spatial_feat = self.spatial_features(bbox, bbox)  # [B, N, N, spatial_dim]
-            spatial_score = self.spatial_score(spatial_feat).squeeze(-1)  # [B, N, N]
-            scores = scores + spatial_score
+            spatial_scores = self.spatial_features(bbox)
+            scores = scores + spatial_scores
 
         # Apply mask
         if mask is not None:
-            # Mask invalid positions
-            row_mask = ~mask.unsqueeze(2)  # [B, N, 1]
-            col_mask = ~mask.unsqueeze(1)  # [B, 1, N]
+            row_mask = ~mask.unsqueeze(2)
+            col_mask = ~mask.unsqueeze(1)
             combined_mask = row_mask | col_mask
-            scores = scores.masked_fill(combined_mask, float('-inf'))
+            scores = scores.masked_fill(combined_mask, -1e9)
 
-            # Mask diagonal (self-loops)
-            diag_mask = torch.eye(num_regions, dtype=torch.bool, device=features.device)
-            scores = scores.masked_fill(diag_mask.unsqueeze(0), float('-inf'))
+        # Diagonal mask
+        diag = torch.eye(num_regions, dtype=torch.bool, device=device)
+        scores = scores.masked_fill(diag.unsqueeze(0), -1e9)
 
         return scores
 
 
+# =============================================================================
+# 4.3.4: Relation Type Classification Head
+# =============================================================================
+
 class RelationTypeHead(nn.Module):
-    """Relation Type Classification Head
+    """Relation Type Classification Head.
+
+    Based on paper Section 4.3.4 and Eq. (16):
+    p = BiLinear(FC_q(F_i), FC_k(F_j))
 
     Predicts relationship type between region pairs:
     - 0: No relation
     - 1: Text region reading order (sequential)
-    - 2: Graphical region relation
+    - 2: Graphical region relation (caption/footnote to figure/table)
     """
 
     def __init__(
         self,
         hidden_size: int = 768,
+        proj_size: int = 2048,
         num_relations: int = 3,
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.proj_size = proj_size
 
-        # Bilinear classifier for relation type
-        self.head_proj = nn.Linear(hidden_size, hidden_size)
-        self.tail_proj = nn.Linear(hidden_size, hidden_size)
+        # FC_q and FC_k: 2048 nodes each
+        self.head_proj = nn.Linear(hidden_size, proj_size)
+        self.tail_proj = nn.Linear(hidden_size, proj_size)
 
-        self.bilinear = nn.Bilinear(hidden_size, hidden_size, num_relations)
+        self.bilinear = nn.Bilinear(proj_size, proj_size, num_relations)
         self.dropout = nn.Dropout(dropout)
 
     def forward(
@@ -189,134 +426,162 @@ class RelationTypeHead(nn.Module):
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
-        Args:
-            features: [batch, num_regions, hidden_size]
-            mask: [batch, num_regions]
-
         Returns:
             [batch, num_regions, num_regions, num_relations] relation logits
         """
-        batch_size, num_regions, hidden_size = features.shape
+        batch_size, num_regions, _ = features.shape
 
-        head = self.head_proj(features)  # [B, N, H]
-        tail = self.tail_proj(features)  # [B, N, H]
+        head = self.dropout(self.head_proj(features))  # [B, N, 2048]
+        tail = self.dropout(self.tail_proj(features))  # [B, N, 2048]
 
         # Expand for pairwise computation
-        head = head.unsqueeze(2).expand(-1, -1, num_regions, -1)  # [B, N, N, H]
-        tail = tail.unsqueeze(1).expand(-1, num_regions, -1, -1)  # [B, N, N, H]
+        head = head.unsqueeze(2).expand(-1, -1, num_regions, -1)
+        tail = tail.unsqueeze(1).expand(-1, num_regions, -1, -1)
 
-        head = head.reshape(batch_size * num_regions * num_regions, hidden_size)
-        tail = tail.reshape(batch_size * num_regions * num_regions, hidden_size)
+        head = head.reshape(batch_size * num_regions * num_regions, self.proj_size)
+        tail = tail.reshape(batch_size * num_regions * num_regions, self.proj_size)
 
         # Bilinear classification
-        relation_logits = self.bilinear(head, tail)  # [B*N*N, num_relations]
+        relation_logits = self.bilinear(head, tail)
         relation_logits = relation_logits.reshape(batch_size, num_regions, num_regions, -1)
 
         return relation_logits
 
 
-class OrderModule(nn.Module):
-    """Complete Order Module
+# =============================================================================
+# Complete Order Module
+# =============================================================================
 
-    Processes detected page objects to determine reading sequences.
+class OrderModule(nn.Module):
+    """Complete Order Module (Section 4.3).
+
+    Processes detected page objects (text regions + graphical objects)
+    to determine reading sequences.
+
+    Input from Detect Module:
+    - line_features: [B, num_lines, H] enhanced text line features
+    - regions: List of text regions (line index groupings)
+    - region_roles: Logical roles for each region
+
+    Output:
+    - order_logits: [B, N, N] pairwise reading order scores
+    - relation_logits: [B, N, N, C] relation type predictions
     """
 
     def __init__(
         self,
         hidden_size: int = 768,
-        num_categories: int = 5,
+        num_categories: int = 10,
         num_heads: int = 12,
         num_layers: int = 3,
+        ffn_dim: int = 2048,
+        proj_size: int = 2048,
+        mlp_hidden: int = 1024,
         num_relations: int = 3,
         dropout: float = 0.1,
         use_spatial: bool = True,
-        use_visual: bool = False,
-        use_text: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
 
-        # Multi-modal embedding
-        self.embedding = MultiModalEmbedding(
+        # 4.3.1: Region feature builder (attention fusion + type embedding)
+        self.feature_builder = RegionFeatureBuilder(
             hidden_size=hidden_size,
             num_categories=num_categories,
-            use_visual=use_visual,
-            use_text=use_text,
-            dropout=dropout,
+            attention_hidden=mlp_hidden,
         )
 
-        # Transformer encoder
+        # 4.3.2: Transformer encoder (3 layers)
         self.transformer = OrderTransformerEncoder(
             hidden_size=hidden_size,
             num_heads=num_heads,
             num_layers=num_layers,
+            ffn_dim=ffn_dim,
             dropout=dropout,
         )
 
-        # Reading order prediction head
-        self.order_head = ReadingOrderHead(
+        # 4.3.3: Inter-region order prediction head
+        self.order_head = InterRegionOrderHead(
             hidden_size=hidden_size,
-            use_spatial=use_spatial,
+            proj_size=proj_size,
+            mlp_hidden=mlp_hidden,
             dropout=dropout,
+            use_spatial=use_spatial,
         )
 
-        # Relation type classification head
+        # 4.3.4: Relation type classification head
         self.relation_head = RelationTypeHead(
             hidden_size=hidden_size,
+            proj_size=proj_size,
             num_relations=num_relations,
             dropout=dropout,
         )
 
     def forward(
         self,
-        bbox: torch.Tensor,                    # [batch, num_regions, 4]
-        categories: torch.Tensor,              # [batch, num_regions]
-        region_mask: torch.Tensor,             # [batch, num_regions]
-        visual_features: torch.Tensor = None,  # [batch, num_regions, visual_dim]
-        text_features: torch.Tensor = None,    # [batch, num_regions, text_dim]
+        line_features: torch.Tensor,  # [batch, num_lines, hidden_size]
+        regions: List[List[List[int]]],  # [batch][num_regions][line_indices]
+        region_roles: List[List[int]],  # [batch][num_regions]
+        region_bboxes: torch.Tensor,  # [batch, max_regions, 4]
+        line_mask: torch.Tensor = None,
+        graphical_features: torch.Tensor = None,
+        graphical_bboxes: torch.Tensor = None,
+        graphical_roles: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
-            bbox: [batch, num_regions, 4] bounding boxes
-            categories: [batch, num_regions] region categories
-            region_mask: [batch, num_regions] valid region mask
-            visual_features: optional visual features
-            text_features: optional text features
+            line_features: [batch, num_lines, hidden_size] from Detect module
+            regions: Text region groupings from Detect module
+            region_roles: Logical roles for each text region
+            region_bboxes: [batch, max_regions, 4] region bounding boxes
+            line_mask: [batch, num_lines] valid line mask
+            graphical_*: Optional graphical object inputs
 
         Returns:
             Dict with:
-                - embeddings: [batch, num_regions, hidden_size]
-                - enhanced_features: [batch, num_regions, hidden_size]
-                - order_logits: [batch, num_regions, num_regions]
-                - relation_logits: [batch, num_regions, num_regions, num_relations]
+                - region_features: [batch, num_objects, hidden_size]
+                - enhanced_features: [batch, num_objects, hidden_size]
+                - order_logits: [batch, num_objects, num_objects]
+                - relation_logits: [batch, num_objects, num_objects, num_relations]
+                - object_mask: [batch, num_objects]
         """
-        # Multi-modal embedding
-        embeddings = self.embedding(
-            bbox=bbox,
-            categories=categories,
-            visual_features=visual_features,
-            text_features=text_features,
+        # 4.3.1: Build region features
+        region_features, all_bboxes, object_mask = self.feature_builder(
+            line_features=line_features,
+            regions=regions,
+            region_roles=region_roles,
+            region_bboxes=region_bboxes,
+            line_mask=line_mask,
+            graphical_features=graphical_features,
+            graphical_bboxes=graphical_bboxes,
+            graphical_roles=graphical_roles,
         )
 
-        # Transformer enhancement
-        enhanced = self.transformer(embeddings, mask=region_mask)
+        # 4.3.2: Transformer enhancement
+        enhanced = self.transformer(region_features, mask=object_mask)
 
-        # Reading order prediction
-        order_logits = self.order_head(enhanced, bbox=bbox, mask=region_mask)
+        # 4.3.3: Order prediction
+        order_logits = self.order_head(enhanced, bbox=all_bboxes, mask=object_mask)
 
-        # Relation type prediction
-        relation_logits = self.relation_head(enhanced, mask=region_mask)
+        # 4.3.4: Relation type prediction
+        relation_logits = self.relation_head(enhanced, mask=object_mask)
 
         return {
-            'embeddings': embeddings,
+            'region_features': region_features,
             'enhanced_features': enhanced,
             'order_logits': order_logits,
             'relation_logits': relation_logits,
+            'object_mask': object_mask,
+            'object_bboxes': all_bboxes,
         }
 
 
+# =============================================================================
+# Order Loss
+# =============================================================================
+
 class OrderLoss(nn.Module):
-    """Order Module Loss
+    """Order Module Loss.
 
     Combines:
     - Reading order loss (softmax cross-entropy, dependency parsing style)
@@ -327,138 +592,76 @@ class OrderLoss(nn.Module):
         self,
         order_weight: float = 1.0,
         relation_weight: float = 0.5,
-        use_softmax: bool = True,  # Paper uses softmax CE instead of BCE
     ):
         super().__init__()
         self.order_weight = order_weight
         self.relation_weight = relation_weight
-        self.use_softmax = use_softmax
-
-        if not use_softmax:
-            self.order_criterion = nn.BCEWithLogitsLoss(reduction='none')
         self.relation_criterion = nn.CrossEntropyLoss(reduction='none', ignore_index=-1)
 
     def forward(
         self,
-        order_logits: torch.Tensor,      # [batch, N, N]
-        relation_logits: torch.Tensor,   # [batch, N, N, num_relations]
-        reading_orders: torch.Tensor,    # [batch, N] ground truth order indices
-        relation_labels: torch.Tensor = None,  # [batch, N, N] relation types
-        mask: torch.Tensor = None,       # [batch, N]
+        order_logits: torch.Tensor,  # [batch, N, N]
+        relation_logits: torch.Tensor,  # [batch, N, N, num_relations]
+        order_labels: torch.Tensor,  # [batch, N] successor indices (-1 for last)
+        relation_labels: torch.Tensor = None,  # [batch, N, N]
+        mask: torch.Tensor = None,  # [batch, N]
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
             order_logits: [batch, N, N] pairwise order scores
             relation_logits: [batch, N, N, num_relations] relation predictions
-            reading_orders: [batch, N] ground truth reading order (0, 1, 2, ...)
+            order_labels: [batch, N] ground truth successor index (-1 for no successor)
             relation_labels: [batch, N, N] ground truth relation types
-            mask: [batch, N] valid region mask
+            mask: [batch, N] valid object mask
 
         Returns:
-            Dict with order_loss, relation_loss, total_loss
+            Dict with order_loss, relation_loss, loss
         """
-        batch_size, num_regions = reading_orders.shape
+        batch_size, num_objects = order_labels.shape
         device = order_logits.device
 
-        # Create ground truth order matrix
-        # target[i,j] = 1 if order[i] < order[j] (i comes before j)
-        order_i = reading_orders.unsqueeze(2)  # [B, N, 1]
-        order_j = reading_orders.unsqueeze(1)  # [B, 1, N]
-        order_target = (order_i < order_j).float()  # [B, N, N]
+        if mask is None:
+            mask = torch.ones(batch_size, num_objects, dtype=torch.bool, device=device)
 
-        # Valid pair mask
-        if mask is not None:
-            valid_mask = mask.unsqueeze(2) & mask.unsqueeze(1)  # [B, N, N]
-        else:
-            valid_mask = torch.ones(batch_size, num_regions, num_regions,
-                                   dtype=torch.bool, device=device)
+        # Order loss (softmax cross-entropy)
+        # Handle objects pointing to themselves (last in sequence)
+        order_labels_fixed = order_labels.clone()
+        last_mask = order_labels == -1
+        indices = torch.arange(num_objects, device=device).unsqueeze(0).expand(batch_size, -1)
+        order_labels_fixed = torch.where(last_mask, indices, order_labels_fixed)
 
-        # Exclude diagonal
-        diag_mask = ~torch.eye(num_regions, dtype=torch.bool, device=device).unsqueeze(0)
-        valid_mask = valid_mask & diag_mask
+        # Prepare logits for loss
+        logits_for_loss = order_logits.clone()
 
-        # Order loss
-        if self.use_softmax:
-            # Softmax cross-entropy (dependency parsing style)
-            # For each region i, predict which region j it points to (successor)
-            # Mask invalid positions with -inf
-            order_logits_masked = order_logits.clone()
-            order_logits_masked[~valid_mask] = float('-inf')
+        # Allow self-pointing for last objects
+        for b in range(batch_size):
+            for i in range(num_objects):
+                if last_mask[b, i] and mask[b, i]:
+                    logits_for_loss[b, i, i] = order_logits[b, i].max() + 1
 
-            # Find successor for each region (next in reading order)
-            # successor[i] = argmin_{j: order[j] > order[i]} order[j]
-            order_expanded = reading_orders.unsqueeze(2).expand(-1, -1, num_regions)
-            order_diff = order_j.expand(-1, num_regions, -1) - order_i.expand(-1, -1, num_regions)
+        # Cross-entropy loss
+        logits_flat = logits_for_loss.view(-1, num_objects)
+        labels_flat = order_labels_fixed.clamp(0, num_objects - 1).view(-1)
+        mask_flat = mask.view(-1)
 
-            # Only consider j where order[j] > order[i]
-            successor_mask = (order_diff > 0) & valid_mask
-            order_diff_masked = order_diff.float()
-            order_diff_masked[~successor_mask] = float('inf')
-
-            # Successor is the one with smallest positive order difference
-            _, successors = order_diff_masked.min(dim=2)  # [B, N]
-
-            # For regions with no successor (last in order), use a dummy target
-            has_successor = successor_mask.any(dim=2)  # [B, N]
-
-            # Cross-entropy loss
-            order_logits_flat = order_logits_masked.reshape(-1, num_regions)  # [B*N, N]
-            successors_flat = successors.reshape(-1)  # [B*N]
-            has_successor_flat = has_successor.reshape(-1)  # [B*N]
-
-            if mask is not None:
-                mask_flat = mask.reshape(-1)
-                has_successor_flat = has_successor_flat & mask_flat
-
-            # Replace all-inf rows with zeros to avoid NaN in softmax
-            all_inf_rows = torch.isinf(order_logits_flat).all(dim=1)
-            order_logits_flat = order_logits_flat.clone()
-            order_logits_flat[all_inf_rows] = 0.0
-            # Also set dummy target for these rows
-            successors_flat = successors_flat.clone()
-            successors_flat[all_inf_rows] = 0
-
-            order_loss_flat = F.cross_entropy(
-                order_logits_flat,
-                successors_flat,
-                reduction='none'
-            )
-
-            # Only count loss for valid regions with successors
-            order_loss_flat = order_loss_flat * has_successor_flat.float()
-            num_valid = has_successor_flat.sum().clamp(min=1)
-            order_loss = order_loss_flat.sum() / num_valid
-
-        else:
-            # BCE loss (original implementation)
-            order_loss_matrix = self.order_criterion(order_logits, order_target)
-            order_loss_matrix = order_loss_matrix * valid_mask.float()
-            num_valid = valid_mask.sum().clamp(min=1)
-            order_loss = order_loss_matrix.sum() / num_valid
+        order_loss_flat = F.cross_entropy(logits_flat, labels_flat, reduction='none')
+        order_loss_flat = order_loss_flat * mask_flat.float()
+        order_loss = order_loss_flat.sum() / mask_flat.sum().clamp(min=1)
 
         # Relation loss
         relation_loss = torch.tensor(0.0, device=device)
         if relation_labels is not None and self.relation_weight > 0:
-            # [B, N, N, C] -> [B*N*N, C]
-            relation_logits_flat = relation_logits.reshape(-1, relation_logits.size(-1))
-            relation_labels_flat = relation_labels.reshape(-1)
+            valid_mask = mask.unsqueeze(2) & mask.unsqueeze(1)
+            diag_mask = ~torch.eye(num_objects, dtype=torch.bool, device=device).unsqueeze(0)
+            valid_mask = valid_mask & diag_mask
 
-            relation_loss_flat = self.relation_criterion(
-                relation_logits_flat,
-                relation_labels_flat
-            )
+            relation_logits_flat = relation_logits.view(-1, relation_logits.size(-1))
+            relation_labels_flat = relation_labels.view(-1)
 
-            # Mask
-            if mask is not None:
-                valid_mask_flat = valid_mask.reshape(-1)
-                relation_loss_flat = relation_loss_flat * valid_mask_flat.float()
-                num_valid_rel = valid_mask_flat.sum().clamp(min=1)
-            else:
-                num_valid_rel = relation_loss_flat.numel()
+            relation_loss_flat = self.relation_criterion(relation_logits_flat, relation_labels_flat)
+            relation_loss_flat = relation_loss_flat * valid_mask.view(-1).float()
+            relation_loss = relation_loss_flat.sum() / valid_mask.sum().clamp(min=1)
 
-            relation_loss = relation_loss_flat.sum() / num_valid_rel
-
-        # Total loss
         total_loss = self.order_weight * order_loss + self.relation_weight * relation_loss
 
         return {
@@ -468,14 +671,17 @@ class OrderLoss(nn.Module):
         }
 
 
-def predict_reading_order(order_logits: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
-    """Predict reading order from pairwise logits
+# =============================================================================
+# Prediction utilities
+# =============================================================================
 
-    Uses greedy decoding: repeatedly select the region with most "comes before" relations.
+def predict_reading_order(
+    order_logits: torch.Tensor,  # [batch, N, N]
+    mask: torch.Tensor = None,
+) -> torch.Tensor:
+    """Predict reading order from pairwise logits.
 
-    Args:
-        order_logits: [batch, N, N] pairwise scores
-        mask: [batch, N] valid region mask
+    Uses greedy decoding based on successor predictions.
 
     Returns:
         [batch, N] predicted reading order indices (0 = first, 1 = second, ...)
@@ -483,29 +689,48 @@ def predict_reading_order(order_logits: torch.Tensor, mask: torch.Tensor = None)
     batch_size, num_regions, _ = order_logits.shape
     device = order_logits.device
 
-    # Count how many regions each region comes before
-    # Higher score = earlier in reading order
-    if mask is not None:
-        order_logits = order_logits.clone()
-        row_mask = ~mask.unsqueeze(2)
-        col_mask = ~mask.unsqueeze(1)
-        order_logits[row_mask | col_mask] = float('-inf')
+    if mask is None:
+        mask = torch.ones(batch_size, num_regions, dtype=torch.bool, device=device)
 
-    # Count wins (i comes before j if logits[i,j] > 0)
-    wins = (order_logits > 0).float().sum(dim=2)  # [B, N]
+    # Get predicted successor for each object
+    logits_masked = order_logits.clone()
+    row_mask = ~mask.unsqueeze(2)
+    col_mask = ~mask.unsqueeze(1)
+    logits_masked[row_mask | col_mask] = float('-inf')
 
-    if mask is not None:
-        wins[~mask] = -1  # Invalid regions get lowest priority
+    successors = logits_masked.argmax(dim=-1)  # [B, N]
 
-    # Sort by wins (descending) to get order
-    _, order_indices = wins.sort(dim=1, descending=True)
+    # Build reading order by following successor chain
+    reading_order = torch.full((batch_size, num_regions), -1, dtype=torch.long, device=device)
 
-    # Convert to reading order (inverse permutation)
-    reading_order = torch.zeros_like(order_indices)
-    batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_regions)
-    reading_order[batch_indices, order_indices] = torch.arange(num_regions, device=device).unsqueeze(0).expand(batch_size, -1)
+    for b in range(batch_size):
+        # Find start (object with no predecessor)
+        has_pred = torch.zeros(num_regions, dtype=torch.bool, device=device)
+        for i in range(num_regions):
+            if mask[b, i]:
+                succ = successors[b, i].item()
+                if succ != i and 0 <= succ < num_regions:
+                    has_pred[succ] = True
 
-    if mask is not None:
-        reading_order[~mask] = -1
+        # Find starting objects
+        starts = []
+        for i in range(num_regions):
+            if mask[b, i] and not has_pred[i]:
+                starts.append(i)
+
+        # Follow chains
+        order_idx = 0
+        visited = set()
+        for start in starts:
+            curr = start
+            while curr not in visited and mask[b, curr]:
+                visited.add(curr)
+                reading_order[b, curr] = order_idx
+                order_idx += 1
+
+                succ = successors[b, curr].item()
+                if succ == curr or not (0 <= succ < num_regions) or not mask[b, succ]:
+                    break
+                curr = succ
 
     return reading_order
