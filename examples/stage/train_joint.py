@@ -452,15 +452,15 @@ class E2EEvaluationCallback(TrainerCallback):
     - Stage 1: 分类 (Line-level Macro/Micro F1)
     - Stage 3: Parent 准确率
     - Stage 4: Relation 准确率 + Macro F1
-    - TEDS: Tree Edit Distance Similarity (可选)
 
-    重构说明：调用 hrdoc_eval.evaluate_e2e 共享推理逻辑，避免代码重复
+    使用新的 engines/evaluator.py 统一接口
     """
 
     def __init__(self, eval_dataloader, data_collator, compute_teds: bool = False):
         self.eval_dataloader = eval_dataloader
         self.data_collator = data_collator
         self.compute_teds = compute_teds
+        self._evaluator = None
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         """在 Trainer.evaluate() 之后运行端到端评估"""
@@ -475,38 +475,36 @@ class E2EEvaluationCallback(TrainerCallback):
         logger.info(f"End-to-End Evaluation (Stage 1/3/4) at Step {global_step}")
         logger.info("=" * 60)
 
-        # 运行端到端评估（使用共享模块）
-        e2e_results = self._evaluate_e2e(model, device, global_step)
+        # 使用新的 Evaluator（统一接口，支持 page/doc 级别）
+        from engines.evaluator import Evaluator
+
+        evaluator = Evaluator(model, device)
+        output = evaluator.evaluate(
+            self.eval_dataloader,
+            compute_teds=self.compute_teds,
+            verbose=True,
+        )
 
         # 打印结果（紧凑表格格式）
-        if e2e_results:
-            # 提取指标
-            line_macro = e2e_results.get('line_macro_f1', 0) * 100
-            line_micro = e2e_results.get('line_micro_f1', 0) * 100
-            line_acc = e2e_results.get('line_accuracy', 0) * 100
-            parent_acc = e2e_results.get('parent_accuracy', 0) * 100
-            rel_acc = e2e_results.get('relation_accuracy', 0) * 100
-            rel_macro = e2e_results.get('relation_macro_f1', 0) * 100
-            teds = e2e_results.get('macro_teds', 0) * 100
-            num_lines = e2e_results.get('num_lines', 0)
+        line_macro = output.line_macro_f1 * 100
+        line_acc = output.line_accuracy * 100
+        parent_acc = output.parent_accuracy * 100
+        rel_acc = output.relation_accuracy * 100
+        rel_macro = output.relation_macro_f1 * 100
+        num_lines = output.num_lines
 
-            # 紧凑格式打印
-            logger.info("┌─────────────────────────────────────────────────────────┐")
-            logger.info(f"│  Stage1(Line) │ MacroF1: {line_macro:5.2f}% │ Acc: {line_acc:5.2f}%          │")
-            logger.info(f"│  Stage3(Par)  │ Accuracy: {parent_acc:5.2f}%                           │")
-            logger.info(f"│  Stage4(Rel)  │ MacroF1: {rel_macro:5.2f}% │ Acc: {rel_acc:5.2f}%          │")
-            if teds > 0:
-                logger.info(f"│  TEDS         │ {teds:5.2f}%                                   │")
-            logger.info(f"│  Lines: {num_lines:<6}                                          │")
-            logger.info("└─────────────────────────────────────────────────────────┘")
+        logger.info("┌─────────────────────────────────────────────────────────┐")
+        logger.info(f"│  Stage1(Line) │ MacroF1: {line_macro:5.2f}% │ Acc: {line_acc:5.2f}%          │")
+        logger.info(f"│  Stage3(Par)  │ Accuracy: {parent_acc:5.2f}%                           │")
+        logger.info(f"│  Stage4(Rel)  │ MacroF1: {rel_macro:5.2f}% │ Acc: {rel_acc:5.2f}%          │")
+        logger.info(f"│  Lines: {num_lines:<6}                                          │")
+        logger.info("└─────────────────────────────────────────────────────────┘")
 
-            # 一行摘要（方便快速对比）
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
-            if teds > 0:
-                summary += f" | TEDS={teds:.1f}%"
-            logger.info(summary)
+        # 一行摘要（方便快速对比）
+        summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
+        logger.info(summary)
 
-    def _evaluate_e2e(self, model, device, global_step: int) -> Dict[str, float]:
+    def _evaluate_e2e_legacy(self, model, device, global_step: int) -> Dict[str, float]:
         """运行端到端评估 - 调用共享的 hrdoc_eval.evaluate_e2e"""
         from util.hrdoc_eval import evaluate_e2e
         from types import SimpleNamespace

@@ -18,7 +18,16 @@ from .hrdoc_data_loader import (
     LABEL_LIST,
 )
 
+from .batch import (
+    Sample,
+    BatchBase,
+    PageLevelBatch,
+    DocumentLevelBatch,
+    wrap_batch,
+)
+
 __all__ = [
+    # 数据加载
     "HRDocDataLoader",
     "HRDocDataLoaderConfig",
     "load_hrdoc_raw_datasets",
@@ -28,4 +37,10 @@ __all__ = [
     "get_id2label",
     "NUM_LABELS",
     "LABEL_LIST",
+    # Batch 抽象
+    "Sample",
+    "BatchBase",
+    "PageLevelBatch",
+    "DocumentLevelBatch",
+    "wrap_batch",
 ]
