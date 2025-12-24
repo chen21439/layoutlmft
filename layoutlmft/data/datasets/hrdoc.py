@@ -59,6 +59,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
     BUILDER_CONFIGS = [
         HRDocConfig(name="hrdoc", version=datasets.Version("1.0.0"), description="HRDoc dataset (page-level)"),
+        HRDocConfig(name="hrds", version=datasets.Version("1.0.0"), description="HRDoc-Simple dataset"),
+        HRDocConfig(name="hrdh", version=datasets.Version("1.0.0"), description="HRDoc-Hard dataset"),
+        HRDocConfig(name="tender", version=datasets.Version("1.0.0"), description="Tender document dataset"),
     ]
 
     def _info(self):

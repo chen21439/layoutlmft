@@ -396,12 +396,11 @@ def evaluate_e2e(
         for batch in tqdm(eval_loader, desc="E2E Eval"):
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
-            batch_size = batch["input_ids"].shape[0]
-
-            # 提取 GT
+            # 提取 GT（文档级别返回 num_docs 个元素，页面级别返回 batch_size 个元素）
             gt_docs = extract_gt_from_batch(batch, id2label)
+            num_samples = len(gt_docs)  # 使用 gt_docs 长度，适配两种模式
 
-            for b in range(batch_size):
+            for b in range(num_samples):
                 gt_doc = gt_docs[b]
                 if not gt_doc:
                     continue
@@ -445,7 +444,12 @@ def evaluate_e2e(
                     all_gt_parents.append(gt_item["parent_id"])
                     all_pred_parents.append(pred_parents[idx] if idx < len(pred_parents) else -1)
 
-                    gt_rel = RELATION2ID.get(gt_item.get("relation", "none"), 0)
+                    # 保留原始 relation: "none" -> -100 (与训练一致)
+                    gt_rel_str = gt_item.get("relation", "none")
+                    if gt_rel_str == "none":
+                        gt_rel = -100  # 与训练一致，后续过滤
+                    else:
+                        gt_rel = RELATION2ID.get(gt_rel_str, -100)
                     all_gt_relations.append(gt_rel)
                     all_pred_relations.append(pred_relations[idx] if idx < len(pred_relations) else 0)
 
@@ -516,8 +520,16 @@ def evaluate_e2e(
         parent_correct = sum(1 for g, p in zip(all_gt_parents, all_pred_parents) if g == p)
         results["parent_accuracy"] = parent_correct / len(all_gt_parents)
 
-        # Relation 准确率和 F1（只计算有父节点的）
-        rel_pairs = [(g, p) for g, p, gp in zip(all_gt_relations, all_pred_relations, all_gt_parents) if gp >= 0]
+        # Relation 准确率和 F1（只计算有父节点且有有效关系标签的）
+        # 与训练一致：跳过 gt_rel == -100 的样本
+        rel_pairs = [(g, p) for g, p, gp in zip(all_gt_relations, all_pred_relations, all_gt_parents) if gp >= 0 and g >= 0]
+
+        # [诊断] 统计 relation 样本
+        total_rel_candidates = len(all_gt_relations)
+        skipped_no_parent = sum(1 for gp in all_gt_parents if gp < 0)
+        skipped_invalid_rel = sum(1 for g, gp in zip(all_gt_relations, all_gt_parents) if gp >= 0 and g < 0)
+        logger.info(f"[DIAG E2E] Relation统计: 总行数={total_rel_candidates}, 无父节点跳过={skipped_no_parent}, 无效关系跳过={skipped_invalid_rel}, 有效样本={len(rel_pairs)}")
+
         if rel_pairs:
             gt_rels = [g for g, p in rel_pairs]
             pred_rels = [p for g, p in rel_pairs]
@@ -525,6 +537,15 @@ def evaluate_e2e(
             results["relation_accuracy"] = rel_correct / len(rel_pairs)
             results["relation_macro_f1"] = f1_score(gt_rels, pred_rels, average="macro", zero_division=0)
             results["relation_micro_f1"] = f1_score(gt_rels, pred_rels, average="micro", zero_division=0)
+
+            # [诊断] 打印 relation 分布
+            from collections import Counter
+            gt_rel_counter = Counter(gt_rels)
+            pred_rel_counter = Counter(pred_rels)
+            logger.info(f"[DIAG E2E] Relation GT分布: connect={gt_rel_counter.get(0, 0)}, contain={gt_rel_counter.get(1, 0)}, equality={gt_rel_counter.get(2, 0)}")
+            logger.info(f"[DIAG E2E] Relation Pred分布: connect={pred_rel_counter.get(0, 0)}, contain={pred_rel_counter.get(1, 0)}, equality={pred_rel_counter.get(2, 0)}")
+        else:
+            logger.warning("[DIAG E2E] 没有有效的 relation 样本用于评估！")
 
         results["num_lines"] = len(all_gt_classes)
 

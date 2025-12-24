@@ -125,30 +125,48 @@ class HRDocJointDataCollator:
 
             padded_line_parent_ids = []
             padded_line_relations = []
+            padded_line_semantic_labels = []
 
             for i in range(batch_size):
                 num_lines = len(line_parent_ids[i])
                 padding_len = max_lines - num_lines
 
+                # parent_ids
                 padded_line_parent_ids.append(
                     list(line_parent_ids[i]) + [-100] * padding_len
                 )
 
+                # relations: 转换为索引
                 if len(line_relations[i]) > 0:
+                    # 论文只有 3 类关系：connect=0, contain=1, equality=2
+                    # none/meta 关系映射为 -100，会被 loss 忽略
                     rel_indices = [
-                        self.relation2id.get(str(rel).lower(), -100) for rel in line_relations[i]
+                        self.relation2id.get(rel.lower(), -100) for rel in line_relations[i]
                     ]
                     padded_line_relations.append(
-                        rel_indices + [-100] * padding_len
+                        rel_indices + [-100] * padding_len  # -100 会被 loss 忽略
                     )
                 else:
+                    # 空样本用 -100 填充到 max_lines
                     padded_line_relations.append([-100] * max_lines)
+
+                # semantic_labels: 从 features 中直接获取（已经是 14 类索引）
+                if "line_semantic_labels" in features[i]:
+                    sem_labels = features[i]["line_semantic_labels"]
+                    padded_line_semantic_labels.append(
+                        list(sem_labels) + [0] * padding_len
+                    )
+                else:
+                    padded_line_semantic_labels.append([0] * max_lines)
 
             batch["line_parent_ids"] = torch.tensor(padded_line_parent_ids, dtype=torch.long)
 
             has_line_relations = any(len(lr) > 0 for lr in line_relations)
-            if has_line_relations:
+            if has_line_relations and len(padded_line_relations) > 0:
                 batch["line_relations"] = torch.tensor(padded_line_relations, dtype=torch.long)
+
+            if len(padded_line_semantic_labels) > 0:
+                batch["line_semantic_labels"] = torch.tensor(padded_line_semantic_labels, dtype=torch.long)
 
         # Line bboxes
         has_line_bboxes = any(len(lb) > 0 for lb in line_bboxes)
@@ -283,12 +301,13 @@ class HRDocDocumentLevelCollator:
 
                 if relations:
                     rel_indices = [
-                        self.relation2id.get(str(rel).lower(), -100) for rel in relations
+                        self.relation2id.get(rel.lower(), -100) for rel in relations
                     ]
                     padded_relations.append(
-                        rel_indices + [-100] * padding_len
+                        rel_indices + [-100] * padding_len  # -100 会被 loss 忽略
                     )
                 else:
+                    # 空样本用 -100 填充到 max_lines
                     padded_relations.append([-100] * max_lines)
 
             batch["line_parent_ids"] = torch.tensor(padded_parent_ids, dtype=torch.long)

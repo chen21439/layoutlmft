@@ -628,10 +628,10 @@ def main():
     report_file = os.path.join(output_dir, "split_report.json")
 
     with open(train_file, 'w', encoding='utf-8') as f:
-        json.dump(train_ids, f, indent=2)
+        json.dump(train_ids, f, indent=2, ensure_ascii=False)
 
     with open(dev_file, 'w', encoding='utf-8') as f:
-        json.dump(dev_ids, f, indent=2)
+        json.dump(dev_ids, f, indent=2, ensure_ascii=False)
 
     with open(report_file, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)

@@ -277,8 +277,11 @@ def main():
     set_seed(training_args.seed)
 
     # 使用统一数据加载器加载数据集
+    # dataset_name 用于区分不同数据集的缓存（hrds, hrdh, tender 等）
+    dataset_name = data_args.dataset_name or "hrdoc"
     loader_config = HRDocDataLoaderConfig(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
+        dataset_name=dataset_name,
         max_length=512,
         preprocessing_num_workers=data_args.preprocessing_num_workers or 4,
         overwrite_cache=data_args.overwrite_cache,
@@ -291,7 +294,10 @@ def main():
 
     # 先加载原始数据集（用于 column_names、features 和 balanced loss 计算）
     # 使用统一的数据加载函数
-    datasets = load_hrdoc_raw_datasets(data_dir=os.environ.get("HRDOC_DATA_DIR"))
+    datasets = load_hrdoc_raw_datasets(
+        data_dir=os.environ.get("HRDOC_DATA_DIR"),
+        dataset_name=dataset_name,
+    )
 
     if training_args.do_train:
         column_names = datasets["train"].column_names

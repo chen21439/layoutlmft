@@ -210,48 +210,56 @@ class JointModel(nn.Module):
                 logits=logits,
             )
 
-        # 如果没有文档级别信息，使用旧的 chunk 级别处理（兼容模式）
-        if num_docs is None or chunks_per_doc is None:
-            num_docs = total_chunks
-            chunks_per_doc = [1] * total_chunks
-
         # ==================== Stage 2: Feature Extraction ====================
-        # 按文档聚合 line features
         text_seq_len = input_ids.shape[1]
         text_hidden = hidden_states[:, :text_seq_len, :]
 
-        # 对每个文档，从其所有 chunks 中提取并聚合 line features
-        doc_line_features_list = []
-        doc_line_masks_list = []
+        # 检测模式：页面级别 vs 文档级别
+        is_page_level = (num_docs is None or chunks_per_doc is None)
 
-        chunk_idx = 0
-        for doc_idx in range(num_docs):
-            num_chunks_in_doc = chunks_per_doc[doc_idx]
-
-            # 收集该文档所有 chunks 的 hidden states 和 line_ids
-            doc_hidden = text_hidden[chunk_idx:chunk_idx + num_chunks_in_doc]  # [num_chunks, seq_len, hidden]
-            doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks_in_doc]   # [num_chunks, seq_len]
-
-            # 聚合该文档的 line features
-            doc_features, doc_mask = self._aggregate_document_line_features(
-                doc_hidden, doc_line_ids
+        if is_page_level:
+            # ========== 页面级别模式（快速训练）==========
+            # 每个样本是一个 chunk，直接使用 feature_extractor
+            # 这与历史版本的处理方式一致
+            batch_size = total_chunks
+            line_features, line_mask = self.feature_extractor.extract_line_features(
+                text_hidden, line_ids, pooling="mean"
             )
-            doc_line_features_list.append(doc_features)
-            doc_line_masks_list.append(doc_mask)
+            num_docs = batch_size  # 用于后续循环
+        else:
+            # ========== 文档级别模式（用于推理）==========
+            # 每个样本是一个文档，包含多个 chunks，需要聚合
+            doc_line_features_list = []
+            doc_line_masks_list = []
 
-            chunk_idx += num_chunks_in_doc
+            chunk_idx = 0
+            for doc_idx in range(num_docs):
+                num_chunks_in_doc = chunks_per_doc[doc_idx]
 
-        # 填充到相同长度
-        max_lines = max(f.shape[0] for f in doc_line_features_list)
-        hidden_dim = doc_line_features_list[0].shape[1]
+                # 收集该文档所有 chunks 的 hidden states 和 line_ids
+                doc_hidden = text_hidden[chunk_idx:chunk_idx + num_chunks_in_doc]
+                doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks_in_doc]
 
-        line_features = torch.zeros(num_docs, max_lines, hidden_dim, device=device)
-        line_mask = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
+                # 聚合该文档的 line features
+                doc_features, doc_mask = self._aggregate_document_line_features(
+                    doc_hidden, doc_line_ids
+                )
+                doc_line_features_list.append(doc_features)
+                doc_line_masks_list.append(doc_mask)
 
-        for doc_idx, (features, mask) in enumerate(zip(doc_line_features_list, doc_line_masks_list)):
-            num_lines = features.shape[0]
-            line_features[doc_idx, :num_lines] = features
-            line_mask[doc_idx, :num_lines] = mask
+                chunk_idx += num_chunks_in_doc
+
+            # 填充到相同长度
+            max_lines = max(f.shape[0] for f in doc_line_features_list)
+            hidden_dim = doc_line_features_list[0].shape[1]
+
+            line_features = torch.zeros(num_docs, max_lines, hidden_dim, device=device)
+            line_mask = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
+
+            for doc_idx, (features, mask) in enumerate(zip(doc_line_features_list, doc_line_masks_list)):
+                num_lines_in_doc = features.shape[0]
+                line_features[doc_idx, :num_lines_in_doc] = features
+                line_mask[doc_idx, :num_lines_in_doc] = mask
 
         # ==================== Stage 3: Parent Finding ====================
         parent_loss = torch.tensor(0.0, device=device)
@@ -344,6 +352,12 @@ class JointModel(nn.Module):
         rel_correct = 0
         rel_total = 0
 
+        # 调试统计
+        debug_label_counts = {0: 0, 1: 0, 2: 0}  # connect, contain, equality
+        debug_pred_counts = {0: 0, 1: 0, 2: 0}
+        debug_skipped_parent = 0
+        debug_skipped_label = 0
+
         if self.lambda_rel > 0 and line_relations is not None:
             if gru_hidden is None:
                 gru_hidden = line_features
@@ -363,9 +377,15 @@ class JointModel(nn.Module):
                     rel_label = sample_relations[child_idx].item()
 
                     if parent_idx < 0 or parent_idx >= num_lines:
+                        debug_skipped_parent += 1
                         continue
                     if rel_label == -100:
+                        debug_skipped_label += 1
                         continue
+
+                    # 统计 label 分布
+                    if rel_label in debug_label_counts:
+                        debug_label_counts[rel_label] += 1
 
                     if use_gru_offset:
                         parent_gru_idx = parent_idx + 1
@@ -386,6 +406,8 @@ class JointModel(nn.Module):
                     rel_loss = rel_loss + loss
 
                     pred_rel = rel_logits.argmax(dim=1).item()
+                    if pred_rel in debug_pred_counts:
+                        debug_pred_counts[pred_rel] += 1
                     if pred_rel == rel_label:
                         rel_correct += 1
                     rel_total += 1
@@ -393,6 +415,16 @@ class JointModel(nn.Module):
             if rel_total > 0:
                 rel_loss = rel_loss / rel_total
                 self._rel_acc = rel_correct / rel_total
+
+            # 打印调试信息（每 100 步打印一次）
+            if not hasattr(self, '_debug_step'):
+                self._debug_step = 0
+            self._debug_step += 1
+            if self._debug_step % 100 == 1:
+                print(f"[Stage4 Debug] rel_total={rel_total}, skipped_parent={debug_skipped_parent}, skipped_label={debug_skipped_label}")
+                print(f"[Stage4 Debug] Label dist: connect={debug_label_counts[0]}, contain={debug_label_counts[1]}, equality={debug_label_counts[2]}")
+                print(f"[Stage4 Debug] Pred dist:  connect={debug_pred_counts[0]}, contain={debug_pred_counts[1]}, equality={debug_pred_counts[2]}")
+                print(f"[Stage4 Debug] use_gru_offset={use_gru_offset}, gru_hidden shape={gru_hidden.shape if gru_hidden is not None else None}")
 
             outputs["rel_loss"] = rel_loss
             outputs["loss"] = outputs["loss"] + rel_loss * self.lambda_rel

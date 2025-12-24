@@ -237,11 +237,13 @@ class JointTrainer(Trainer):
         self,
         model_args: JointModelArguments = None,
         learning_rate_stage34: float = 5e-4,
+        document_level: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.model_args = model_args
         self.learning_rate_stage34 = learning_rate_stage34
+        self.document_level = document_level
 
         # 用于记录各 loss
         self._current_loss_dict = {}
@@ -312,6 +314,31 @@ class JointTrainer(Trainer):
             logs.update(self._current_loss_dict)
 
         super().log(logs)
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        """
+        重写评估方法
+
+        文档级别模式下跳过 Trainer 内置的 prediction_loop（形状不一致会失败），
+        只触发 callbacks（E2EEvaluationCallback 会运行正确的评估）。
+        """
+        if self.document_level:
+            # 文档级别：跳过 prediction_loop，直接调用 callbacks
+            self.model.eval()
+
+            # 手动遍历 callbacks 并调用 on_evaluate（传递 model）
+            for callback in self.callback_handler.callbacks:
+                if hasattr(callback, 'on_evaluate'):
+                    callback.on_evaluate(
+                        self.args, self.state, self.control,
+                        model=self.model, metrics={}
+                    )
+
+            self.model.train()
+            return {}
+        else:
+            # 页面级别：正常评估
+            return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         """保存模型，分别保存各 Stage + Trainer 状态"""
@@ -575,6 +602,7 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
 
     loader_config = HRDocDataLoaderConfig(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
+        dataset_name=data_args.dataset,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
         max_length=512,
         preprocessing_num_workers=num_workers,
         overwrite_cache=False,
@@ -1022,6 +1050,7 @@ def main():
         args=training_args,
         model_args=model_args,
         learning_rate_stage34=training_args.learning_rate_stage34,
+        document_level=data_args.document_level,  # 文档级别模式下跳过 prediction_loop
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
@@ -1048,12 +1077,13 @@ def main():
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
 
-    # 评估
+    # 最终评估
     if eval_dataset is not None:
         logger.info("Running final evaluation...")
-        eval_metrics = trainer.evaluate()
-        trainer.log_metrics("eval", eval_metrics)
-        trainer.save_metrics("eval", eval_metrics)
+        eval_metrics = trainer.evaluate()  # 文档级别模式会自动跳过 prediction_loop
+        if eval_metrics:
+            trainer.log_metrics("eval", eval_metrics)
+            trainer.save_metrics("eval", eval_metrics)
 
     # 更新实验状态
     best_metric = metrics.get("train_loss", 0.0)

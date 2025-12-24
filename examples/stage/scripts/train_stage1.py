@@ -293,6 +293,8 @@ def main():
         # Other
         "--seed", str(train_cfg.seed),
         "--report_to", "none",  # Disable TensorBoard to avoid distutils.version issue
+        # Dataset name for cache isolation
+        "--dataset_name", args.dataset,
     ]
 
     # Add eval_steps if evaluation is enabled

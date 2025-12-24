@@ -65,12 +65,20 @@ def run_e2e_inference_single(
     if device is None:
         device = next(model.stage1.parameters()).device
 
+    # 处理 image：文档级别模式下可能是 list，需要转换为 tensor
+    image = batch.get("image")
+    if image is not None and isinstance(image, list):
+        image = torch.stack([
+            torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+            for img in image
+        ]).to(device)
+
     # ==================== Stage 1: Classification ====================
     stage1_outputs = model.stage1(
         input_ids=batch["input_ids"],
         bbox=batch["bbox"],
         attention_mask=batch["attention_mask"],
-        image=batch.get("image"),
+        image=image,
         output_hidden_states=True,
     )
 

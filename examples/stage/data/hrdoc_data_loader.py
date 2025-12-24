@@ -25,9 +25,14 @@ logger = logging.getLogger(__name__)
 
 # ==================== 独立数据集加载函数 ====================
 
-def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = True):
+def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = True, dataset_name: str = "hrdoc"):
     """
     独立的数据集加载函数（不需要 tokenizer）
+
+    Args:
+        data_dir: 数据目录
+        force_rebuild: 是否强制重建缓存
+        dataset_name: 数据集名称，用于区分不同数据集的缓存（如 hrds, hrdh, tender）
     """
     import layoutlmft.data.datasets.hrdoc
 
@@ -35,22 +40,28 @@ def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = True):
         os.environ["HRDOC_DATA_DIR"] = data_dir
 
     actual_dir = data_dir or os.environ.get("HRDOC_DATA_DIR", "default")
-    print(f"[DataLoader] Loading HRDoc dataset from: {actual_dir}", flush=True)
-    logger.info(f"Loading HRDoc dataset from {actual_dir}")
+    print(f"[DataLoader] Loading dataset '{dataset_name}' from: {actual_dir}", flush=True)
+    logger.info(f"Loading dataset '{dataset_name}' from {actual_dir}")
 
+    # 使用 dataset_name 作为配置名称，确保不同数据集使用不同缓存
+    # 注意：HuggingFace datasets 缓存 key 基于脚本 hash + config name，不包含环境变量
     if force_rebuild:
         print(f"[DataLoader] Force rebuild enabled, ignoring cache", flush=True)
         datasets = load_dataset(
             os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__),
+            name=dataset_name,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
             download_mode="force_redownload",
         )
     else:
-        datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
+        datasets = load_dataset(
+            os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__),
+            name=dataset_name,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
+        )
 
     train_count = len(datasets.get("train", []))
     val_count = len(datasets.get("validation", []))
     test_count = len(datasets.get("test", []))
-    print(f"[DataLoader] Dataset loaded: train={train_count}, validation={val_count}, test={test_count}", flush=True)
+    print(f"[DataLoader] Dataset '{dataset_name}' loaded: train={train_count}, validation={val_count}, test={test_count}", flush=True)
 
     return datasets
 
@@ -403,6 +414,7 @@ def compute_line_bboxes(
 class HRDocDataLoaderConfig:
     """数据加载器配置"""
     data_dir: str = None
+    dataset_name: str = "hrdoc"  # 数据集名称，用于区分缓存（如 hrds, hrdh, tender）
     max_length: int = 512
     preprocessing_num_workers: int = 4
     overwrite_cache: bool = False
@@ -444,6 +456,7 @@ class HRDocDataLoader:
         self._raw_datasets = load_hrdoc_raw_datasets(
             data_dir=self.config.data_dir,
             force_rebuild=self.config.force_rebuild,
+            dataset_name=self.config.dataset_name,
         )
         return self._raw_datasets
 
