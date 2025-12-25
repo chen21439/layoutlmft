@@ -170,7 +170,7 @@ class JointDataArguments:
     covmatch: Optional[str] = field(default=None, metadata={"help": "Covmatch split name (e.g., doc_covmatch_dev50_seed42). If not specified, uses config default."})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
-    use_cache: bool = field(default=True, metadata={"help": "Use cached dataset"})
+    overwrite_cache: bool = field(default=False, metadata={"help": "Overwrite cached dataset (force rebuild)"})
     document_level: bool = field(default=True, metadata={"help": "Use document-level batching (preserves cross-page relations)"})
 
 
@@ -614,10 +614,10 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
         dataset_name=data_args.dataset,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
         max_length=512,
         preprocessing_num_workers=num_workers,
-        overwrite_cache=False,
+        overwrite_cache=data_args.overwrite_cache,
         max_train_samples=data_args.max_train_samples if data_args.max_train_samples > 0 else None,
         max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
-        force_rebuild=not data_args.use_cache,  # use_cache=False -> force_rebuild=True
+        force_rebuild=data_args.overwrite_cache,  # 统一使用 overwrite_cache 控制缓存
         document_level=data_args.document_level,  # False=页面级别（快），True=文档级别（慢）
     )
 

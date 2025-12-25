@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Stage 1: LayoutXLM Fine-tuning Training Script
+Stage 1: LayoutXLM Fine-tuning Training Script (Line-Level Classification)
+
+默认使用 Line-Level 分类（Mean Pooling），与联合训练对齐。
 
 Usage:
     # Auto-detect environment, use default dataset (hrds)
@@ -26,6 +28,9 @@ Usage:
 
     # Override specific parameters
     python scripts/train_stage1.py --max_steps 100 --batch_size 2
+
+    # Use token-level classification (legacy mode)
+    python scripts/train_stage1.py --env test --token_level
 """
 
 import os
@@ -97,6 +102,8 @@ def parse_args():
     # Flags
     parser.add_argument("--dry_run", action="store_true",
                         help="Print config and exit without training")
+    parser.add_argument("--token_level", action="store_true",
+                        help="Use token-level classification (legacy mode, default: line-level)")
 
     return parser.parse_args()
 
@@ -258,6 +265,10 @@ def main():
     print("=" * 60)
 
     if args.dry_run:
+        # 在 dry_run 模式下也打印 quick test 信息
+        if config.quick_test.enabled:
+            max_samples = getattr(config.quick_test, 'max_samples', 100)
+            print(f"Quick test: max_train_samples={max_samples}, max_val_samples={max_samples}")
         print("\n[Dry run mode - exiting without training]")
         return
 
@@ -265,7 +276,13 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # Build training command
-    train_script = os.path.join(PROJECT_ROOT, "examples", "stage", "run_hrdoc.py")
+    # 默认使用 line-level 分类（与联合训练对齐）
+    if args.token_level:
+        train_script = os.path.join(PROJECT_ROOT, "examples", "stage", "run_hrdoc.py")
+        print("Mode: Token-Level Classification (legacy)")
+    else:
+        train_script = os.path.join(PROJECT_ROOT, "examples", "stage", "run_hrdoc_line_level.py")
+        print("Mode: Line-Level Classification (aligned with JointModel)")
 
     cmd_args = [
         sys.executable, train_script,
@@ -310,6 +327,13 @@ def main():
                 cmd_args.extend(["--metric_for_best_model", metric])
             if getattr(train_cfg, 'greater_is_better', True):
                 cmd_args.extend(["--greater_is_better", "True"])
+
+    # Quick test mode: limit samples
+    if config.quick_test.enabled:
+        max_samples = getattr(config.quick_test, 'max_samples', 100)
+        cmd_args.extend(["--max_train_samples", str(max_samples)])
+        cmd_args.extend(["--max_val_samples", str(max_samples)])
+        print(f"Quick test: max_train_samples={max_samples}, max_val_samples={max_samples}")
 
     # Handle checkpoint resume/restart
     # Note: run_hrdoc.py auto-detects checkpoints via get_last_checkpoint()

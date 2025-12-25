@@ -297,6 +297,7 @@ def main():
     datasets = load_hrdoc_raw_datasets(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
         dataset_name=dataset_name,
+        force_rebuild=data_args.overwrite_cache,  # 使用命令行参数控制是否重建缓存
     )
 
     if training_args.do_train:

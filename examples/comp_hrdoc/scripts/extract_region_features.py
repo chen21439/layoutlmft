@@ -58,6 +58,7 @@ from layoutlmft.models.layoutxlm import (
     LayoutXLMConfig,
     LayoutXLMTokenizerFast,
 )
+from layoutlmft.data.utils import load_image
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,15 @@ def get_output_path(env: str) -> str:
     paths = {
         "dev": "/mnt/e/models/data/Section/Comp_HRDoc/line_features",
         "test": "/data/LLM_group/layoutlmft/data/Comp_HRDoc/line_features",
+    }
+    return paths.get(env, paths["dev"])
+
+
+def get_image_dir(env: str) -> str:
+    """获取图片目录路径"""
+    paths = {
+        "dev": "/mnt/e/models/data/Section/Comp_HRDoc/HRDH_MSRA_POD_TRAIN/Images",
+        "test": "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TRAIN/Images",
     }
     return paths.get(env, paths["dev"])
 
@@ -237,12 +247,29 @@ class LineFeatureExtractor:
         tokenizer: LayoutXLMTokenizerFast,
         device: torch.device,
         max_length: int = 512,
+        image_dir: str = None,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.max_length = max_length
+        self.image_dir = image_dir
         self.model.eval()
+        # 当前页面的图片缓存
+        self._current_image = None
+
+    def set_page_image(self, image_path: str):
+        """加载并缓存页面图片
+
+        Args:
+            image_path: 图片文件路径
+        """
+        if os.path.exists(image_path):
+            image, _ = load_image(image_path)
+            self._current_image = image.unsqueeze(0).to(self.device)
+        else:
+            logger.warning(f"Image not found: {image_path}, using zeros")
+            self._current_image = torch.zeros(1, 3, 224, 224, device=self.device)
 
     @torch.no_grad()
     def extract_line_feature(
@@ -305,14 +332,13 @@ class LineFeatureExtractor:
         input_ids = torch.tensor([input_ids], dtype=torch.long, device=self.device)
         attention_mask = torch.tensor([attention_mask], dtype=torch.long, device=self.device)
         bbox_tensor = torch.tensor([input_bboxes], dtype=torch.long, device=self.device)
-        image = torch.zeros(1, 3, 224, 224, device=self.device)
 
-        # Forward
+        # Forward (image 由外部传入)
         outputs = self.model(
             input_ids=input_ids,
             bbox=bbox_tensor,
             attention_mask=attention_mask,
-            image=image,
+            image=self._current_image,  # 使用当前缓存的图片
             output_hidden_states=True,
         )
 
@@ -338,6 +364,7 @@ class LineFeatureExtractor:
         """
         pages = doc_sample['pages']
         lines = doc_sample['lines']
+        doc_id = doc_sample.get('doc_id', 'unknown')
         num_lines = len(lines)
 
         if num_lines == 0:
@@ -349,9 +376,18 @@ class LineFeatureExtractor:
         all_features = torch.zeros(num_lines, hidden_size)
         all_mask = torch.ones(num_lines, dtype=torch.bool)
 
+        # 按页处理，避免重复加载图片
+        current_page_id = -1
         for idx, line in enumerate(lines):
             page_id = line['page_id']
             page_info = pages[page_id] if page_id < len(pages) else pages[0]
+
+            # 如果换页了，加载新页面的图片
+            if page_id != current_page_id:
+                current_page_id = page_id
+                # 构建图片路径: {image_dir}/{file_name}
+                image_path = os.path.join(self.image_dir, page_info['file_name'])
+                self.set_page_image(image_path)
 
             feature = self.extract_line_feature(
                 text=line['text'],
@@ -511,10 +547,12 @@ def main():
     data_path = args.data_path or get_data_path(args.env)
     layoutxlm_path = args.layoutxlm_path or get_layoutxlm_path(args.env)
     output_dir = args.output_dir or get_output_path(args.env)
+    image_dir = get_image_dir(args.env)
 
     logger.info(f"Environment: {args.env}")
     logger.info(f"Data path: {data_path}")
     logger.info(f"LayoutXLM path: {layoutxlm_path}")
+    logger.info(f"Image dir: {image_dir}")
     logger.info(f"Output dir: {output_dir}")
 
     if args.quick:
@@ -559,6 +597,7 @@ def main():
         tokenizer=tokenizer,
         device=device,
         max_length=args.max_length,
+        image_dir=image_dir,
     )
 
     train_chunks = extract_all_features(

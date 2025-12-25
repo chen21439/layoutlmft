@@ -25,13 +25,13 @@ logger = logging.getLogger(__name__)
 
 # ==================== 独立数据集加载函数 ====================
 
-def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = True, dataset_name: str = "hrdoc"):
+def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = False, dataset_name: str = "hrdoc"):
     """
     独立的数据集加载函数（不需要 tokenizer）
 
     Args:
         data_dir: 数据目录
-        force_rebuild: 是否强制重建缓存
+        force_rebuild: 是否强制重建缓存（默认 False，使用缓存加速加载）
         dataset_name: 数据集名称，用于区分不同数据集的缓存（如 hrds, hrdh, tender）
     """
     import layoutlmft.data.datasets.hrdoc

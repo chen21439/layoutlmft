@@ -663,6 +663,15 @@ class LayoutLMv2Model(LayoutLMv2PreTrainedModel):
         return embeddings
 
     def _calc_img_embeddings(self, image, bbox, position_ids):
+        # Debug: 打印 image 信息
+        if not hasattr(self, '_debug_img_logged'):
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"[DEBUG] image type: {type(image)}, shape: {image.shape if hasattr(image, 'shape') else 'N/A'}")
+            logger.warning(f"[DEBUG] image dtype: {image.dtype if hasattr(image, 'dtype') else 'N/A'}")
+            logger.warning(f"[DEBUG] image device: {image.device if hasattr(image, 'device') else 'N/A'}")
+            logger.warning(f"[DEBUG] image min/max: {image.min().item():.4f} / {image.max().item():.4f}")
+            self._debug_img_logged = True
         visual_embeddings = self.visual_proj(self.visual(image))
         position_embeddings = self.embeddings.position_embeddings(position_ids)
         spatial_position_embeddings = self.embeddings._cal_spatial_position_embeddings(bbox)

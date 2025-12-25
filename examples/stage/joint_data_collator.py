@@ -111,10 +111,10 @@ class HRDocJointDataCollator:
         if has_line_ids:
             batch["line_ids"] = torch.tensor(padded_line_ids, dtype=torch.long)
 
-        # Image
+        # Image（确保转换为 float 类型）
         if image[0] is not None:
             batch["image"] = torch.stack([
-                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                torch.tensor(img).float() if not isinstance(img, torch.Tensor) else img.float()
                 for img in image
             ])
 

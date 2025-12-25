@@ -172,6 +172,9 @@ def train_epoch(
         parent_ids = batch.get("parent_ids")
         if parent_ids is not None:
             parent_ids = parent_ids.to(device)
+        sibling_labels = batch.get("sibling_labels")
+        if sibling_labels is not None:
+            sibling_labels = sibling_labels.to(device)
 
         # Normalize bboxes to [0, 999]
         bboxes = bboxes.clamp(0, 999)
@@ -185,6 +188,7 @@ def train_epoch(
                     region_mask=region_mask,
                     reading_orders=reading_orders,
                     parent_labels=parent_ids,
+                    sibling_labels=sibling_labels,
                 )
                 loss = outputs["loss"] / args.gradient_accumulation_steps
         else:
@@ -194,6 +198,7 @@ def train_epoch(
                 region_mask=region_mask,
                 reading_orders=reading_orders,
                 parent_labels=parent_ids,
+                sibling_labels=sibling_labels,
             )
             loss = outputs["loss"] / args.gradient_accumulation_steps
 
@@ -265,6 +270,9 @@ def evaluate(
         parent_ids = batch.get("parent_ids")
         if parent_ids is not None:
             parent_ids = parent_ids.to(device)
+        sibling_labels = batch.get("sibling_labels")
+        if sibling_labels is not None:
+            sibling_labels = sibling_labels.to(device)
 
         bboxes = bboxes.clamp(0, 999)
 
@@ -274,6 +282,7 @@ def evaluate(
             region_mask=region_mask,
             reading_orders=reading_orders,
             parent_labels=parent_ids,
+            sibling_labels=sibling_labels,
         )
 
         loss_val = outputs["loss"].item()
