@@ -7,52 +7,29 @@
 Usage:
     python train_order.py --env test --quick           # 快速测试
     python train_order.py --env test --num-epochs 20   # 完整训练
+    python train_order.py --env test --new-exp         # 创建新实验
 """
 
 # ==================== GPU 设置（必须在 import torch 之前）====================
 import os
 import sys
 
+# 添加项目路径（必须在导入其他模块之前）
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-def _setup_gpu_early():
-    """在 import torch 之前设置 GPU"""
-    env = "dev"
-    for i, arg in enumerate(sys.argv):
-        if arg == "--env" and i + 1 < len(sys.argv):
-            env = sys.argv[i + 1]
-            break
-
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "configs", "order.yaml"
-    )
-
-    if os.path.exists(config_path):
-        import yaml
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-        gpu_config = config.get('gpu', {})
-        cuda_visible_devices = gpu_config.get(env)
-        if cuda_visible_devices:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
-            print(f"[GPU Setup] env={env}, CUDA_VISIBLE_DEVICES={cuda_visible_devices}")
-
-
-_setup_gpu_early()
+from examples.comp_hrdoc.utils.config import setup_environment
+setup_environment()
 # ==================== GPU 设置结束 ====================
 
 import argparse
 import logging
 from typing import Dict
-from pathlib import Path
 
 import torch
 from torch.optim import AdamW
 from tqdm import tqdm
-
-# 添加项目路径
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 from examples.comp_hrdoc.data.region_feature_loader import (
     RegionFeatureDataset,

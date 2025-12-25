@@ -194,11 +194,20 @@ class Predictor:
 
         use_gru = getattr(self.model, 'use_gru', False)
 
+        # 获取 cls_logits（用于 soft-mask）
+        # 如果模型有 cls_head（line-level 分类），使用它来获取 cls_logits
+        cls_logits = None
+        if hasattr(self.model, 'cls_head') and self.model.cls_head is not None:
+            valid_features = line_features[:actual_num_lines]  # [L, H]
+            cls_logits = self.model.cls_head(valid_features)  # [L, num_classes]
+            cls_logits = cls_logits.unsqueeze(0)  # [1, L, num_classes]
+
         if use_gru:
             parent_logits, gru_hidden = self.model.stage3(
                 line_features.unsqueeze(0),
                 line_mask.unsqueeze(0),
-                return_gru_hidden=True
+                return_gru_hidden=True,
+                cls_logits=cls_logits  # 传入分类 logits 用于 soft-mask
             )
             gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
 

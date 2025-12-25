@@ -2,12 +2,20 @@
 
 Handles config loading, GPU setup, and environment detection.
 
+Config Structure:
+    configs/
+    ├── base.yaml     # 通用参数（模型、训练等）
+    ├── dev.yaml      # dev 环境（本地路径、GPU等）
+    └── test.yaml     # test 环境（服务器路径、GPU等）
+
 Usage:
     # At the VERY START of any script, before importing torch:
-    from examples.comp_hrdoc.utils.config import setup_environment
-    setup_environment()  # Must be called before `import torch`
+    from examples.comp_hrdoc.utils.config import setup_environment, load_config
+    env = setup_environment()  # Must be called before `import torch`
 
     import torch  # Now torch sees only configured GPU
+
+    config = load_config(env)  # Load merged config
 """
 
 import os
@@ -29,30 +37,28 @@ def get_env_from_argv() -> Optional[str]:
     return None
 
 
-def load_yaml_config(config_name: str = "order.yaml") -> Dict[str, Any]:
-    """Load YAML configuration file.
+def load_yaml_file(path: Path) -> Dict[str, Any]:
+    """Load a YAML file.
 
     Args:
-        config_name: Name of config file in configs/ directory
+        path: Path to YAML file
 
     Returns:
         Parsed config dict
     """
-    config_path = CONFIG_DIR / config_name
-    if not config_path.exists():
+    if not path.exists():
         return {}
 
     try:
         import yaml
-        with open(config_path) as f:
+        with open(path) as f:
             return yaml.safe_load(f) or {}
     except ImportError:
-        # Fallback: parse simple yaml without pyyaml
-        return _parse_simple_yaml(config_path)
+        return _parse_simple_yaml(path)
 
 
 def _parse_simple_yaml(path: Path) -> Dict[str, Any]:
-    """Simple YAML parser for basic key-value configs."""
+    """Simple YAML parser for basic key-value configs (fallback)."""
     config = {}
     current_section = config
     section_stack = [config]
@@ -66,7 +72,6 @@ def _parse_simple_yaml(path: Path) -> Dict[str, Any]:
 
             indent = len(line) - len(line.lstrip())
 
-            # Pop sections based on indent
             while indent_stack and indent <= indent_stack[-1] and len(section_stack) > 1:
                 section_stack.pop()
                 indent_stack.pop()
@@ -78,7 +83,6 @@ def _parse_simple_yaml(path: Path) -> Dict[str, Any]:
                 value = value.strip()
 
                 if value:
-                    # Parse value
                     if value == "null" or value == "~":
                         current_section[key] = None
                     elif value == "true":
@@ -87,6 +91,10 @@ def _parse_simple_yaml(path: Path) -> Dict[str, Any]:
                         current_section[key] = False
                     elif value.startswith('"') and value.endswith('"'):
                         current_section[key] = value[1:-1]
+                    elif value.startswith('[') and value.endswith(']'):
+                        # Simple list parsing
+                        items = value[1:-1].split(',')
+                        current_section[key] = [int(x.strip()) for x in items if x.strip()]
                     else:
                         try:
                             current_section[key] = int(value)
@@ -96,7 +104,6 @@ def _parse_simple_yaml(path: Path) -> Dict[str, Any]:
                             except ValueError:
                                 current_section[key] = value
                 else:
-                    # New section
                     current_section[key] = {}
                     section_stack.append(current_section[key])
                     indent_stack.append(indent)
@@ -105,26 +112,92 @@ def _parse_simple_yaml(path: Path) -> Dict[str, Any]:
     return config
 
 
-def get_gpu_config(env: Optional[str] = None, config_name: str = "order.yaml") -> Optional[str]:
-    """Get GPU configuration for environment.
+def deep_merge(base: Dict, override: Dict) -> Dict:
+    """Deep merge two dictionaries. Override values take precedence.
+
+    Args:
+        base: Base dictionary
+        override: Override dictionary
+
+    Returns:
+        Merged dictionary
+    """
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(env: Optional[str] = None) -> Dict[str, Any]:
+    """Load merged configuration for environment.
+
+    Loads base.yaml and merges with environment-specific config (dev.yaml/test.yaml).
 
     Args:
         env: Environment name (dev/test). Auto-detected from argv if None.
-        config_name: Config file name
+
+    Returns:
+        Merged config dict
+    """
+    if env is None:
+        env = get_env_from_argv() or os.environ.get("COMP_HRDOC_ENV", "dev")
+
+    # Load base config
+    base_config = load_yaml_file(CONFIG_DIR / "base.yaml")
+
+    # Load environment config
+    env_config = load_yaml_file(CONFIG_DIR / f"{env}.yaml")
+
+    # Merge configs (env overrides base)
+    config = deep_merge(base_config, env_config)
+
+    # Add environment info
+    config["_env"] = env
+
+    return config
+
+
+def get_artifact_path(env: Optional[str] = None) -> str:
+    """Get artifact directory path for environment.
+
+    Args:
+        env: Environment name (dev/test)
+
+    Returns:
+        Artifact directory path
+    """
+    config = load_config(env)
+    return config.get("artifact", {}).get("root", "artifact")
+
+
+def get_data_path(env: Optional[str] = None, key: str = "root") -> str:
+    """Get data path for environment.
+
+    Args:
+        env: Environment name
+        key: Data path key (root, train_dir, test_dir, features_dir)
+
+    Returns:
+        Data path
+    """
+    config = load_config(env)
+    return config.get("data", {}).get(key, "")
+
+
+def get_gpu_config(env: Optional[str] = None) -> Optional[str]:
+    """Get GPU configuration for environment.
+
+    Args:
+        env: Environment name
 
     Returns:
         CUDA_VISIBLE_DEVICES string or None
     """
-    if env is None:
-        env = get_env_from_argv()
-
-    if env is None:
-        env = os.environ.get("COMP_HRDOC_ENV", "dev")
-
-    config = load_yaml_config(config_name)
-    gpu_config = config.get("gpu", {})
-
-    return gpu_config.get(env)
+    config = load_config(env)
+    return config.get("gpu", {}).get("cuda_visible_devices")
 
 
 def setup_gpu(env: Optional[str] = None, gpu_id: Optional[str] = None) -> None:
@@ -173,32 +246,6 @@ def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def get_config(env: Optional[str] = None, config_name: str = "order.yaml") -> Dict[str, Any]:
-    """Get full resolved config for environment.
-
-    Args:
-        env: Environment name
-        config_name: Config file name
-
-    Returns:
-        Config dict with environment-specific values resolved
-    """
-    if env is None:
-        env = get_env_from_argv() or os.environ.get("COMP_HRDOC_ENV", "dev")
-
-    config = load_yaml_config(config_name)
-    config["_env"] = env
-
-    # Resolve environment-specific paths
-    if "data" in config and env in config["data"]:
-        config["data"]["_resolved"] = config["data"][env]
-
-    if "artifact" in config and env in config["artifact"]:
-        config["artifact"]["_resolved"] = config["artifact"][env]
-
-    return config
-
-
 def print_gpu_info():
     """Print GPU information. Call after importing torch."""
     import torch
@@ -207,3 +254,16 @@ def print_gpu_info():
         print(f"[GPU] Device count: {torch.cuda.device_count()}")
         print(f"[GPU] Current device: {torch.cuda.current_device()}")
         print(f"[GPU] Device name: {torch.cuda.get_device_name(0)}")
+
+
+def print_config(config: Dict[str, Any], indent: int = 0) -> None:
+    """Pretty print configuration."""
+    for key, value in config.items():
+        if key.startswith("_"):
+            continue
+        prefix = "  " * indent
+        if isinstance(value, dict):
+            print(f"{prefix}{key}:")
+            print_config(value, indent + 1)
+        else:
+            print(f"{prefix}{key}: {value}")

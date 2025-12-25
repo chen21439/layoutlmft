@@ -49,9 +49,32 @@ from transformers.modeling_outputs import TokenClassifierOutput
 # 导入共享模块
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "stage"))
-from models.modules import LinePooling
-from models.heads import LineClassificationHead
+
+# 使用绝对路径导入 stage/models 模块
+_stage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "stage"))
+if _stage_dir not in sys.path:
+    sys.path.insert(0, _stage_dir)
+
+try:
+    from models.modules import LinePooling
+    from models.heads import LineClassificationHead
+except ImportError:
+    # 备用导入方式：如果上面失败，尝试从当前目录相对导入
+    import importlib.util
+
+    # 加载 line_pooling.py
+    lp_path = os.path.join(_stage_dir, "models", "modules", "line_pooling.py")
+    spec = importlib.util.spec_from_file_location("line_pooling", lp_path)
+    line_pooling_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(line_pooling_module)
+    LinePooling = line_pooling_module.LinePooling
+
+    # 加载 classification_head.py
+    ch_path = os.path.join(_stage_dir, "models", "heads", "classification_head.py")
+    spec = importlib.util.spec_from_file_location("classification_head", ch_path)
+    classification_head_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(classification_head_module)
+    LineClassificationHead = classification_head_module.LineClassificationHead
 
 
 class JointModel(nn.Module):
@@ -72,9 +95,10 @@ class JointModel(nn.Module):
         feature_extractor=None,  # 不再使用，保留参数以兼容旧代码
         num_classes: int = 14,  # 分类类别数
         hidden_size: int = 768,  # LayoutLM hidden size
-        lambda_cls: float = 1.0,
+        lambda_cls: float = 1.0,  # Stage 1 分类损失权重
         lambda_parent: float = 1.0,
         lambda_rel: float = 1.0,
+        use_line_level_cls: bool = True,  # True=使用line-level mean pool (推荐), False=使用原有token-level+投票
         use_focal_loss: bool = True,
         use_gru: bool = True,
         stage1_micro_batch_size: int = 8,
@@ -109,6 +133,7 @@ class JointModel(nn.Module):
         self.lambda_parent = lambda_parent
         self.lambda_rel = lambda_rel
         self.use_gru = use_gru
+        self.use_line_level_cls = use_line_level_cls  # 新增：控制分类方式
         self.stage1_micro_batch_size = stage1_micro_batch_size
         self.stage1_no_grad = stage1_no_grad
         self.num_classes = num_classes
@@ -333,6 +358,131 @@ class JointModel(nn.Module):
                 line_features[doc_idx, :num_lines_in_doc] = features
                 line_mask[doc_idx, :num_lines_in_doc] = mask
 
+        # ==================== Stage 1: 分类 ====================
+        # 初始化 outputs 字典
+        outputs = {
+            "loss": torch.tensor(0.0, device=device),
+            "logits": None,
+            "cls_loss": torch.tensor(0.0, device=device),
+        }
+
+        cls_loss = torch.tensor(0.0, device=device)
+        cls_correct = 0
+        cls_total = 0
+
+        if self.lambda_cls > 0:
+            if self.use_line_level_cls:
+                # ========== 新方式：Line-level mean pooling + 分类头 ==========
+                # 从 token labels 提取 line_labels
+                if line_labels is None and labels is not None:
+                    line_labels = torch.full((num_docs, line_features.shape[1]), -100, dtype=torch.long, device=device)
+
+                    if is_page_level:
+                        for b in range(num_docs):
+                            sample_line_ids = line_ids[b]
+                            sample_labels = labels[b] if labels.dim() > 1 else labels
+                            num_lines = int(line_mask[b].sum().item())
+
+                            for line_idx in range(num_lines):
+                                token_mask = (sample_line_ids == line_idx)
+                                if token_mask.any():
+                                    first_token_idx = token_mask.nonzero(as_tuple=True)[0][0]
+                                    if sample_labels.dim() > 0 and first_token_idx < len(sample_labels):
+                                        label = sample_labels[first_token_idx].item()
+                                        if label >= 0:
+                                            line_labels[b, line_idx] = label
+                    else:
+                        chunk_idx = 0
+                        for doc_idx in range(num_docs):
+                            num_chunks = chunks_per_doc[doc_idx]
+                            num_lines = int(line_mask[doc_idx].sum().item())
+
+                            doc_line_ids_flat = line_ids[chunk_idx:chunk_idx + num_chunks].reshape(-1)
+                            doc_labels_flat = labels[chunk_idx:chunk_idx + num_chunks].reshape(-1)
+
+                            for line_idx in range(num_lines):
+                                token_mask = (doc_line_ids_flat == line_idx)
+                                if token_mask.any():
+                                    first_token_idx = token_mask.nonzero(as_tuple=True)[0][0]
+                                    label = doc_labels_flat[first_token_idx].item()
+                                    if label >= 0:
+                                        line_labels[doc_idx, line_idx] = label
+
+                            chunk_idx += num_chunks
+
+                # Line-level 分类
+                all_cls_logits = []
+                for b in range(num_docs):
+                    sample_features = line_features[b]
+                    num_lines = int(line_mask[b].sum().item())
+
+                    if num_lines > 0:
+                        valid_features = sample_features[:num_lines]
+                        logits = self.cls_head(valid_features)
+                        all_cls_logits.append(logits)
+
+                        if line_labels is not None:
+                            sample_labels = line_labels[b, :num_lines]
+                            valid_indices = sample_labels != -100
+                            if valid_indices.any():
+                                valid_logits = logits[valid_indices]
+                                valid_targets = sample_labels[valid_indices]
+                                loss = F.cross_entropy(valid_logits, valid_targets)
+                                cls_loss = cls_loss + loss
+
+                                preds = valid_logits.argmax(dim=-1)
+                                cls_correct += (preds == valid_targets).sum().item()
+                                cls_total += valid_targets.numel()
+
+                if cls_total > 0:
+                    cls_loss = cls_loss / num_docs
+                    self._cls_acc = cls_correct / cls_total
+
+                if all_cls_logits:
+                    max_len = max(l.shape[0] for l in all_cls_logits)
+                    padded_logits = torch.zeros(num_docs, max_len, self.num_classes, device=device)
+                    for b, logits in enumerate(all_cls_logits):
+                        padded_logits[b, :logits.shape[0]] = logits
+                    outputs["logits"] = padded_logits
+
+            else:
+                # ========== 默认方式：Token-level 分类（使用 LayoutXLM 内置分类头）==========
+                # 直接使用 backbone 的 token-level 输出计算损失
+                # 注意：hidden_states 已经在 Step 1 获取，这里使用 backbone 的分类头
+                if labels is not None:
+                    # 重新前向传播获取 token-level logits（因为之前没有传 labels）
+                    # 为了效率，直接使用 backbone 的 classifier
+                    if hasattr(self.backbone, 'classifier'):
+                        token_logits = self.backbone.classifier(hidden_states[:, :text_seq_len, :])
+                    elif hasattr(self.backbone, 'dropout') and hasattr(self.backbone, 'classifier'):
+                        x = self.backbone.dropout(hidden_states[:, :text_seq_len, :])
+                        token_logits = self.backbone.classifier(x)
+                    else:
+                        # 回退：重新调用 backbone
+                        token_logits = None
+
+                    if token_logits is not None:
+                        # 计算 token-level 损失
+                        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                        active_loss = attention_mask.view(-1) == 1
+                        active_logits = token_logits.view(-1, self.num_classes)[active_loss]
+                        active_labels = labels.view(-1)[active_loss]
+                        cls_loss = loss_fct(active_logits, active_labels)
+
+                        # 计算准确率
+                        valid_mask = active_labels != -100
+                        if valid_mask.any():
+                            preds = active_logits[valid_mask].argmax(dim=-1)
+                            targets = active_labels[valid_mask]
+                            cls_correct = (preds == targets).sum().item()
+                            cls_total = targets.numel()
+                            self._cls_acc = cls_correct / cls_total
+
+                        outputs["logits"] = token_logits
+
+            outputs["cls_loss"] = cls_loss
+            outputs["loss"] = outputs["loss"] + cls_loss * self.lambda_cls
+
         # ==================== Stage 3: Parent Finding ====================
         parent_loss = torch.tensor(0.0, device=device)
         parent_correct = 0
@@ -341,9 +491,39 @@ class JointModel(nn.Module):
 
         if self.lambda_parent > 0:
             if self.use_gru:
+                # 准备传入 Stage 3 的 cls_logits
+                stage1_cls_logits = None
+                if outputs.get("logits") is not None:
+                    if self.use_line_level_cls:
+                        # Line-level 模式：直接使用 outputs["logits"]
+                        # outputs["logits"]: [num_docs, max_lines, num_classes]
+                        stage1_cls_logits = outputs["logits"]
+                    else:
+                        # Token-level 模式：使用 cls_head 对 line_features 做预测
+                        # line_features 已经是 line-level 的，可以直接用
+                        with torch.no_grad():  # 避免额外的梯度计算
+                            all_cls_logits = []
+                            for b in range(num_docs):
+                                sample_features = line_features[b]
+                                num_lines = int(line_mask[b].sum().item())
+                                if num_lines > 0:
+                                    valid_features = sample_features[:num_lines]
+                                    logits = self.cls_head(valid_features)
+                                    all_cls_logits.append(logits)
+
+                            if all_cls_logits:
+                                max_len = max(l.shape[0] for l in all_cls_logits)
+                                padded_logits = torch.zeros(num_docs, max_len, self.num_classes, device=device)
+                                for b, logits in enumerate(all_cls_logits):
+                                    padded_logits[b, :logits.shape[0]] = logits
+                                stage1_cls_logits = padded_logits
+
                 # 论文对齐：获取 GRU 隐状态用于 Stage 4
+                # 传入外部 cls_logits（如果有的话）
                 parent_logits, gru_hidden = self.stage3(
-                    line_features, line_mask, return_gru_hidden=True
+                    line_features, line_mask,
+                    return_gru_hidden=True,
+                    cls_logits=stage1_cls_logits  # 传入 Stage 1 的分类 logits
                 )
                 # gru_hidden: [num_docs, L+1, gru_hidden_size]，包括 ROOT
 

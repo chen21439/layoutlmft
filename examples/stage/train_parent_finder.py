@@ -33,81 +33,9 @@ sys.path.insert(0, STAGE_ROOT)
 
 from layoutlmft.data.labels import NUM_LABELS, LABEL_LIST, get_num_labels
 from util.covmatch_utils import CovmatchFeatureLoader
+from tasks.parent_finding import ChildParentDistributionMatrix
 
 logger = logging.getLogger(__name__)
-
-
-class ChildParentDistributionMatrix:
-    """
-    Child-Parent Distribution Matrix (M_cp)
-    根据训练数据统计不同语义类别的父子关系分布
-    """
-
-    def __init__(self, num_classes=None, pseudo_count=5):
-        """
-        Args:
-            num_classes: 语义类别数（不包含ROOT），默认使用 NUM_LABELS
-            pseudo_count: 加性平滑的伪计数
-        """
-        if num_classes is None:
-            num_classes = NUM_LABELS
-        self.num_classes = num_classes
-        self.pseudo_count = pseudo_count
-
-        # M_cp: [num_classes+1, num_classes]
-        # 第i列表示类别i作为子节点时，其父节点的类别分布
-        # 行包含ROOT（索引0）和所有语义类别（索引1到num_classes）
-        self.matrix = np.zeros((num_classes + 1, num_classes))
-        self.counts = np.zeros((num_classes + 1, num_classes))
-
-    def update(self, child_label, parent_label):
-        """
-        更新统计计数
-
-        Args:
-            child_label: 子节点的语义类别 [0, num_classes-1]
-            parent_label: 父节点的语义类别 [-1, num_classes-1]
-                         -1 表示 ROOT
-        """
-        if child_label < 0 or child_label >= self.num_classes:
-            return
-
-        # 将 parent_label=-1 映射到索引0（ROOT）
-        parent_idx = parent_label + 1 if parent_label >= 0 else 0
-
-        if parent_idx < 0 or parent_idx > self.num_classes:
-            return
-
-        self.counts[parent_idx, child_label] += 1
-
-    def build(self):
-        """
-        构建分布矩阵（加性平滑）
-        """
-        # 加性平滑
-        smoothed_counts = self.counts + self.pseudo_count
-
-        # 归一化每一列（每个子类别的父类别分布）
-        col_sums = smoothed_counts.sum(axis=0, keepdims=True)
-        self.matrix = smoothed_counts / (col_sums + 1e-10)
-
-        logger.info(f"Child-Parent Distribution Matrix 构建完成")
-        logger.info(f"  形状: {self.matrix.shape}")
-        logger.info(f"  统计样本数: {self.counts.sum():.0f}")
-
-    def get_tensor(self, device='cpu'):
-        """返回 torch.Tensor 版本"""
-        return torch.tensor(self.matrix, dtype=torch.float32, device=device)
-
-    def save(self, path):
-        """保存矩阵"""
-        np.save(path, self.matrix)
-        logger.info(f"保存 M_cp 到: {path}")
-
-    def load(self, path):
-        """加载矩阵"""
-        self.matrix = np.load(path)
-        logger.info(f"加载 M_cp 从: {path}")
 
 
 class ParentFinderGRU(nn.Module):
@@ -173,13 +101,15 @@ class ParentFinderGRU(nn.Module):
         self,
         line_features,     # [batch_size, max_lines, hidden_size]
         line_mask,         # [batch_size, max_lines] - 有效行的mask
-        return_gru_hidden=False  # 是否返回 GRU 隐状态（用于 Stage 4）
+        return_gru_hidden=False,  # 是否返回 GRU 隐状态（用于 Stage 4）
+        cls_logits=None,   # 外部传入的分类 logits [B, L, num_classes]（来自 Stage 1）
     ):
         """
         Args:
             line_features: 行级特征 [B, L, H]
             line_mask: 有效行mask [B, L]
             return_gru_hidden: 是否返回 GRU 隐状态
+            cls_logits: 外部传入的分类 logits [B, L, num_classes]（可选，来自 Stage 1）
 
         Returns:
             parent_logits: [B, L+1, L+1] - 每个位置i的父节点logits（包括ROOT）
@@ -208,8 +138,20 @@ class ParentFinderGRU(nn.Module):
 
         # 2. 预测每个单元的语义类别概率（用于 soft-mask）
         # 注意：line_features 是原始行特征 [B, L, H]，不包括 ROOT
-        cls_logits = self.cls_head(line_features)  # [B, L, num_classes]
-        cls_probs = F.softmax(cls_logits, dim=-1)  # [B, L, num_classes]
+        if cls_logits is not None:
+            # 使用外部传入的分类 logits（来自 Stage 1 的有监督分类头）
+            # cls_logits: [B, L, num_classes]
+            cls_probs = F.softmax(cls_logits, dim=-1)  # [B, L, num_classes]
+            if not hasattr(self, '_logged_using_external_cls'):
+                logger.info("[ParentFinderGRU] 使用外部传入的 cls_logits（来自 Stage 1 有监督分类头）")
+                self._logged_using_external_cls = True
+        else:
+            # 回退：使用内部 cls_head（向后兼容）
+            cls_logits_internal = self.cls_head(line_features)  # [B, L, num_classes]
+            cls_probs = F.softmax(cls_logits_internal, dim=-1)  # [B, L, num_classes]
+            if not hasattr(self, '_logged_using_internal_cls'):
+                logger.info("[ParentFinderGRU] 未传入外部 cls_logits，使用内部 cls_head（向后兼容模式）")
+                self._logged_using_internal_cls = True
 
         # 为 ROOT 添加一个虚拟的类别概率分布（全1的均匀分布或特殊处理）
         # ROOT 的类别概率：使用一个特殊的"ROOT类别"（索引 num_classes）

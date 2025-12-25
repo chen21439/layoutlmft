@@ -121,7 +121,7 @@ class LinePooling(nn.Module):
 
         # ========== Step 3: 获取唯一 line_id ==========
         # 排序确保输出顺序一致
-        unique_line_ids, _ = valid_line_ids.unique(sorted=True, return_inverse=False)
+        unique_line_ids = valid_line_ids.unique(sorted=True)
         num_lines = len(unique_line_ids)
 
         # ========== Step 4: 建立 line_id → 紧凑索引的映射 ==========
@@ -176,7 +176,7 @@ class LinePooling(nn.Module):
         """
         flat_line_ids = line_ids.reshape(-1)
         valid_line_ids = flat_line_ids[flat_line_ids >= 0]
-        unique_line_ids, _ = valid_line_ids.unique(sorted=True, return_inverse=False)
+        unique_line_ids = valid_line_ids.unique(sorted=True)
         return unique_line_ids
 
 

@@ -113,9 +113,9 @@ from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollat
 from train_parent_finder import (
     SimpleParentFinder,
     ParentFinderGRU,
-    ChildParentDistributionMatrix,
     build_child_parent_matrix,
 )
+from tasks.parent_finding import ChildParentDistributionMatrix, build_child_parent_matrix_from_dataset
 
 # 从共享模块导入 JointModel
 EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)
@@ -598,38 +598,6 @@ def compute_line_bboxes(token_bboxes: List[List[int]], token_line_ids: List[int]
     return result
 
 
-def build_child_parent_matrix_from_dataset(dataset, num_classes=NUM_LABELS):
-    """从 HuggingFace Dataset 构建 Child-Parent Distribution Matrix (M_cp)"""
-    logger.info("从数据集构建 Child-Parent Distribution Matrix...")
-
-    cp_matrix = ChildParentDistributionMatrix(num_classes=num_classes)
-
-    for example in tqdm(dataset, desc="统计父子关系"):
-        ner_tags = example.get("ner_tags", [])
-        line_ids = example.get("line_ids", [])
-        line_parent_ids = example.get("line_parent_ids", [])
-
-        if not line_parent_ids or not ner_tags:
-            continue
-
-        line_labels = {}
-        for tag, line_id in zip(ner_tags, line_ids):
-            if line_id >= 0 and line_id not in line_labels and tag >= 0:
-                line_labels[line_id] = tag
-
-        for child_idx, parent_idx in enumerate(line_parent_ids):
-            if child_idx not in line_labels:
-                continue
-
-            child_label = line_labels[child_idx]
-            parent_label = line_labels.get(parent_idx, -1) if parent_idx >= 0 else -1
-
-            cp_matrix.update(child_label, parent_label)
-
-    cp_matrix.build()
-    return cp_matrix
-
-
 def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: JointTrainingArguments):
     """
     准备训练和评估数据集
@@ -1031,6 +999,23 @@ def main():
                 cp_matrix = build_child_parent_matrix_from_dataset(raw_train_dataset, num_classes=NUM_LABELS)
                 stage3_model.set_child_parent_matrix(cp_matrix.get_tensor(device))
                 logger.info("M_cp initialized successfully")
+
+                # 打印 M_cp 矩阵用于调试
+                if hasattr(stage3_model, 'M_cp'):
+                    np.set_printoptions(precision=3, suppress=True, linewidth=200)
+                    logger.info(f"M_cp matrix shape: {stage3_model.M_cp.shape}")
+                    logger.info(f"M_cp matrix (rows=parent[ROOT,0-13], cols=child[0-13]):\n{stage3_model.M_cp.cpu().numpy()}")
+                    # 打印每个 child 类别最可能的 parent
+                    m_cp = stage3_model.M_cp.cpu().numpy()
+                    logger.info("Top parents for each child class:")
+                    for child_idx, child_name in enumerate(LABEL_LIST):
+                        parent_probs = m_cp[:, child_idx]
+                        top_parents = np.argsort(parent_probs)[::-1][:3]
+                        top_info = []
+                        for p_idx in top_parents:
+                            p_name = "ROOT" if p_idx == 0 else LABEL_LIST[p_idx - 1]
+                            top_info.append(f"{p_name}:{parent_probs[p_idx]:.3f}")
+                        logger.info(f"  {child_name}: {', '.join(top_info)}")
     else:
         logger.info("Using SimpleParentFinder")
         stage3_model = SimpleParentFinder(hidden_size=768, dropout=0.1)

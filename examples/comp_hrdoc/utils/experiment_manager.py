@@ -338,12 +338,13 @@ class ExperimentManager:
 
 
 def get_artifact_path(env: str) -> str:
-    """Get artifact directory path based on environment."""
-    paths = {
-        "dev": "/mnt/e/models/data/layoutlmft/artifact_comp_hrdoc",
-        "test": "/data/LLM_group/layoutlmft/artifact_comp_hrdoc",
-    }
-    return paths.get(env, paths["dev"])
+    """Get artifact directory path based on environment.
+
+    Uses the new config structure (dev.yaml/test.yaml).
+    """
+    from .config import load_config
+    config = load_config(env)
+    return config.get("artifact", {}).get("root", "artifact")
 
 
 def ensure_experiment(
