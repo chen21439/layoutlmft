@@ -265,6 +265,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 pages_data = {}
                 for item in data:
                     page_num = item.get("page", 0)
+                    # 确保 page_num 是整数（JSON 中可能是字符串）
+                    if isinstance(page_num, str):
+                        page_num = int(page_num) if page_num.isdigit() else 0
                     if page_num not in pages_data:
                         pages_data[page_num] = []
                     pages_data[page_num].append(item)

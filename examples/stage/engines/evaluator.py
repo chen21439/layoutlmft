@@ -157,6 +157,17 @@ class Evaluator:
                     # 收集 Parent 结果
                     # 注意：gt_parent = -1 表示 ROOT，也是有效目标
                     # gt_parent = -100 表示 padding，应该跳过
+                    gt_line_ids = gt.get("line_ids", list(range(len(gt["parents"]))))
+
+                    # 调试：打印前几个样本的对齐信息
+                    if debug and num_samples <= 2:
+                        print(f"\n[Parent Debug] Sample {num_samples}:")
+                        print(f"  gt['parents'][:10] = {gt['parents'][:10]}")
+                        print(f"  gt['line_ids'][:10] = {gt['line_ids'][:10]}")
+                        print(f"  pred.line_parents[:10] = {pred.line_parents[:10]}")
+                        print(f"  pred.line_ids[:10] = {pred.line_ids[:10]}")
+                        print(f"  len(gt['parents'])={len(gt['parents'])}, len(pred.line_parents)={len(pred.line_parents)}")
+
                     for idx, (gt_parent, pred_parent) in enumerate(zip(
                         gt["parents"], pred.line_parents
                     )):
@@ -166,9 +177,10 @@ class Evaluator:
                             continue
                         if idx >= len(pred.line_parents):
                             continue
-                        # 训练时跳过 gt_parent >= child_idx 的情况
-                        # 这里 idx 就是 child_idx
-                        if gt_parent >= idx:
+                        # 使用实际 line_id 而不是 idx 来判断父子关系有效性
+                        # parent 的 line_id 必须小于 child 的 line_id
+                        child_line_id = gt_line_ids[idx] if idx < len(gt_line_ids) else idx
+                        if gt_parent >= child_line_id:
                             debug_parent_skipped_invalid += 1
                             continue
                         all_gt_parents.append(gt_parent)
@@ -179,6 +191,7 @@ class Evaluator:
                             debug_first_samples.append({
                                 "sample": num_samples,
                                 "child_idx": idx,
+                                "child_line_id": child_line_id,
                                 "gt_parent": gt_parent,
                                 "pred_parent": pred_parent,
                                 "num_lines_gt": len(gt["parents"]),
@@ -186,7 +199,7 @@ class Evaluator:
                             })
 
                     # 收集 Relation 结果
-                    # 注意：relation 只在 parent >= 0 且 parent < child_idx 时有效
+                    # 注意：relation 只在 parent >= 0 且 parent < child_line_id 时有效
                     for idx, (gt_rel, gt_parent, pred_rel) in enumerate(zip(
                         gt["relations"], gt["parents"], pred.line_relations
                     )):
@@ -194,7 +207,9 @@ class Evaluator:
                             continue
                         if idx >= len(pred.line_relations):
                             continue
-                        if gt_parent < 0 or gt_parent >= idx:
+                        # 使用实际 line_id 进行比较
+                        child_line_id = gt_line_ids[idx] if idx < len(gt_line_ids) else idx
+                        if gt_parent < 0 or gt_parent >= child_line_id:
                             continue
                         all_gt_relations.append(gt_rel)
                         all_pred_relations.append(pred_rel)
@@ -245,12 +260,14 @@ class Evaluator:
                 "classes": {line_id: class_id, ...},
                 "parents": [parent_id, ...],
                 "relations": [relation_id, ...],
+                "line_ids": [line_id, ...],  # 每个位置对应的实际 line_id
             }
         """
         gt = {
             "classes": {},
             "parents": [],
             "relations": [],
+            "line_ids": [],  # 用于正确比较 parent_id 和 child_id
         }
 
         if sample.line_ids is None or sample.labels is None:
@@ -266,11 +283,17 @@ class Evaluator:
             all_labels = sample.labels.cpu().tolist()
             all_line_ids = sample.line_ids.cpu().tolist()
 
-        # Token -> Line 聚合
+        # Token -> Line 聚合，同时保持 line_id 顺序
         line_label_votes = defaultdict(list)
+        seen_line_ids = set()
+        ordered_line_ids = []
         for label, line_id in zip(all_labels, all_line_ids):
-            if line_id >= 0 and label >= 0:
-                line_label_votes[line_id].append(label)
+            if line_id >= 0:
+                if line_id not in seen_line_ids:
+                    seen_line_ids.add(line_id)
+                    ordered_line_ids.append(line_id)
+                if label >= 0:
+                    line_label_votes[line_id].append(label)
 
         for line_id, votes in line_label_votes.items():
             # 多数投票
@@ -284,6 +307,9 @@ class Evaluator:
         # 处理 relations
         if sample.line_relations is not None:
             gt["relations"] = sample.line_relations.cpu().tolist()
+
+        # 存储按顺序出现的 line_ids（用于 parent 比较）
+        gt["line_ids"] = ordered_line_ids
 
         return gt
 

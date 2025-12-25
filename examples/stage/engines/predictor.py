@@ -164,18 +164,25 @@ class Predictor:
         seq_len = input_ids.shape[1]  # 文本序列长度 (512)
         text_hidden = hidden_states[:, :seq_len, :]  # [num_chunks, seq_len, H]
 
-        # 展平后提取行特征
-        all_hidden = text_hidden.reshape(-1, text_hidden.shape[-1])  # [total_text_tokens, H]
-        all_line_ids_flat = line_ids.reshape(-1)  # [total_text_tokens]
+        # 根据模式选择特征聚合方法（与训练保持一致）
+        if num_chunks > 1:
+            # 文档级别：使用 _aggregate_document_line_features（与 JointModel 一致）
+            line_features, line_mask = self._aggregate_document_line_features(
+                text_hidden, line_ids
+            )
+            # line_features: [num_lines, H], line_mask: [num_lines]
+        else:
+            # 页面级别：使用 extract_line_features
+            all_hidden = text_hidden.reshape(-1, text_hidden.shape[-1])
+            all_line_ids_flat = line_ids.reshape(-1)
+            line_features, line_mask = self.model.feature_extractor.extract_line_features(
+                all_hidden.unsqueeze(0),
+                all_line_ids_flat.unsqueeze(0),
+                pooling="mean"
+            )
+            line_features = line_features[0]  # [max_lines, H]
+            line_mask = line_mask[0]
 
-        line_features, line_mask = self.model.feature_extractor.extract_line_features(
-            all_hidden.unsqueeze(0),  # [1, total_text_tokens, H]
-            all_line_ids_flat.unsqueeze(0),  # [1, total_text_tokens]
-            pooling="mean"
-        )
-
-        line_features = line_features[0]  # [max_lines, H]
-        line_mask = line_mask[0]
         actual_num_lines = int(line_mask.sum().item())
 
         if actual_num_lines == 0:
@@ -284,3 +291,60 @@ class Predictor:
                 result = self.predict(sample)
             results.append(result)
         return results
+
+    def _aggregate_document_line_features(
+        self,
+        doc_hidden: torch.Tensor,
+        doc_line_ids: torch.Tensor,
+    ) -> tuple:
+        """
+        从文档的所有 chunks 中聚合 line features（与 JointModel 一致）
+
+        Args:
+            doc_hidden: [num_chunks, seq_len, hidden_dim]
+            doc_line_ids: [num_chunks, seq_len]，每个 token 的全局 line_id
+
+        Returns:
+            features: [num_lines, hidden_dim]
+            mask: [num_lines]，有效行的 mask
+        """
+        device = doc_hidden.device
+        hidden_dim = doc_hidden.shape[-1]
+
+        # 展平（使用 reshape 兼容非连续 tensor）
+        flat_hidden = doc_hidden.reshape(-1, hidden_dim)  # [N, hidden_dim]
+        flat_line_ids = doc_line_ids.reshape(-1)  # [N]
+
+        # 获取有效 token（line_id >= 0）
+        valid_mask = flat_line_ids >= 0
+        valid_line_ids = flat_line_ids[valid_mask]
+        valid_hidden = flat_hidden[valid_mask]
+
+        if len(valid_line_ids) == 0:
+            return torch.zeros(1, hidden_dim, device=device), torch.zeros(1, dtype=torch.bool, device=device)
+
+        # 获取唯一的 line_id 并排序
+        unique_line_ids = valid_line_ids.unique()
+        unique_line_ids = unique_line_ids.sort()[0]
+        num_lines = len(unique_line_ids)
+
+        # 创建 line_id 到连续索引的映射（向量化）
+        # 使用 searchsorted 进行快速映射
+        line_indices = torch.searchsorted(unique_line_ids, valid_line_ids)
+
+        # 使用 scatter_add 聚合 features
+        line_features = torch.zeros(num_lines, hidden_dim, device=device)
+        line_features.scatter_add_(0, line_indices.unsqueeze(1).expand(-1, hidden_dim), valid_hidden)
+
+        # 统计每个 line 的 token 数量
+        line_counts = torch.zeros(num_lines, device=device)
+        line_counts.scatter_add_(0, line_indices, torch.ones_like(line_indices, dtype=torch.float))
+
+        # 计算平均值
+        valid_counts = line_counts.clamp(min=1)
+        line_features = line_features / valid_counts.unsqueeze(1)
+
+        # 创建 mask
+        line_mask = line_counts > 0
+
+        return line_features, line_mask

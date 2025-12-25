@@ -642,7 +642,8 @@ class HRDocDataLoader:
             processed_docs = []
             for doc_name in doc_names:
                 pages = doc_pages[doc_name]
-                pages = sorted(pages, key=lambda p: p["page_number"])
+                # 确保按整数排序（防御性处理，以防 page_number 是字符串）
+                pages = sorted(pages, key=lambda p: int(p["page_number"]) if isinstance(p["page_number"], str) else p["page_number"])
                 result = self._process_document_pages(doc_name, pages)
                 if result is not None:
                     processed_docs.append(result)
