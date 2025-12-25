@@ -300,15 +300,43 @@ class Evaluator:
             from collections import Counter
             gt["classes"][line_id] = Counter(votes).most_common(1)[0][0]
 
-        # 处理 parent_ids
+        # 处理 parent_ids 和 relations
+        # 重要：
+        # 1. sample.line_parent_ids 按行序号索引（0, 1, 2, ...），不是按 line_id 索引
+        # 2. sample.line_parent_ids 的值是 parent 的 line_id，需要转换为行序号
+        # 3. pred.line_parents 是行序号，所以 GT 也要用行序号表示
+
+        # 建立 line_id -> 行序号 的映射
+        line_id_to_row = {lid: row for row, lid in enumerate(ordered_line_ids)}
+
         if sample.line_parent_ids is not None:
-            gt["parents"] = sample.line_parent_ids.cpu().tolist()
+            raw_parents = sample.line_parent_ids.cpu().tolist()
+            # 按行序号顺序提取，并将 parent_line_id 转换为行序号
+            for row in range(len(ordered_line_ids)):
+                if row < len(raw_parents):
+                    parent_line_id = raw_parents[row]
+                    if parent_line_id == -1:
+                        gt["parents"].append(-1)  # ROOT
+                    elif parent_line_id == -100:
+                        gt["parents"].append(-100)  # padding
+                    elif parent_line_id in line_id_to_row:
+                        gt["parents"].append(line_id_to_row[parent_line_id])
+                    else:
+                        # parent 的 line_id 不在当前文档中（可能是跨页被截断）
+                        gt["parents"].append(-1)  # 视为 ROOT
+                else:
+                    gt["parents"].append(-100)  # padding
 
-        # 处理 relations
         if sample.line_relations is not None:
-            gt["relations"] = sample.line_relations.cpu().tolist()
+            raw_relations = sample.line_relations.cpu().tolist()
+            # 按行序号顺序提取
+            for row in range(len(ordered_line_ids)):
+                if row < len(raw_relations):
+                    gt["relations"].append(raw_relations[row])
+                else:
+                    gt["relations"].append(-100)
 
-        # 存储按顺序出现的 line_ids（用于 parent 比较）
+        # 存储按顺序出现的 line_ids
         gt["line_ids"] = ordered_line_ids
 
         return gt

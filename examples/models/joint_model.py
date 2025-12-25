@@ -3,13 +3,39 @@
 """
 JointModel - HRDoc 联合训练模型
 
-将 Stage 1/2/3/4 组合为一个端到端模型：
-1. Stage 1: LayoutXLM 分类 (产生分类 loss + hidden states)
-2. Stage 2: 从 hidden states 提取 line-level 特征
-3. Stage 3: ParentFinder 训练 (产生 parent loss)
-4. Stage 4: RelationClassifier 训练 (产生 relation loss)
+=== 整体流程 ===
 
-总 Loss = λ1 * L_cls + λ2 * L_par + λ3 * L_rel (论文公式)
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  LayoutLM Backbone                                               │
+    │  input_ids [B, seq] → hidden_states [B, seq, 768]               │
+    └─────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+                  ┌─────────────────────────────┐
+                  │   LinePooling (聚合模块)     │
+                  │   tokens → lines            │
+                  │   [B, seq, 768] → [L, 768]  │
+                  └─────────────────────────────┘
+                                  │
+                                  ▼
+                        Line Features [L, 768]
+                                  │
+          ┌───────────────────────┼───────────────────┐
+          ▼                       ▼                   ▼
+   ┌────────────┐         ┌────────────┐       ┌────────────┐
+   │ Stage 1    │         │ Stage 3    │       │ Stage 4    │
+   │ 分类 Head  │         │ Parent     │       │ Relation   │
+   │ cls_loss   │         │ parent_loss│       │ rel_loss   │
+   └────────────┘         └────────────┘       └────────────┘
+
+=== 损失计算 ===
+
+总 Loss = λ_cls * L_cls + λ_par * L_par + λ_rel * L_rel
+
+其中：
+- L_cls: Line-level 分类损失（CrossEntropy）
+- L_par: 父节点预测损失
+- L_rel: 关系分类损失
 
 此文件只包含模型定义，不包含训练循环、数据加载等。
 """
@@ -20,49 +46,82 @@ import torch.nn.functional as F
 from typing import Dict, Optional
 from transformers.modeling_outputs import TokenClassifierOutput
 
+# 导入共享模块
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "stage"))
+from models.modules import LinePooling
+from models.heads import LineClassificationHead
+
 
 class JointModel(nn.Module):
     """
     联合模型：包含 Stage 1/2/3/4 的所有模块
+
+    架构:
+        Backbone (LayoutLM) → LinePooling → [cls_head, stage3, stage4]
 
     论文公式: L_total = L_cls + α₁·L_par + α₂·L_rel
     """
 
     def __init__(
         self,
-        stage1_model,  # LayoutXLMForTokenClassification
+        stage1_model,  # LayoutXLMForTokenClassification（使用其 backbone）
         stage3_model: nn.Module,  # ParentFinderGRU 或 SimpleParentFinder
         stage4_model: nn.Module,  # MultiClassRelationClassifier
-        feature_extractor,  # LineFeatureExtractor
+        feature_extractor=None,  # 不再使用，保留参数以兼容旧代码
+        num_classes: int = 14,  # 分类类别数
+        hidden_size: int = 768,  # LayoutLM hidden size
         lambda_cls: float = 1.0,
         lambda_parent: float = 1.0,
         lambda_rel: float = 1.0,
         use_focal_loss: bool = True,
-        use_gru: bool = False,
-        stage1_micro_batch_size: int = 8,  # Stage1 micro-batch 大小，防止显存爆炸
-        stage1_no_grad: bool = False,  # 是否对 Stage1 使用 no_grad（节省显存但不反传）
-        freeze_visual: bool = False,  # 冻结视觉编码器（ResNet），只训练 Transformer
+        use_gru: bool = True,
+        stage1_micro_batch_size: int = 8,
+        stage1_no_grad: bool = False,
+        freeze_visual: bool = False,
+        cls_dropout: float = 0.1,  # 分类头 dropout
     ):
         super().__init__()
 
-        self.stage1 = stage1_model
+        # ========== Backbone ==========
+        # 使用 LayoutXLM 的 backbone（不使用其内置分类头）
+        # stage1_model 是 LayoutXLMForTokenClassification，其 backbone 在 .layoutlmv2
+        self.backbone = stage1_model
+
+        # ========== 共享模块 ==========
+        # LinePooling: Token-level → Line-level 特征聚合
+        self.line_pooling = LinePooling(pooling_method="mean")
+
+        # ========== Stage 1: Line-level 分类头 ==========
+        self.cls_head = LineClassificationHead(
+            hidden_size=hidden_size,
+            num_classes=num_classes,
+            dropout=cls_dropout,
+        )
+
+        # ========== Stage 3 & 4 ==========
         self.stage3 = stage3_model
         self.stage4 = stage4_model
-        self.feature_extractor = feature_extractor
 
+        # ========== 损失权重 ==========
         self.lambda_cls = lambda_cls
         self.lambda_parent = lambda_parent
         self.lambda_rel = lambda_rel
         self.use_gru = use_gru
         self.stage1_micro_batch_size = stage1_micro_batch_size
         self.stage1_no_grad = stage1_no_grad
+        self.num_classes = num_classes
 
-        # 如果冻结 Stage 1，同时冻结其参数（不计算梯度）
+        # 保存旧接口的引用（兼容性）
+        self.stage1 = stage1_model
+        self.feature_extractor = feature_extractor
+
+        # 如果冻结 backbone，同时冻结其参数
         if stage1_no_grad:
-            for param in self.stage1.parameters():
+            for param in self.backbone.parameters():
                 param.requires_grad = False
         elif freeze_visual:
-            # 只冻结视觉编码器（ResNet），Transformer 仍然训练
             self._freeze_visual_encoder()
 
         # 关系分类损失
@@ -96,74 +155,83 @@ class JointModel(nn.Module):
         bbox: torch.Tensor,
         attention_mask: torch.Tensor,
         image: torch.Tensor = None,
-        labels: torch.Tensor = None,
+        labels: torch.Tensor = None,  # Token-level labels（用于提取 line_labels）
         line_ids: Optional[torch.Tensor] = None,
         line_parent_ids: Optional[torch.Tensor] = None,
         line_relations: Optional[torch.Tensor] = None,
         line_bboxes: Optional[torch.Tensor] = None,
+        line_labels: Optional[torch.Tensor] = None,  # 新增：Line-level labels
         num_docs: Optional[int] = None,
         chunks_per_doc: Optional[list] = None,
         return_dict: bool = True,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """
-        前向传播，返回 loss 和各阶段输出
+        前向传播
 
-        文档级别处理：
-        - input_ids: [total_chunks, seq_len]，所有文档的 chunks 展平
-        - line_ids: [total_chunks, seq_len]，每个 token 的全局 line_id
-        - line_parent_ids: [num_docs, max_lines]，文档级别的 parent_ids
-        - line_relations: [num_docs, max_lines]，文档级别的 relations
-        - num_docs: batch 中的文档数量
-        - chunks_per_doc: 每个文档的 chunk 数量列表
+        === 流程 ===
+        1. Backbone: 获取 token-level hidden states
+        2. LinePooling: 聚合到 line-level features
+        3. Stage 1: Line-level 分类（cls_head）
+        4. Stage 3: 父节点预测
+        5. Stage 4: 关系分类
+
+        === 参数 ===
+        - input_ids: [total_chunks, seq_len]
+        - line_ids: [total_chunks, seq_len]，每个 token 的 line_id（-1 表示忽略）
+        - line_labels: [num_docs, max_lines]，每行的分类标签
+        - line_parent_ids: [num_docs, max_lines]，每行的父节点 ID
+        - line_relations: [num_docs, max_lines]，每行与父节点的关系
         """
         device = input_ids.device
         total_chunks = input_ids.shape[0]
 
         # 检查 image 是 list 还是 tensor
-        # Collator 现在保持 image 为 list，避免一次性加载所有图片到 GPU
         image_is_list = isinstance(image, list) if image is not None else False
 
-        # ==================== Stage 1: Classification (逐 chunk 处理) ====================
-        # 使用配置的 micro_batch_size，冻结 Stage 1 时可以用更大的 batch
+        # ==================== Step 1: Backbone 获取 hidden states ====================
+        # 调用 LayoutXLM 获取 token-level hidden states
+        # 注意：不传 labels，不计算 token-level loss
         micro_bs = self.stage1_micro_batch_size
 
         if total_chunks <= micro_bs:
             # 小 batch，直接处理
             if image_is_list and image:
-                # 将单张图片转为 tensor 并移到 GPU
                 img_tensor = torch.tensor(image[0]) if not isinstance(image[0], torch.Tensor) else image[0]
                 img_tensor = img_tensor.unsqueeze(0).to(device)
             else:
                 img_tensor = image
-            stage1_outputs = self.stage1(
-                input_ids=input_ids,
-                bbox=bbox,
-                attention_mask=attention_mask,
-                image=img_tensor,
-                labels=labels,
-                output_hidden_states=True,
-            )
-            cls_loss = stage1_outputs.loss
-            logits = stage1_outputs.logits
-            hidden_states = stage1_outputs.hidden_states[-1]
+
+            if self.stage1_no_grad:
+                with torch.no_grad():
+                    backbone_outputs = self.backbone(
+                        input_ids=input_ids,
+                        bbox=bbox,
+                        attention_mask=attention_mask,
+                        image=img_tensor,
+                        output_hidden_states=True,
+                    )
+            else:
+                backbone_outputs = self.backbone(
+                    input_ids=input_ids,
+                    bbox=bbox,
+                    attention_mask=attention_mask,
+                    image=img_tensor,
+                    output_hidden_states=True,
+                )
+            hidden_states = backbone_outputs.hidden_states[-1]
         else:
             # 大 batch，分批处理
-            all_logits = []
             all_hidden = []
-            total_cls_loss = 0.0
-            num_micro_batches = 0
 
             for start_idx in range(0, total_chunks, micro_bs):
                 end_idx = min(start_idx + micro_bs, total_chunks)
 
-                # 切分 micro-batch
                 mb_input_ids = input_ids[start_idx:end_idx]
                 mb_bbox = bbox[start_idx:end_idx]
                 mb_attention_mask = attention_mask[start_idx:end_idx]
-                mb_labels = labels[start_idx:end_idx] if labels is not None else None
 
-                # 图片按需加载到 GPU（关键：避免 OOM）
+                # 图片按需加载
                 if image_is_list and image:
                     mb_images = image[start_idx:end_idx]
                     mb_image = torch.stack([
@@ -175,64 +243,31 @@ class JointModel(nn.Module):
                 else:
                     mb_image = None
 
-                # 根据配置决定是否使用 no_grad
                 if self.stage1_no_grad:
                     with torch.no_grad():
-                        mb_outputs = self.stage1(
+                        mb_outputs = self.backbone(
                             input_ids=mb_input_ids,
                             bbox=mb_bbox,
                             attention_mask=mb_attention_mask,
                             image=mb_image,
-                            labels=mb_labels,
                             output_hidden_states=True,
                         )
                 else:
-                    mb_outputs = self.stage1(
+                    mb_outputs = self.backbone(
                         input_ids=mb_input_ids,
                         bbox=mb_bbox,
                         attention_mask=mb_attention_mask,
                         image=mb_image,
-                        labels=mb_labels,
                         output_hidden_states=True,
                     )
 
-                all_logits.append(mb_outputs.logits)
                 all_hidden.append(mb_outputs.hidden_states[-1])
-
-                if mb_outputs.loss is not None:
-                    total_cls_loss = total_cls_loss + mb_outputs.loss
-                    num_micro_batches += 1
-
-                # 释放当前 micro-batch 的图片显存
                 del mb_image
 
-            # 合并结果
-            logits = torch.cat(all_logits, dim=0)
             hidden_states = torch.cat(all_hidden, dim=0)
-            cls_loss = total_cls_loss / max(num_micro_batches, 1)
 
-        # 当冻结 Stage 1 时，cls_loss 只用于监控，不加入总 loss
-        if self.stage1_no_grad:
-            outputs = {
-                "loss": torch.tensor(0.0, device=device, requires_grad=True),  # 初始化为0，后续加 parent_loss/rel_loss
-                "cls_loss": cls_loss.detach() if cls_loss is not None else torch.tensor(0.0),  # 仅监控
-                "logits": logits,
-            }
-        else:
-            outputs = {
-                "loss": cls_loss * self.lambda_cls,
-                "cls_loss": cls_loss,
-                "logits": logits,
-            }
-
-        # 如果没有 line 信息或文档信息，直接返回
-        if line_ids is None or line_parent_ids is None:
-            return TokenClassifierOutput(
-                loss=outputs["loss"],
-                logits=logits,
-            )
-
-        # ==================== Stage 2: Feature Extraction ====================
+        # ==================== Step 2: LinePooling 聚合 ====================
+        # 截取文本部分的 hidden states（排除视觉 tokens）
         text_seq_len = input_ids.shape[1]
         text_hidden = hidden_states[:, :text_seq_len, :]
 
@@ -240,17 +275,34 @@ class JointModel(nn.Module):
         is_page_level = (num_docs is None or chunks_per_doc is None)
 
         if is_page_level:
-            # ========== 页面级别模式（快速训练）==========
-            # 每个样本是一个 chunk，直接使用 feature_extractor
-            # 这与历史版本的处理方式一致
+            # ========== 页面级别模式 ==========
+            # 每个样本是一个 chunk，直接聚合
             batch_size = total_chunks
-            line_features, line_mask = self.feature_extractor.extract_line_features(
-                text_hidden, line_ids, pooling="mean"
-            )
-            num_docs = batch_size  # 用于后续循环
+            num_docs = batch_size
+
+            # 逐样本聚合（因为每个样本的 line 数量不同）
+            doc_line_features_list = []
+            doc_line_masks_list = []
+            for b in range(batch_size):
+                sample_hidden = text_hidden[b:b+1]  # [1, seq_len, H]
+                sample_line_ids = line_ids[b:b+1]  # [1, seq_len]
+                features, mask = self.line_pooling(sample_hidden, sample_line_ids)
+                doc_line_features_list.append(features)
+                doc_line_masks_list.append(mask)
+
+            # 填充到相同长度
+            max_lines = max(f.shape[0] for f in doc_line_features_list)
+            hidden_dim = doc_line_features_list[0].shape[1]
+            line_features = torch.zeros(num_docs, max_lines, hidden_dim, device=device)
+            line_mask = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
+
+            for b, (features, mask) in enumerate(zip(doc_line_features_list, doc_line_masks_list)):
+                num_lines_in_doc = features.shape[0]
+                line_features[b, :num_lines_in_doc] = features
+                line_mask[b, :num_lines_in_doc] = mask
         else:
-            # ========== 文档级别模式（用于推理）==========
-            # 每个样本是一个文档，包含多个 chunks，需要聚合
+            # ========== 文档级别模式 ==========
+            # 每个样本是一个文档，包含多个 chunks
             doc_line_features_list = []
             doc_line_masks_list = []
 
@@ -262,10 +314,8 @@ class JointModel(nn.Module):
                 doc_hidden = text_hidden[chunk_idx:chunk_idx + num_chunks_in_doc]
                 doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks_in_doc]
 
-                # 聚合该文档的 line features
-                doc_features, doc_mask = self._aggregate_document_line_features(
-                    doc_hidden, doc_line_ids
-                )
+                # 使用 LinePooling 聚合
+                doc_features, doc_mask = self.line_pooling(doc_hidden, doc_line_ids)
                 doc_line_features_list.append(doc_features)
                 doc_line_masks_list.append(doc_mask)
 

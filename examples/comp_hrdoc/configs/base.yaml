@@ -1,55 +1,67 @@
-# 基础配置
+# 基础配置 (通用参数，与环境无关)
 
-# 模型配置
-model:
-  model_path: "microsoft/layoutxlm-base"
-  hidden_size: 768
-  num_labels: 16
-  num_heads: 8
-  dropout: 0.1
-  use_visual: true
-  freeze_backbone: false
-
-  # 模块开关
-  use_detect: true
-  use_order: true
-  use_construct: true
-
-  # Order 模块
-  order_num_layers: 3
-
-  # Construct 模块
-  construct_num_layers: 2
-  use_rope: true
-
-# 数据配置
+# 数据通用配置
 data:
   max_length: 512
   max_regions: 128
-  label_all_tokens: true
+  image_size: [224, 224]
+  use_images: false
+  val_split_ratio: 0.1
 
-# 训练配置
-training:
-  batch_size: 2
-  learning_rate: 2.0e-5
-  weight_decay: 0.01
-  warmup_ratio: 0.1
-  max_steps: 10000
-  gradient_accumulation_steps: 4
-  fp16: true
+# 模型配置
+model:
+  # LayoutXLM 基础模型
+  model_path: "microsoft/layoutxlm-base"
+  hidden_size: 768
+
+  # 类别数 (Comp_HRDoc: 0=pad, 1=fig, 2=tab, 3=para, 4=other)
+  num_categories: 5
+  num_labels: 5
+
+  # Transformer 配置
+  num_heads: 12
+  dropout: 0.1
+
+  # 4.2 Detect 模块
+  detect_num_layers: 1
+
+  # 4.3 Order 模块
+  order_num_layers: 3
+
+  # 4.4 Construct 模块
+  construct_num_layers: 3
+  use_rope: true
+
+  # 特征配置
+  use_spatial: true
+  use_visual: false
+  use_text: false
+  use_biaffine: true
+
+  # 关系类型数
+  num_relations: 3  # 0=无关系, 1=文本顺序, 2=图形关系
 
   # 损失权重
   lambda_detect: 1.0
   lambda_order: 1.0
+  lambda_relation: 0.5
   lambda_construct: 1.0
+
+# 训练配置
+training:
+  batch_size: 4
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  num_epochs: 20
+  gradient_accumulation_steps: 2
+  fp16: false
+
+  # 保存和日志
+  save_steps: 500
+  log_steps: 50
+  eval_steps: 200
 
 # 评估配置
 evaluation:
-  eval_steps: 500
-  save_steps: 1000
-  metric_for_best_model: "f1"
-
-# 日志配置
-logging:
-  log_level: "info"
-  log_steps: 100
+  metric_for_best_model: "kendall_tau"

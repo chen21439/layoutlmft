@@ -68,5 +68,5 @@ output:
 
 # Artifact 路径（实验管理）
 artifact:
-  dev: "/mnt/e/models/data/layoutlmft/artifact"
-  test: "/data/LLM_group/layoutlmft/artifact"
+  dev: "/mnt/e/models/data/layoutlmft/artifact_comp_hrdoc"
+  test: "/data/LLM_group/layoutlmft/artifact_comp_hrdoc"

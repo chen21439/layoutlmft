@@ -343,7 +343,8 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         }]
                     words = [w for w in words if w["text"].strip() != ""]
                     if len(words) == 0:
-                        continue
+                        # 空行用占位符代替，保持 line_id 连续（不跳过）
+                        words = [{"text": "[EMPTY]", "box": item.get("box", [0, 0, 0, 0])}]
 
                     # 获取全局 line_id（不重映射）
                     item_line_id = item.get("line_id", item.get("id", line_idx))
