@@ -238,17 +238,24 @@ class IntraRegionHead(nn.Module):
             num_layers=num_layers,
         )
 
-        # Biaffine scoring (paper Eq. 7)
+        # ===== Succeeding Head (forward direction) =====
+        # Biaffine scoring (paper Eq. 7): predicts which line is the successor
         # FC_q and FC_k: 2048 nodes each
-        self.head_proj = nn.Linear(hidden_size, proj_size)  # FC_q
-        self.dep_proj = nn.Linear(hidden_size, proj_size)   # FC_k
+        self.succ_head_proj = nn.Linear(hidden_size, proj_size)  # FC_q for successor
+        self.succ_dep_proj = nn.Linear(hidden_size, proj_size)   # FC_k for successor
+        self.succ_biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
+        nn.init.xavier_uniform_(self.succ_biaffine)
 
-        # Biaffine weight matrix for dot product
-        self.biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
-        nn.init.xavier_uniform_(self.biaffine)
+        # ===== Preceding Head (backward direction) =====
+        # Additional head per paper: "we employ an additional relation prediction head
+        # to further identify the preceding text-line for each text-line"
+        self.pred_head_proj = nn.Linear(hidden_size, proj_size)  # FC_q for predecessor
+        self.pred_dep_proj = nn.Linear(hidden_size, proj_size)   # FC_k for predecessor
+        self.pred_biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
+        nn.init.xavier_uniform_(self.pred_biaffine)
 
         # Spatial compatibility features (paper Eq. 8, 9)
-        # MLP with 1024 hidden nodes
+        # MLP with 1024 hidden nodes - shared between both heads
         if use_spatial:
             self.spatial_features = SpatialCompatibilityFeatures(mlp_hidden_size=mlp_hidden)
 
@@ -271,6 +278,8 @@ class IntraRegionHead(nn.Module):
             Dict with:
                 - successor_logits: [batch, num_lines, num_lines]
                   successor_logits[b, i, j] = score that line j is successor of line i
+                - predecessor_logits: [batch, num_lines, num_lines]
+                  predecessor_logits[b, i, j] = score that line j is predecessor of line i
                 - enhanced_features: [batch, num_lines, hidden_size]
         """
         batch_size, num_lines, hidden_size = line_features.shape
@@ -288,36 +297,44 @@ class IntraRegionHead(nn.Module):
             src_key_padding_mask=attn_mask,
         )
 
-        # Compute biaffine content scores (paper Eq. 7)
-        head_repr = self.dropout(self.head_proj(enhanced))  # [B, N, 2048]
-        dep_repr = self.dropout(self.dep_proj(enhanced))    # [B, N, 2048]
-
-        # Biaffine: head * W * dep^T -> [B, N, N]
-        content_scores = torch.einsum('bih,hd,bjd->bij', head_repr, self.biaffine, dep_repr)
-        content_scores = content_scores * self.scale
-
-        # Add spatial compatibility scores (paper Eq. 6)
+        # Compute spatial scores (shared by both heads)
+        spatial_scores = None
         if self.use_spatial and line_bboxes is not None:
             spatial_scores = self.spatial_features(line_bboxes)  # [B, N, N]
-            scores = content_scores + spatial_scores
-        else:
-            scores = content_scores
 
-        # Mask invalid positions
+        # ===== Succeeding Head: predict successor for each line =====
+        succ_head = self.dropout(self.succ_head_proj(enhanced))  # [B, N, 2048]
+        succ_dep = self.dropout(self.succ_dep_proj(enhanced))    # [B, N, 2048]
+        succ_scores = torch.einsum('bih,hd,bjd->bij', succ_head, self.succ_biaffine, succ_dep)
+        succ_scores = succ_scores * self.scale
+        if spatial_scores is not None:
+            succ_scores = succ_scores + spatial_scores
+
+        # ===== Preceding Head: predict predecessor for each line =====
+        pred_head = self.dropout(self.pred_head_proj(enhanced))  # [B, N, 2048]
+        pred_dep = self.dropout(self.pred_dep_proj(enhanced))    # [B, N, 2048]
+        pred_scores = torch.einsum('bih,hd,bjd->bij', pred_head, self.pred_biaffine, pred_dep)
+        pred_scores = pred_scores * self.scale
+        if spatial_scores is not None:
+            pred_scores = pred_scores + spatial_scores
+
+        # Mask invalid positions (apply to both heads)
         if line_mask is not None:
             row_mask = ~line_mask.unsqueeze(2)  # [B, N, 1]
             col_mask = ~line_mask.unsqueeze(1)  # [B, 1, N]
             combined_mask = row_mask | col_mask
-            scores = scores.masked_fill(combined_mask, -1e9)
+            succ_scores = succ_scores.masked_fill(combined_mask, -1e9)
+            pred_scores = pred_scores.masked_fill(combined_mask, -1e9)
 
-        # Diagonal mask: line cannot be its own successor (unless it's the last line)
-        # Note: for last line in region, it points to itself (per paper)
-        # But during training, we handle this in the loss function
+        # Diagonal mask: line cannot be its own successor/predecessor
+        # (unless it's the first/last line in region - handled in loss)
         diag = torch.eye(num_lines, dtype=torch.bool, device=device)
-        scores = scores.masked_fill(diag.unsqueeze(0), -1e9)
+        succ_scores = succ_scores.masked_fill(diag.unsqueeze(0), -1e9)
+        pred_scores = pred_scores.masked_fill(diag.unsqueeze(0), -1e9)
 
         return {
-            'successor_logits': scores,
+            'successor_logits': succ_scores,
+            'predecessor_logits': pred_scores,
             'enhanced_features': enhanced,
         }
 
@@ -454,30 +471,76 @@ class LogicalRoleLoss(nn.Module):
 # =============================================================================
 
 class IntraRegionLoss(nn.Module):
-    """Loss function for Intra-region Reading Order Head
+    """Loss function for Intra-region Reading Order Head (Bidirectional)
 
     Uses softmax cross-entropy (dependency parsing style).
-    Each line predicts which line is its successor.
+    Supports both successor and predecessor prediction heads per paper:
+    "we employ an additional relation prediction head to further identify
+    the preceding text-line for each text-line"
     """
 
-    def __init__(self):
+    def __init__(self, pred_weight: float = 1.0):
+        """
+        Args:
+            pred_weight: Weight for predecessor loss (default 1.0 = equal weight)
+        """
         super().__init__()
+        self.pred_weight = pred_weight
+
+    def _compute_direction_loss(
+        self,
+        logits: torch.Tensor,  # [batch, num_lines, num_lines]
+        labels: torch.Tensor,  # [batch, num_lines]
+        line_mask: torch.Tensor,  # [batch, num_lines]
+        is_self_pointing: torch.Tensor,  # [batch, num_lines] lines that point to self
+    ) -> torch.Tensor:
+        """Compute loss for one direction (successor or predecessor)."""
+        batch_size, num_lines = labels.shape
+        device = logits.device
+
+        # Handle self-pointing lines (first/last in region)
+        labels_fixed = labels.clone()
+        line_indices = torch.arange(num_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+        labels_fixed = torch.where(is_self_pointing, line_indices, labels_fixed)
+
+        # Temporarily unmask diagonal for self-pointing lines
+        logits_for_loss = logits.clone()
+        for b in range(batch_size):
+            for i in range(num_lines):
+                if is_self_pointing[b, i] and line_mask[b, i]:
+                    logits_for_loss[b, i, i] = logits[b, i].max() + 1
+
+        # Compute cross entropy
+        logits_flat = logits_for_loss.view(-1, num_lines)
+        labels_flat = labels_fixed.clamp(min=0, max=num_lines-1).view(-1)
+        valid_flat = line_mask.view(-1)
+
+        loss_flat = F.cross_entropy(logits_flat, labels_flat, reduction='none')
+        loss_flat = loss_flat * valid_flat.float()
+        loss = loss_flat.sum() / valid_flat.sum().clamp(min=1)
+
+        return loss
 
     def forward(
         self,
         successor_logits: torch.Tensor,  # [batch, num_lines, num_lines]
         successor_labels: torch.Tensor,  # [batch, num_lines] index of successor
+        predecessor_logits: torch.Tensor = None,  # [batch, num_lines, num_lines]
+        predecessor_labels: torch.Tensor = None,  # [batch, num_lines] index of predecessor
         line_mask: torch.Tensor = None,  # [batch, num_lines]
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
-            successor_logits: [batch, num_lines, num_lines] prediction scores
+            successor_logits: [batch, num_lines, num_lines] successor prediction scores
             successor_labels: [batch, num_lines] ground truth successor index
                               -1 means pointing to self (last line in region)
+            predecessor_logits: [batch, num_lines, num_lines] predecessor prediction scores
+            predecessor_labels: [batch, num_lines] ground truth predecessor index
+                                -1 means pointing to self (first line in region)
             line_mask: [batch, num_lines] valid line mask
 
         Returns:
-            Dict with loss value
+            Dict with loss values
         """
         batch_size, num_lines = successor_labels.shape
         device = successor_logits.device
@@ -485,46 +548,28 @@ class IntraRegionLoss(nn.Module):
         if line_mask is None:
             line_mask = torch.ones(batch_size, num_lines, dtype=torch.bool, device=device)
 
-        # Handle last lines: they point to themselves (per paper)
-        # Convert -1 labels to self-reference
-        successor_labels_fixed = successor_labels.clone()
+        # Successor loss (last lines point to self)
         last_line_mask = successor_labels == -1
-        line_indices = torch.arange(num_lines, device=device).unsqueeze(0).expand(batch_size, -1)
-        successor_labels_fixed = torch.where(last_line_mask, line_indices, successor_labels_fixed)
+        succ_loss = self._compute_direction_loss(
+            successor_logits, successor_labels, line_mask, last_line_mask
+        )
 
-        # For last lines, temporarily unmask diagonal so they can point to self
-        logits_for_loss = successor_logits.clone()
-        diag_indices = torch.arange(num_lines, device=device)
-        for b in range(batch_size):
-            for i in range(num_lines):
-                if last_line_mask[b, i] and line_mask[b, i]:
-                    logits_for_loss[b, i, i] = successor_logits[b, i].max() + 1  # Allow self
-
-        # Valid lines mask
-        valid_mask = line_mask
-
-        loss = torch.tensor(0.0, device=device)
-
-        if valid_mask.any():
-            # Flatten for cross entropy
-            logits_flat = logits_for_loss.view(-1, num_lines)  # [B*N, N]
-            labels_flat = successor_labels_fixed.clamp(min=0, max=num_lines-1).view(-1)  # [B*N]
-            valid_flat = valid_mask.view(-1)  # [B*N]
-
-            # Cross entropy loss
-            loss_flat = F.cross_entropy(
-                logits_flat,
-                labels_flat,
-                reduction='none'
+        # Predecessor loss (first lines point to self)
+        if predecessor_logits is not None and predecessor_labels is not None:
+            first_line_mask = predecessor_labels == -1
+            pred_loss = self._compute_direction_loss(
+                predecessor_logits, predecessor_labels, line_mask, first_line_mask
             )
-
-            # Only count valid lines
-            loss_flat = loss_flat * valid_flat.float()
-            loss = loss_flat.sum() / valid_flat.sum().clamp(min=1)
+            total_loss = succ_loss + self.pred_weight * pred_loss
+        else:
+            pred_loss = torch.tensor(0.0, device=device)
+            total_loss = succ_loss
 
         return {
-            'loss': loss,
-            'num_valid': valid_mask.sum(),
+            'loss': total_loss,
+            'succ_loss': succ_loss,
+            'pred_loss': pred_loss,
+            'num_valid': line_mask.sum(),
         }
 
 
@@ -597,6 +642,99 @@ def predict_successors(
     )
 
     return successors
+
+
+def predict_successors_bidirectional(
+    successor_logits: torch.Tensor,  # [num_lines, num_lines]
+    predecessor_logits: torch.Tensor,  # [num_lines, num_lines]
+    line_mask: torch.Tensor = None,  # [num_lines]
+    threshold: float = 0.5,
+    combine_method: str = "agreement",  # "agreement", "average", "successor_only"
+) -> torch.Tensor:
+    """Predict successors using both forward and backward heads
+
+    Per paper: "The prediction results from both relation prediction heads
+    are then combined to obtain the final results."
+
+    Args:
+        successor_logits: [num_lines, num_lines] forward head scores
+        predecessor_logits: [num_lines, num_lines] backward head scores
+        line_mask: [num_lines] valid lines
+        threshold: Confidence threshold
+        combine_method:
+            - "agreement": Only accept if both heads agree (A→B and B←A)
+            - "average": Average the forward and transposed backward scores
+            - "successor_only": Use only successor head (fallback)
+
+    Returns:
+        [num_lines] predicted successor index, -1 for no successor
+    """
+    num_lines = successor_logits.size(0)
+    device = successor_logits.device
+
+    if line_mask is None:
+        line_mask = torch.ones(num_lines, dtype=torch.bool, device=device)
+
+    if combine_method == "successor_only" or predecessor_logits is None:
+        return predict_successors(successor_logits, line_mask, threshold)
+
+    # Forward: successor_logits[i, j] = score that j is successor of i
+    # Backward: predecessor_logits[j, i] = score that i is predecessor of j
+    # If A→B, then predecessor_logits[B, A] should be high
+    # So we transpose predecessor_logits to get: [i, j] = score that i→j from backward view
+
+    pred_transposed = predecessor_logits.T  # [num_lines, num_lines]
+
+    if combine_method == "average":
+        # Average forward and backward scores
+        combined_logits = (successor_logits + pred_transposed) / 2
+        return predict_successors(combined_logits, line_mask, threshold)
+
+    elif combine_method == "agreement":
+        # Get predictions from both heads
+        succ_probs = F.softmax(successor_logits, dim=-1)
+        pred_probs = F.softmax(pred_transposed, dim=-1)
+
+        # For each line i, find argmax from successor head
+        succ_max_probs, succ_preds = succ_probs.max(dim=-1)
+
+        # For each line i, find argmax from predecessor head (transposed)
+        pred_max_probs, pred_preds = pred_probs.max(dim=-1)
+
+        # Check agreement: if succ_head says i→j and pred_head also agrees
+        # We use succ_preds as base and verify with pred_head
+        successors = torch.full((num_lines,), -1, device=device, dtype=torch.long)
+
+        for i in range(num_lines):
+            if not line_mask[i]:
+                continue
+
+            j = succ_preds[i].item()
+
+            # Check confidence
+            if succ_max_probs[i] < threshold:
+                continue
+
+            # Check if j is valid
+            if j < 0 or j >= num_lines or not line_mask[j]:
+                continue
+
+            # Check agreement: pred_head should say j's predecessor is i
+            # i.e., argmax of predecessor_logits[j, :] should be i
+            j_pred = predecessor_logits[j].argmax().item()
+            j_pred_prob = F.softmax(predecessor_logits[j], dim=-1).max()
+
+            if j_pred == i and j_pred_prob >= threshold:
+                # Both heads agree: i → j
+                successors[i] = j
+            elif succ_max_probs[i] >= threshold * 1.5:
+                # High confidence from successor head, accept anyway
+                successors[i] = j
+
+        return successors
+
+    else:
+        return predict_successors(successor_logits, line_mask, threshold)
 
 
 def group_lines_to_regions(
@@ -727,6 +865,40 @@ class DetectModule(nn.Module):
         self.intra_loss_fn = IntraRegionLoss()
         self.role_loss_fn = LogicalRoleLoss()
 
+    @staticmethod
+    def _compute_predecessor_labels(
+        successor_labels: torch.Tensor,  # [batch, num_lines]
+        line_mask: torch.Tensor,  # [batch, num_lines]
+    ) -> torch.Tensor:
+        """Compute predecessor labels from successor labels.
+
+        If successor_labels[i] = j, then predecessor_labels[j] = i.
+        First line in each region has predecessor_labels = -1 (points to self).
+
+        Args:
+            successor_labels: [batch, num_lines] index of successor, -1 for last line
+            line_mask: [batch, num_lines] valid line mask
+
+        Returns:
+            [batch, num_lines] index of predecessor, -1 for first line
+        """
+        batch_size, num_lines = successor_labels.shape
+        device = successor_labels.device
+
+        # Initialize all to -1 (no predecessor / first line in region)
+        predecessor_labels = torch.full_like(successor_labels, -1)
+
+        for b in range(batch_size):
+            for i in range(num_lines):
+                if not line_mask[b, i]:
+                    continue
+                j = successor_labels[b, i].item()
+                # If line i has successor j, then line j has predecessor i
+                if 0 <= j < num_lines and j != i and line_mask[b, j]:
+                    predecessor_labels[b, j] = i
+
+        return predecessor_labels
+
     def forward(
         self,
         line_features: torch.Tensor,     # [batch, num_lines, input_size]
@@ -765,7 +937,7 @@ class DetectModule(nn.Module):
         projected = self.feature_proj(line_features)  # [B, N, 1024]
         outputs['projected_features'] = projected
 
-        # 4.2.3: Intra-region reading order prediction
+        # 4.2.3: Intra-region reading order prediction (bidirectional)
         intra_outputs = self.intra_head(
             line_features=projected,
             line_bboxes=line_bboxes,
@@ -773,6 +945,7 @@ class DetectModule(nn.Module):
         )
         outputs['enhanced_features'] = intra_outputs['enhanced_features']
         outputs['successor_logits'] = intra_outputs['successor_logits']
+        outputs['predecessor_logits'] = intra_outputs['predecessor_logits']
 
         # 4.2.4: Logical role classification
         role_logits = self.role_head(intra_outputs['enhanced_features'])
@@ -783,12 +956,20 @@ class DetectModule(nn.Module):
         role_loss = torch.tensor(0.0, device=device)
 
         if successor_labels is not None:
+            # Compute predecessor_labels from successor_labels
+            # If line j is successor of line i, then line i is predecessor of line j
+            predecessor_labels = self._compute_predecessor_labels(successor_labels, line_mask)
+
             intra_loss_dict = self.intra_loss_fn(
-                intra_outputs['successor_logits'],
-                successor_labels,
-                line_mask,
+                successor_logits=intra_outputs['successor_logits'],
+                successor_labels=successor_labels,
+                predecessor_logits=intra_outputs['predecessor_logits'],
+                predecessor_labels=predecessor_labels,
+                line_mask=line_mask,
             )
             intra_loss = intra_loss_dict['loss']
+            outputs['succ_loss'] = intra_loss_dict.get('succ_loss', intra_loss)
+            outputs['pred_loss'] = intra_loss_dict.get('pred_loss', torch.tensor(0.0))
 
         if role_labels is not None:
             role_loss_dict = self.role_loss_fn(
@@ -810,6 +991,8 @@ class DetectModule(nn.Module):
         line_bboxes: torch.Tensor = None,
         line_mask: torch.Tensor = None,
         successor_threshold: float = 0.5,  # Confidence threshold for successor prediction
+        use_bidirectional: bool = True,  # Use both heads for prediction
+        combine_method: str = "agreement",  # "agreement", "average", "successor_only"
     ) -> Dict[str, any]:
         """Inference mode - predict regions and roles.
 
@@ -819,6 +1002,8 @@ class DetectModule(nn.Module):
             line_mask: [batch, num_lines] valid line mask
             successor_threshold: Confidence threshold for predicting successors.
                 If max softmax prob < threshold, predicts -1 (no successor).
+            use_bidirectional: Use both successor and predecessor heads.
+            combine_method: How to combine bidirectional predictions.
 
         Returns:
             Dict with:
@@ -837,6 +1022,7 @@ class DetectModule(nn.Module):
         batch_size = line_features.size(0)
         results = {
             'successor_logits': outputs['successor_logits'],
+            'predecessor_logits': outputs['predecessor_logits'],
             'role_logits': outputs['role_logits'],
         }
 
@@ -847,11 +1033,19 @@ class DetectModule(nn.Module):
         all_region_roles = []
 
         for b in range(batch_size):
-            logits = outputs['successor_logits'][b]
+            succ_logits = outputs['successor_logits'][b]
+            pred_logits = outputs['predecessor_logits'][b]
             mask = line_mask[b] if line_mask is not None else None
 
-            # Predict successors with threshold-based "no successor" detection
-            successors = predict_successors(logits, mask, threshold=successor_threshold)
+            # Predict successors using bidirectional heads
+            if use_bidirectional:
+                successors = predict_successors_bidirectional(
+                    succ_logits, pred_logits, mask,
+                    threshold=successor_threshold,
+                    combine_method=combine_method,
+                )
+            else:
+                successors = predict_successors(succ_logits, mask, threshold=successor_threshold)
             all_successors.append(successors)
 
             # Group into regions
