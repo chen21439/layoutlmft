@@ -1,0 +1,20 @@
+# Test 环境配置 (远程服务器)
+
+# 数据路径
+data:
+  root: "/data/LLM_group/layoutlmft/data/Comp_HRDoc"
+  train_dir: "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TRAIN"
+  test_dir: "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TEST"
+  features_dir: "/data/LLM_group/layoutlmft/data/Comp_HRDoc/region_features"
+
+# Artifact 路径（实验管理）
+artifact:
+  root: "/data/LLM_group/layoutlmft/artifact_comp_hrdoc"
+
+# GPU 配置
+gpu:
+  cuda_visible_devices: "1"
+
+# 输出路径
+output:
+  root: "outputs"
