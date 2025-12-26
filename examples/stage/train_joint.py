@@ -297,7 +297,26 @@ class JointTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
 
-        outputs = model(**inputs)
+        try:
+            outputs = model(**inputs)
+        except Exception as e:
+            # 记录出错时的文档信息
+            logger.error(f"[ERROR] Forward pass failed at step {self.state.global_step}")
+            logger.error(f"[ERROR] Input keys: {inputs.keys()}")
+            if "doc_id" in inputs:
+                logger.error(f"[ERROR] doc_id: {inputs['doc_id']}")
+            if "input_ids" in inputs:
+                logger.error(f"[ERROR] input_ids shape: {inputs['input_ids'].shape}")
+            if "image" in inputs:
+                img = inputs["image"]
+                logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
+            if "line_ids" in inputs:
+                line_ids = inputs["line_ids"]
+                if hasattr(line_ids, 'shape'):
+                    logger.error(f"[ERROR] line_ids shape: {line_ids.shape}, max: {line_ids.max()}")
+                else:
+                    logger.error(f"[ERROR] line_ids type: {type(line_ids)}")
+            raise e
         loss = outputs.loss  # TokenClassifierOutput 使用属性访问
 
         # 从模型实例获取完整的 outputs 字典（包含各阶段 loss）

@@ -55,6 +55,7 @@ class HRDocJointDataCollator:
         bbox = [f["bbox"] for f in features]
         image = [f.get("image") for f in features]
         labels = [f.get("labels", f.get("ner_tags")) for f in features]
+        doc_ids = [f.get("doc_id", f.get("id", f"unknown_{i}")) for i, f in enumerate(features)]
 
         line_ids = [f.get("line_ids", []) for f in features]
         line_parent_ids = [f.get("line_parent_ids", []) for f in features]
@@ -179,6 +180,9 @@ class HRDocJointDataCollator:
                 bboxes = [list(bb) if isinstance(bb, (list, tuple)) else [0, 0, 0, 0] for bb in line_bboxes[i]]
                 padded_line_bboxes.append(bboxes + [[0, 0, 0, 0]] * padding_len)
             batch["line_bboxes"] = torch.tensor(padded_line_bboxes, dtype=torch.float)
+
+        # doc_id 用于调试（不转为 tensor，保持字符串列表）
+        batch["doc_id"] = doc_ids
 
         return batch
 
@@ -312,6 +316,9 @@ class HRDocDocumentLevelCollator:
 
             batch["line_parent_ids"] = torch.tensor(padded_parent_ids, dtype=torch.long)
             batch["line_relations"] = torch.tensor(padded_relations, dtype=torch.long)
+
+        # doc_id 用于调试（不转为 tensor，保持字符串列表）
+        batch["doc_id"] = document_names
 
         return batch
 
