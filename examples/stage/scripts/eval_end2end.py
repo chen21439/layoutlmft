@@ -46,6 +46,7 @@ sys.path.insert(0, STAGE_ROOT)
 
 from util.checkpoint_utils import get_latest_checkpoint, get_best_model
 from util.experiment_manager import ensure_experiment
+from tasks.parent_finding import ParentFindingTask
 
 logger = logging.getLogger(__name__)
 
@@ -410,23 +411,10 @@ def run_inference(
                     # GRU 方法: parent_logits [1, L+1, L+1]
                     parent_logits = stage3_model(line_features, line_mask)
 
-                    for child_idx in range(num_lines):
-                        # child_idx 在 logits 中的位置是 child_idx + 1
-                        child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]  # [child_idx + 2]
-
-                        # 处理 -inf
-                        child_logits = torch.where(
-                            torch.isinf(child_logits),
-                            torch.full_like(child_logits, -1e4),
-                            child_logits
-                        )
-
-                        # 预测 parent (index 0 = ROOT, index 1+ = 实际行)
-                        pred_idx = child_logits.argmax().item()
-                        if pred_idx == 0:
-                            parent_predictions[child_idx] = -1  # ROOT
-                        else:
-                            parent_predictions[child_idx] = pred_idx - 1  # 实际行索引
+                    # 复用 tasks/parent_finding.py 的 decode 逻辑
+                    parent_task = ParentFindingTask()
+                    parent_preds = parent_task.decode(parent_logits, line_mask)
+                    parent_predictions = parent_preds[0].tolist()  # [L] -> list
 
             # === Stage 4: Relation prediction ===
             relation_predictions = ["meta"] * num_lines  # 默认 meta

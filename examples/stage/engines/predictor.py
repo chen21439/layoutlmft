@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.batch import Sample, BatchBase, wrap_batch
 from tasks import SemanticClassificationTask
+from tasks.parent_finding import ParentFindingTask
 
 
 @dataclass
@@ -71,8 +72,9 @@ class Predictor:
         self.device = device or next(model.parameters()).device
         self.micro_batch_size = micro_batch_size
 
-        # 使用 tasks/ 中的统一 decode 逻辑
+        # 使用 tasks/ 中的统一 decode 逻辑（复用，不重复实现）
         self.cls_task = SemanticClassificationTask(model=model, use_line_level=True)
+        self.parent_task = ParentFindingTask()
 
     def predict(self, sample: Sample) -> PredictionOutput:
         """
@@ -199,10 +201,9 @@ class Predictor:
             )
             gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
 
-            for child_idx in range(actual_num_lines):
-                child_logits = parent_logits[0, child_idx + 1, :child_idx + 2]
-                pred_parent_idx = child_logits.argmax().item()
-                pred_parents[child_idx] = pred_parent_idx - 1  # -1 means ROOT
+            # 复用 tasks/parent_finding.py 的 decode 逻辑
+            parent_preds = self.parent_task.decode(parent_logits, line_mask.unsqueeze(0))
+            pred_parents = parent_preds[0].tolist()  # [L] -> list
         else:
             for child_idx in range(1, actual_num_lines):
                 parent_candidates = line_features[:child_idx]
