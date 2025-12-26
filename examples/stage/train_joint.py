@@ -1060,8 +1060,8 @@ def main():
         )
 
         if model_args.use_soft_mask:
-            if joint_checkpoint or joint_model_path:
-                # 续训或从 joint checkpoint 加载：M_cp 会从 checkpoint 的 state_dict 恢复，跳过构建
+            if joint_model_path:
+                # 从 joint checkpoint 加载：M_cp 会从 checkpoint 的 state_dict 恢复，跳过构建
                 logger.info("M_cp will be restored from checkpoint (skipping build)")
             else:
                 # 首次训练：从数据集构建 M_cp

@@ -20,12 +20,177 @@ from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, Dataset, DatasetDict, concatenate_datasets
 
 logger = logging.getLogger(__name__)
 
 
 # ==================== 独立数据集加载函数 ====================
+
+def load_hrdoc_raw_datasets_batched(
+    data_dir: str,
+    dataset_name: str = "hrdh",
+    batch_size: int = 100,
+    cache_dir: str = None,
+) -> DatasetDict:
+    """
+    分批加载大型数据集（如 HRDH），避免一次性处理所有文件导致卡住
+
+    原理：
+    1. 将文件分成多个批次（每批 batch_size 个文件）
+    2. 每批独立处理，保存为临时 Arrow 文件
+    3. 最后合并所有批次
+
+    Args:
+        data_dir: 数据目录（如 /data/HRDH）
+        dataset_name: 数据集名称（hrdh, hrds, tender）
+        batch_size: 每批处理的文件数
+        cache_dir: 缓存目录，默认使用 {data_dir}/.cache
+
+    Returns:
+        合并后的 DatasetDict
+    """
+    import json
+    from layoutlmft.data.utils import load_image, normalize_bbox
+    from layoutlmft.data.labels import trans_class, LABEL2ID
+
+    if cache_dir is None:
+        cache_dir = os.path.join(data_dir, ".cache", "batched")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    ann_dir = os.path.join(data_dir, "train")
+    img_dir = os.path.join(data_dir, "images")
+
+    all_files = sorted([f for f in os.listdir(ann_dir) if f.endswith('.json')])
+    total_files = len(all_files)
+    num_batches = (total_files + batch_size - 1) // batch_size
+
+    print(f"[BatchLoader] Total {total_files} files, splitting into {num_batches} batches", flush=True)
+
+    all_train_data = []
+
+    for batch_idx in range(num_batches):
+        start = batch_idx * batch_size
+        end = min(start + batch_size, total_files)
+        batch_files = all_files[start:end]
+
+        batch_cache = os.path.join(cache_dir, f"batch_{batch_idx:04d}.arrow")
+
+        # 检查缓存
+        if os.path.exists(batch_cache):
+            print(f"[Batch {batch_idx+1}/{num_batches}] Loading from cache: {batch_cache}", flush=True)
+            batch_ds = Dataset.from_file(batch_cache)
+            all_train_data.append(batch_ds)
+            continue
+
+        print(f"[Batch {batch_idx+1}/{num_batches}] Processing files {start}-{end}...", flush=True)
+
+        # 处理这批文件
+        batch_examples = []
+        for file_idx, filename in enumerate(batch_files):
+            filepath = os.path.join(ann_dir, filename)
+            doc_name = filename.replace('.json', '')
+
+            try:
+                with open(filepath, 'r', encoding='utf8') as f:
+                    data = json.load(f)
+
+                # 按页分组
+                if isinstance(data, list):
+                    pages_data = {}
+                    for item in data:
+                        page_num = item.get("page", 0)
+                        if isinstance(page_num, str):
+                            page_num = int(page_num) if page_num.isdigit() else 0
+                        if page_num not in pages_data:
+                            pages_data[page_num] = []
+                        pages_data[page_num].append(item)
+                else:
+                    pages_data = {0: data.get("form", [])}
+
+                # 处理每页
+                for page_num in sorted(pages_data.keys()):
+                    form_data = pages_data[page_num]
+
+                    # 查找图片
+                    img_path = os.path.join(img_dir, doc_name, f"{page_num}.png")
+                    if not os.path.exists(img_path):
+                        img_path = os.path.join(img_dir, doc_name, f"{page_num}.jpg")
+                    if not os.path.exists(img_path):
+                        img_path = os.path.join(img_dir, doc_name, f"{doc_name}_{page_num}.jpg")
+                    if not os.path.exists(img_path):
+                        continue
+
+                    image, size = load_image(img_path)
+
+                    # 处理行
+                    tokens, bboxes, ner_tags, line_ids = [], [], [], []
+                    line_parent_ids, line_relations = [], []
+
+                    for item in form_data:
+                        label = trans_class(item.get("class", item.get("label", "paraline")),
+                                          all_lines=form_data, unit=item)
+                        if isinstance(label, str):
+                            label = LABEL2ID.get(label, 0)
+
+                        words = item.get("words", [{"text": item.get("text", ""), "box": item.get("box", [0,0,0,0])}])
+                        words = [w for w in words if w.get("text", "").strip()]
+                        if not words:
+                            words = [{"text": "[EMPTY]", "box": item.get("box", [0,0,0,0])}]
+
+                        item_line_id = item.get("line_id", item.get("id", 0))
+                        parent_id = item.get("parent_id", -1)
+                        if parent_id == "" or parent_id is None:
+                            parent_id = -1
+                        else:
+                            try:
+                                parent_id = int(parent_id)
+                            except:
+                                parent_id = -1
+
+                        relation = item.get("relation", "none") or "none"
+                        line_parent_ids.append(parent_id)
+                        line_relations.append(relation)
+
+                        for w in words:
+                            tokens.append(w.get("text", ""))
+                            ner_tags.append(label)
+                            bboxes.append(normalize_bbox(w.get("box", [0,0,0,0]), size))
+                            line_ids.append(item_line_id)
+
+                    if tokens:
+                        batch_examples.append({
+                            "id": f"{batch_idx}_{file_idx}_{page_num}",
+                            "document_name": doc_name,
+                            "page_number": page_num,
+                            "tokens": tokens,
+                            "bboxes": bboxes,
+                            "ner_tags": ner_tags,
+                            "image": image,
+                            "line_ids": line_ids,
+                            "line_parent_ids": line_parent_ids,
+                            "line_relations": line_relations,
+                        })
+
+            except Exception as e:
+                print(f"  [Error] {filename}: {e}", flush=True)
+                continue
+
+        # 保存批次
+        if batch_examples:
+            batch_ds = Dataset.from_list(batch_examples)
+            batch_ds.save_to_disk(batch_cache.replace('.arrow', ''))
+            all_train_data.append(batch_ds)
+            print(f"  Saved {len(batch_examples)} examples to {batch_cache}", flush=True)
+
+    # 合并所有批次
+    print(f"[BatchLoader] Merging {len(all_train_data)} batches...", flush=True)
+    if all_train_data:
+        merged = concatenate_datasets(all_train_data)
+        return DatasetDict({"train": merged})
+    else:
+        return DatasetDict()
+
 
 def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = False, dataset_name: str = "hrdoc"):
     """
