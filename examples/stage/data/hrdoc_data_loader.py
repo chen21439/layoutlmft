@@ -51,11 +51,13 @@ def load_hrdoc_raw_datasets(data_dir: str = None, force_rebuild: bool = False, d
             os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__),
             name=dataset_name,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
             download_mode="force_redownload",
+            ignore_verifications=True,  # 跳过 split 验证（兼容旧版 datasets）
         )
     else:
         datasets = load_dataset(
             os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__),
             name=dataset_name,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
+            ignore_verifications=True,  # 跳过 split 验证
         )
 
     train_count = len(datasets.get("train", []))

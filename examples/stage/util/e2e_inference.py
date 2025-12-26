@@ -245,17 +245,17 @@ def run_e2e_inference_document(
     doc_input_ids = batch["input_ids"][chunk_start:chunk_end]
     doc_bbox = batch["bbox"][chunk_start:chunk_end]
     doc_attention_mask = batch["attention_mask"][chunk_start:chunk_end]
-    # 处理 image（必须是 float 类型，cuDNN 要求）
+    # 处理 image（必须是 float 类型并移到正确设备，cuDNN 要求）
     doc_image = batch.get("image")
     if doc_image is not None:
         doc_image = doc_image[chunk_start:chunk_end]
         if isinstance(doc_image, torch.Tensor):
-            doc_image = doc_image.float()
+            doc_image = doc_image.float().to(device)
         elif isinstance(doc_image, list):
             doc_image = torch.stack([
                 torch.tensor(img).float() if not isinstance(img, torch.Tensor) else img.float()
                 for img in doc_image
-            ])
+            ]).to(device)
     doc_line_ids = batch["line_ids"][chunk_start:chunk_end]
 
     stage1_outputs = model.stage1(
