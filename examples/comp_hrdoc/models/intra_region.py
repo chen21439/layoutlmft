@@ -323,14 +323,14 @@ class IntraRegionHead(nn.Module):
             row_mask = ~line_mask.unsqueeze(2)  # [B, N, 1]
             col_mask = ~line_mask.unsqueeze(1)  # [B, 1, N]
             combined_mask = row_mask | col_mask
-            succ_scores = succ_scores.masked_fill(combined_mask, -1e9)
-            pred_scores = pred_scores.masked_fill(combined_mask, -1e9)
+            succ_scores = succ_scores.masked_fill(combined_mask, -1e4)  # fp16 safe
+            pred_scores = pred_scores.masked_fill(combined_mask, -1e4)  # fp16 safe
 
         # Diagonal mask: line cannot be its own successor/predecessor
         # (unless it's the first/last line in region - handled in loss)
         diag = torch.eye(num_lines, dtype=torch.bool, device=device)
-        succ_scores = succ_scores.masked_fill(diag.unsqueeze(0), -1e9)
-        pred_scores = pred_scores.masked_fill(diag.unsqueeze(0), -1e9)
+        succ_scores = succ_scores.masked_fill(diag.unsqueeze(0), -1e4)  # fp16 safe
+        pred_scores = pred_scores.masked_fill(diag.unsqueeze(0), -1e4)  # fp16 safe
 
         return {
             'successor_logits': succ_scores,

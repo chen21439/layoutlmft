@@ -281,11 +281,11 @@ class TreeRelationHead(nn.Module):
             col_mask = ~mask.unsqueeze(1)
             combined_mask = row_mask | col_mask
 
-            # Use -1e9 instead of -inf to avoid NaN in softmax
-            parent_logits = parent_logits.masked_fill(combined_mask, -1e9)
+            # Use -1e4 instead of -inf to avoid NaN in softmax (fp16 safe)
+            parent_logits = parent_logits.masked_fill(combined_mask, -1e4)
             # Diagonal: node cannot be its own parent
             diag = torch.eye(num_nodes, dtype=torch.bool, device=features.device)
-            parent_logits = parent_logits.masked_fill(diag.unsqueeze(0), -1e9)
+            parent_logits = parent_logits.masked_fill(diag.unsqueeze(0), -1e4)
 
         return {
             'parent_logits': parent_logits,

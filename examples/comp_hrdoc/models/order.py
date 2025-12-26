@@ -378,11 +378,11 @@ class InterRegionOrderHead(nn.Module):
             row_mask = ~mask.unsqueeze(2)
             col_mask = ~mask.unsqueeze(1)
             combined_mask = row_mask | col_mask
-            scores = scores.masked_fill(combined_mask, -1e9)
+            scores = scores.masked_fill(combined_mask, -1e4)  # fp16 safe
 
         # Diagonal mask
         diag = torch.eye(num_regions, dtype=torch.bool, device=device)
-        scores = scores.masked_fill(diag.unsqueeze(0), -1e9)
+        scores = scores.masked_fill(diag.unsqueeze(0), -1e4)  # fp16 safe
 
         return scores
 
