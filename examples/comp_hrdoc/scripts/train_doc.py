@@ -269,6 +269,8 @@ def evaluate(
     device: torch.device,
 ) -> Dict[str, float]:
     """Evaluate model"""
+    from sklearn.metrics import f1_score
+
     model.eval()
 
     total_loss = 0.0
@@ -280,6 +282,12 @@ def evaluate(
     total_cls_correct = 0
     total_cls_count = 0
     num_batches = 0
+
+    # Collect all predictions and labels for F1 computation
+    all_order_preds = []
+    all_order_labels = []
+    all_cls_preds = []
+    all_cls_labels = []
 
     # Check if model uses semantic classification
     use_semantic = getattr(model, 'use_semantic', False)
@@ -346,6 +354,16 @@ def evaluate(
         total_order_correct += correct.sum().item()
         total_order_count += region_mask.sum().item()
 
+        # Collect predictions for F1 (only valid regions)
+        # For order: use binary correct/incorrect for F1
+        mask_flat = region_mask.view(-1).cpu().numpy()
+        pred_flat = pred_successors.view(-1).cpu().numpy()
+        label_flat = successor_labels.view(-1).cpu().numpy()
+        # Collect binary correctness (1=correct, 0=incorrect) for order F1
+        order_correct_flat = (pred_flat == label_flat).astype(int)
+        all_order_preds.extend(order_correct_flat[mask_flat.astype(bool)])
+        all_order_labels.extend([1] * int(mask_flat.sum()))  # All should be 1 (correct)
+
         # Compute category accuracy if semantic classification enabled
         if use_semantic and "category_logits" in outputs:
             pred_categories = outputs["category_logits"].argmax(dim=-1)
@@ -353,11 +371,26 @@ def evaluate(
             total_cls_correct += cls_correct.sum().item()
             total_cls_count += region_mask.sum().item()
 
+            # Collect for F1
+            pred_cls_flat = pred_categories.view(-1).cpu().numpy()
+            label_cls_flat = categories.view(-1).cpu().numpy()
+            all_cls_preds.extend(pred_cls_flat[mask_flat.astype(bool)])
+            all_cls_labels.extend(label_cls_flat[mask_flat.astype(bool)])
+
         num_batches += 1
 
     # Compute accuracies
     order_acc = total_order_correct / max(total_order_count, 1)
     cls_acc = total_cls_correct / max(total_cls_count, 1) if use_semantic else 0.0
+
+    # Compute F1 scores
+    # Order F1: binary (correct vs incorrect prediction)
+    order_f1 = f1_score(all_order_labels, all_order_preds, average='binary', zero_division=0)
+
+    # Classification F1: macro average over all categories
+    cls_f1 = 0.0
+    if use_semantic and len(all_cls_preds) > 0:
+        cls_f1 = f1_score(all_cls_labels, all_cls_preds, average='macro', zero_division=0)
 
     results = {
         "loss": total_loss / num_batches,
@@ -365,9 +398,11 @@ def evaluate(
         "order_loss": total_order_loss / num_batches,
         "construct_loss": total_construct_loss / num_batches,
         "order_accuracy": order_acc,
+        "order_f1": order_f1,
     }
     if use_semantic:
         results["cls_accuracy"] = cls_acc
+        results["cls_f1"] = cls_f1
 
     return results
 
@@ -563,9 +598,9 @@ def main():
             val_log += f", Cls: {val_metrics['cls_loss']:.4f}"
         logger.info(val_log)
 
-        acc_log = f"Val - Order Accuracy: {val_metrics['order_accuracy']:.4f}"
+        acc_log = f"Val - Order Accuracy: {val_metrics['order_accuracy']:.4f}, Order F1: {val_metrics['order_f1']:.4f}"
         if args.use_semantic and 'cls_accuracy' in val_metrics:
-            acc_log += f", Cls Accuracy: {val_metrics['cls_accuracy']:.4f}"
+            acc_log += f", Cls Accuracy: {val_metrics['cls_accuracy']:.4f}, Cls F1: {val_metrics['cls_f1']:.4f}"
         logger.info(acc_log)
 
         # Save best model
