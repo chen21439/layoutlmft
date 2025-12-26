@@ -333,12 +333,9 @@ class InterRegionOrderHead(nn.Module):
         self.use_spatial = use_spatial
 
         # FC_q and FC_k: 2048 nodes each
+        # Paper Eq. 7: s_ij = FC_q(F_i) · FC_k(F_j) (dot product, NOT biaffine)
         self.head_proj = nn.Linear(hidden_size, proj_size)
         self.dep_proj = nn.Linear(hidden_size, proj_size)
-
-        # Biaffine weight matrix
-        self.biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
-        nn.init.xavier_uniform_(self.biaffine)
 
         # Spatial compatibility features
         if use_spatial:
@@ -364,8 +361,8 @@ class InterRegionOrderHead(nn.Module):
         head_repr = self.dropout(self.head_proj(features))  # [B, N, 2048]
         dep_repr = self.dropout(self.dep_proj(features))    # [B, N, 2048]
 
-        # Biaffine scoring
-        scores = torch.einsum('bih,hd,bjd->bij', head_repr, self.biaffine, dep_repr)
+        # Dot product scoring (Paper Eq. 7: s_ij = FC_q(F_i) · FC_k(F_j))
+        scores = torch.einsum('bih,bjh->bij', head_repr, dep_repr)
         scores = scores * self.scale
 
         # Add spatial scores
