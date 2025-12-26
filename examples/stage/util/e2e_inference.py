@@ -65,13 +65,16 @@ def run_e2e_inference_single(
     if device is None:
         device = next(model.stage1.parameters()).device
 
-    # 处理 image：文档级别模式下可能是 list，需要转换为 tensor
+    # 处理 image：文档级别模式下可能是 list，需要转换为 float tensor（cuDNN 要求）
     image = batch.get("image")
-    if image is not None and isinstance(image, list):
-        image = torch.stack([
-            torch.tensor(img) if not isinstance(img, torch.Tensor) else img
-            for img in image
-        ]).to(device)
+    if image is not None:
+        if isinstance(image, list):
+            image = torch.stack([
+                torch.tensor(img).float() if not isinstance(img, torch.Tensor) else img.float()
+                for img in image
+            ]).to(device)
+        elif isinstance(image, torch.Tensor):
+            image = image.float().to(device)
 
     # ==================== Stage 1: Classification ====================
     stage1_outputs = model.stage1(
@@ -242,9 +245,17 @@ def run_e2e_inference_document(
     doc_input_ids = batch["input_ids"][chunk_start:chunk_end]
     doc_bbox = batch["bbox"][chunk_start:chunk_end]
     doc_attention_mask = batch["attention_mask"][chunk_start:chunk_end]
+    # 处理 image（必须是 float 类型，cuDNN 要求）
     doc_image = batch.get("image")
     if doc_image is not None:
         doc_image = doc_image[chunk_start:chunk_end]
+        if isinstance(doc_image, torch.Tensor):
+            doc_image = doc_image.float()
+        elif isinstance(doc_image, list):
+            doc_image = torch.stack([
+                torch.tensor(img).float() if not isinstance(img, torch.Tensor) else img.float()
+                for img in doc_image
+            ])
     doc_line_ids = batch["line_ids"][chunk_start:chunk_end]
 
     stage1_outputs = model.stage1(

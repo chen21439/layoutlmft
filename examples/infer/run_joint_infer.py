@@ -28,9 +28,11 @@ STAGE_DIR = PROJECT_ROOT / "examples" / "stage"
 EXAMPLES_ROOT = PROJECT_ROOT / "examples"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "configs"))
-sys.path.insert(0, str(EXAMPLES_ROOT))
-sys.path.insert(0, str(STAGE_DIR))
 sys.path.insert(0, str(STAGE_DIR / "util"))
+sys.path.insert(0, str(STAGE_DIR / "data"))
+sys.path.insert(0, str(STAGE_DIR))
+# EXAMPLES_ROOT 放最后，确保 examples/models/ 优先于 examples/stage/models/
+sys.path.insert(0, str(EXAMPLES_ROOT))
 
 # ==================== GPU 设置（必须在 import torch 之前）====================
 from utils.gpu import setup_gpu_early
@@ -39,16 +41,14 @@ setup_gpu_early()
 import torch
 from tqdm import tqdm
 
-# 切换工作目录以支持 train_parent_finder.py 中的相对导入
-os.chdir(STAGE_DIR)
-
 from layoutlmft.data.labels import LABEL_LIST, NUM_LABELS, id2label, get_id2label, get_label2id
 from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 
-# 从共享模块导入
+# 从共享模块导入（examples/models/build.py）
 from models.build import load_joint_model, get_latest_joint_checkpoint
 
-from e2e_inference import run_e2e_inference_single, run_e2e_inference_document
+# 从 stage 目录导入（examples/stage/）
+from util.e2e_inference import run_e2e_inference_single, run_e2e_inference_document
 from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
 
 logging.basicConfig(
