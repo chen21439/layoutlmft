@@ -98,15 +98,15 @@ class SemanticClassificationTask:
         line_ids: torch.Tensor,
     ) -> Dict[int, int]:
         """
-        Line-level 分类：mean pooling + cls_head
+        Line-level 分类：使用 model.line_pooling + model.cls_head
 
         与 JointModel.forward() 的 Stage 1 逻辑一致
         """
         device = hidden_states.device
         num_chunks = hidden_states.shape[0]
 
-        # Step 1: 聚合 line features
-        line_features, line_mask = self._aggregate_line_features(hidden_states, line_ids)
+        # Step 1: 使用 model.line_pooling 聚合 line features（复用模型模块，不重复实现）
+        line_features, line_mask = self.model.line_pooling(hidden_states, line_ids)
         actual_num_lines = int(line_mask.sum().item())
 
         if actual_num_lines == 0:
@@ -118,8 +118,8 @@ class SemanticClassificationTask:
             cls_logits = self.model.cls_head(valid_features)  # [L, num_classes]
             line_preds = cls_logits.argmax(dim=-1).cpu().tolist()  # [L]
 
-        # Step 3: 获取 line_id 映射
-        line_id_list = self._get_ordered_line_ids(line_ids)
+        # Step 3: 获取 line_id 映射（使用 line_pooling 的方法）
+        line_id_list = self.model.line_pooling.get_line_ids_mapping(line_ids).cpu().tolist()
 
         # Step 4: 构建结果
         line_classes = {}
@@ -156,66 +156,9 @@ class SemanticClassificationTask:
         # 多数投票
         return self._aggregate_by_voting(all_token_preds, all_line_ids)
 
-    def _aggregate_line_features(
-        self,
-        hidden_states: torch.Tensor,
-        line_ids: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        聚合 token features 到 line features
-
-        与 JointModel._aggregate_document_line_features 逻辑一致
-        """
-        device = hidden_states.device
-        hidden_dim = hidden_states.shape[-1]
-
-        # 展平
-        flat_hidden = hidden_states.reshape(-1, hidden_dim)  # [N, H]
-        flat_line_ids = line_ids.reshape(-1)  # [N]
-
-        # 获取有效 token
-        valid_mask = flat_line_ids >= 0
-        valid_line_ids = flat_line_ids[valid_mask]
-        valid_hidden = flat_hidden[valid_mask]
-
-        if len(valid_line_ids) == 0:
-            return torch.zeros(1, hidden_dim, device=device), torch.zeros(1, dtype=torch.bool, device=device)
-
-        # 获取唯一 line_id 并排序
-        unique_line_ids = valid_line_ids.unique()
-        unique_line_ids = unique_line_ids.sort()[0]
-        num_lines = len(unique_line_ids)
-
-        # 映射
-        line_indices = torch.searchsorted(unique_line_ids, valid_line_ids)
-
-        # 聚合 features
-        line_features = torch.zeros(num_lines, hidden_dim, device=device)
-        line_features.scatter_add_(0, line_indices.unsqueeze(1).expand(-1, hidden_dim), valid_hidden)
-
-        # 统计每行 token 数
-        line_counts = torch.zeros(num_lines, device=device)
-        line_counts.scatter_add_(0, line_indices, torch.ones_like(line_indices, dtype=torch.float))
-
-        # 平均
-        valid_counts = line_counts.clamp(min=1)
-        line_features = line_features / valid_counts.unsqueeze(1)
-
-        # mask
-        line_mask = line_counts > 0
-
-        return line_features, line_mask
-
-    def _get_ordered_line_ids(self, line_ids: torch.Tensor) -> List[int]:
-        """获取按顺序出现的 line_id 列表"""
-        flat_line_ids = line_ids.reshape(-1).cpu().tolist()
-        seen = set()
-        ordered = []
-        for lid in flat_line_ids:
-            if lid >= 0 and lid not in seen:
-                seen.add(lid)
-                ordered.append(lid)
-        return ordered
+    # 注：_aggregate_line_features 和 _get_ordered_line_ids 已移除
+    # 统一使用 model.line_pooling（在 models/modules/line_pooling.py 中定义）
+    # 避免代码重复，保持训练和推理一致
 
     def _aggregate_by_voting(
         self,
@@ -272,8 +215,8 @@ class SemanticClassificationTask:
             sample_hidden = hidden_states[b:b+1]  # [1, seq_len, H]
             sample_line_ids = line_ids[b:b+1]  # [1, seq_len]
 
-            # 聚合
-            line_features, mask = self._aggregate_line_features(sample_hidden, sample_line_ids)
+            # 使用 model.line_pooling 聚合（复用模型模块）
+            line_features, mask = self.model.line_pooling(sample_hidden, sample_line_ids)
             valid_features = line_features[:num_lines]
 
             # 分类

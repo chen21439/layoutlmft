@@ -166,26 +166,10 @@ class Predictor:
             return PredictionOutput()
 
         # ==================== Stage 2: Feature Extraction ====================
-        # text_hidden 已经在 Stage 1 中截取好了
-
-        # 根据模式选择特征聚合方法（与训练保持一致）
-        if num_chunks > 1:
-            # 文档级别：使用 _aggregate_document_line_features（与 JointModel 一致）
-            line_features, line_mask = self._aggregate_document_line_features(
-                text_hidden, line_ids
-            )
-            # line_features: [num_lines, H], line_mask: [num_lines]
-        else:
-            # 页面级别：使用 extract_line_features
-            all_hidden = text_hidden.reshape(-1, text_hidden.shape[-1])
-            all_line_ids_flat = line_ids.reshape(-1)
-            line_features, line_mask = self.model.feature_extractor.extract_line_features(
-                all_hidden.unsqueeze(0),
-                all_line_ids_flat.unsqueeze(0),
-                pooling="mean"
-            )
-            line_features = line_features[0]  # [max_lines, H]
-            line_mask = line_mask[0]
+        # 使用 model.line_pooling 聚合（与训练一致，不再区分页面/文档级别）
+        # line_pooling 内部自动处理多 chunk 聚合
+        line_features, line_mask = self.model.line_pooling(text_hidden, line_ids)
+        # line_features: [num_lines, H], line_mask: [num_lines]
 
         actual_num_lines = int(line_mask.sum().item())
 
@@ -260,9 +244,6 @@ class Predictor:
             line_ids=sorted_line_ids,
         )
 
-    # 注意：_aggregate_to_lines 方法已移至 tasks/semantic_cls.py
-    # 统一由 SemanticClassificationTask 处理，确保训练和评估一致
-
     def predict_batch(self, batch: BatchBase) -> List[PredictionOutput]:
         """
         对整个 batch 进行推理
@@ -280,59 +261,96 @@ class Predictor:
             results.append(result)
         return results
 
-    def _aggregate_document_line_features(
+    def predict_single_from_batch(
         self,
-        doc_hidden: torch.Tensor,
-        doc_line_ids: torch.Tensor,
-    ) -> tuple:
+        batch: Dict[str, Any],
+        batch_idx: int = 0,
+    ) -> PredictionOutput:
         """
-        从文档的所有 chunks 中聚合 line features（与 JointModel 一致）
+        从页面级别 batch 中提取单个样本进行推理
 
         Args:
-            doc_hidden: [num_chunks, seq_len, hidden_dim]
-            doc_line_ids: [num_chunks, seq_len]，每个 token 的全局 line_id
+            batch: 页面级别 batch，input_ids 形状为 [batch_size, seq_len]
+            batch_idx: 要推理的样本索引
 
         Returns:
-            features: [num_lines, hidden_dim]
-            mask: [num_lines]，有效行的 mask
+            PredictionOutput: 预测结果
         """
-        device = doc_hidden.device
-        hidden_dim = doc_hidden.shape[-1]
+        # 提取单个样本
+        input_ids = batch["input_ids"][batch_idx:batch_idx+1]
+        bbox = batch["bbox"][batch_idx:batch_idx+1]
+        attention_mask = batch["attention_mask"][batch_idx:batch_idx+1]
 
-        # 展平（使用 reshape 兼容非连续 tensor）
-        flat_hidden = doc_hidden.reshape(-1, hidden_dim)  # [N, hidden_dim]
-        flat_line_ids = doc_line_ids.reshape(-1)  # [N]
+        line_ids = batch.get("line_ids")
+        if line_ids is not None:
+            line_ids = line_ids[batch_idx:batch_idx+1]
 
-        # 获取有效 token（line_id >= 0）
-        valid_mask = flat_line_ids >= 0
-        valid_line_ids = flat_line_ids[valid_mask]
-        valid_hidden = flat_hidden[valid_mask]
+        # 处理 image
+        image = batch.get("image")
+        if image is not None:
+            if isinstance(image, list):
+                image = [image[batch_idx]]
+            else:
+                image = image[batch_idx:batch_idx+1]
 
-        if len(valid_line_ids) == 0:
-            return torch.zeros(1, hidden_dim, device=device), torch.zeros(1, dtype=torch.bool, device=device)
+        # 移动到设备
+        input_ids = input_ids.to(self.device)
+        bbox = bbox.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        if line_ids is not None:
+            line_ids = line_ids.to(self.device)
+        if image is not None and isinstance(image, torch.Tensor):
+            image = image.to(self.device)
 
-        # 获取唯一的 line_id 并排序
-        unique_line_ids = valid_line_ids.unique()
-        unique_line_ids = unique_line_ids.sort()[0]
-        num_lines = len(unique_line_ids)
+        return self._run_inference(input_ids, bbox, attention_mask, image, line_ids)
 
-        # 创建 line_id 到连续索引的映射（向量化）
-        # 使用 searchsorted 进行快速映射
-        line_indices = torch.searchsorted(unique_line_ids, valid_line_ids)
+    def predict_from_dict(
+        self,
+        batch: Dict[str, Any],
+        doc_idx: int = 0,
+    ) -> PredictionOutput:
+        """
+        从文档级别 batch dict 进行推理
 
-        # 使用 scatter_add 聚合 features
-        line_features = torch.zeros(num_lines, hidden_dim, device=device)
-        line_features.scatter_add_(0, line_indices.unsqueeze(1).expand(-1, hidden_dim), valid_hidden)
+        Args:
+            batch: 包含 input_ids, bbox, attention_mask, image, line_ids 等的字典
+                - 文档级别：input_ids 形状为 [total_chunks, seq_len]
+                - 包含 num_docs 和 chunks_per_doc 字段
+            doc_idx: 文档索引
 
-        # 统计每个 line 的 token 数量
-        line_counts = torch.zeros(num_lines, device=device)
-        line_counts.scatter_add_(0, line_indices, torch.ones_like(line_indices, dtype=torch.float))
+        Returns:
+            PredictionOutput: 预测结果
+        """
+        # 获取文档范围
+        num_docs = batch.get("num_docs", 1)
+        chunks_per_doc = batch.get("chunks_per_doc", [batch["input_ids"].shape[0]])
 
-        # 计算平均值
-        valid_counts = line_counts.clamp(min=1)
-        line_features = line_features / valid_counts.unsqueeze(1)
+        chunk_start = sum(chunks_per_doc[:doc_idx])
+        chunk_end = chunk_start + chunks_per_doc[doc_idx]
 
-        # 创建 mask
-        line_mask = line_counts > 0
+        # 提取该文档的数据
+        input_ids = batch["input_ids"][chunk_start:chunk_end]
+        bbox = batch["bbox"][chunk_start:chunk_end]
+        attention_mask = batch["attention_mask"][chunk_start:chunk_end]
+        line_ids = batch.get("line_ids")
+        if line_ids is not None:
+            line_ids = line_ids[chunk_start:chunk_end]
 
-        return line_features, line_mask
+        # 处理 image
+        image = batch.get("image")
+        if image is not None:
+            if isinstance(image, list):
+                image = image[chunk_start:chunk_end]
+            else:
+                image = image[chunk_start:chunk_end]
+
+        # 移动到设备
+        input_ids = input_ids.to(self.device)
+        bbox = bbox.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        if line_ids is not None:
+            line_ids = line_ids.to(self.device)
+        if image is not None and isinstance(image, torch.Tensor):
+            image = image.to(self.device)
+
+        return self._run_inference(input_ids, bbox, attention_mask, image, line_ids)

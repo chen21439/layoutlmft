@@ -4,12 +4,13 @@
 Joint Model End-to-End Inference - 使用联合训练模型进行端到端推理
 
 复用共享模块：
-- e2e_inference.py: 端到端推理逻辑
-- hrdoc_eval.py: 评估逻辑
+- engines/predictor.py: 统一推理接口（Predictor 类）
+- HRDoc 评估工具
 
 Usage:
     python run_joint_infer.py --env test --dataset hrds
     python run_joint_infer.py --env test --dataset hrdh --quick
+    python run_joint_infer.py --env test --dataset tender --gpu 7
 """
 
 import os
@@ -48,7 +49,7 @@ from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 from models.build import load_joint_model, get_latest_joint_checkpoint
 
 # 从 stage 目录导入（examples/stage/）
-from util.e2e_inference import run_e2e_inference_single, run_e2e_inference_document
+from engines.predictor import Predictor, PredictionOutput
 from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
 
 logging.basicConfig(
@@ -115,6 +116,9 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
     # Load model
     model, tokenizer = load_joint_model(model_path, device, config=config)
 
+    # 创建 Predictor（统一推理接口）
+    predictor = Predictor(model=model, device=device)
+
     # 使用统一的数据加载器（文档级别）
     loader_config = HRDocDataLoaderConfig(
         data_dir=data_dir,
@@ -162,11 +166,8 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
             # 使用 collator 处理单个文档
             batch = data_collator([doc])
 
-            # 移动到设备
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-
-            # 使用文档级别推理模块
-            pred_output = run_e2e_inference_document(model, batch, doc_idx=0, device=device)
+            # 使用 Predictor 进行推理（统一接口，与训练一致）
+            pred_output = predictor.predict_from_dict(batch, doc_idx=0)
 
             if pred_output.num_lines == 0:
                 continue
@@ -323,6 +324,7 @@ def run_evaluation(gt_folder: str, pred_folder: str, eval_type: str = "all"):
 def main():
     parser = argparse.ArgumentParser(description="Joint Model End-to-End Inference")
     parser.add_argument("--env", type=str, default=None, help="Environment config (dev/test)")
+    parser.add_argument("--gpu", type=str, default=None, help="GPU ID (e.g., '0', '7'). Overrides config file.")
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh", "tender"])
     parser.add_argument("--exp", type=str, default=None, help="Experiment ID")
     parser.add_argument("--model_path", type=str, default=None, help="Joint model checkpoint path")
@@ -337,8 +339,7 @@ def main():
     config = None
     if args.env:
         config = load_config(args.env)
-        if config and config.gpu.cuda_visible_devices:
-            os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu.cuda_visible_devices
+        # GPU 已在 setup_gpu_early() 中通过 --gpu 参数设置，这里不再覆盖
 
     data_dir = args.data_dir or (get_data_dir(config, args.dataset) if config else None)
     if not data_dir:
