@@ -85,9 +85,6 @@ class JointModel(nn.Module):
         Backbone (LayoutLM) → LinePooling → [cls_head, stage3, stage4]
 
     论文公式: L_total = L_cls + α₁·L_par + α₂·L_rel
-
-    注意：Stage 1 单独训练使用 stage/models/stage1_line_level_model.py，
-    它复用了相同的共享模块（LinePooling, LineClassificationHead）。
     """
 
     def __init__(
