@@ -290,35 +290,48 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
 
 
 def run_evaluation(gt_folder: str, pred_folder: str, eval_type: str = "all"):
-    """Run HRDoc evaluation using official tools."""
+    """Run HRDoc evaluation using official tools.
+
+    使用 subprocess 隔离调用 HRDoc 评估脚本，避免与 examples/utils 路径冲突。
+    这是符合项目结构说明的做法：评估脚本作为独立入口调用。
+    """
+    import subprocess
+
     logger.info("\n" + "=" * 60)
     logger.info("Running HRDoc Evaluation...")
     logger.info("=" * 60)
 
     hrdoc_utils_path = os.path.join(PROJECT_ROOT, "HRDoc", "utils")
-    sys.path.insert(0, str(hrdoc_utils_path))
 
     if eval_type in ["all", "classify"]:
-        try:
-            from classify_eval import main as classify_eval_main
-            original_argv = sys.argv
-            sys.argv = ['classify_eval.py', '--gt_folder', gt_folder, '--pred_folder', pred_folder]
+        classify_script = os.path.join(hrdoc_utils_path, "classify_eval.py")
+        if os.path.exists(classify_script):
             logger.info("\n--- Classification Evaluation ---")
-            classify_eval_main()
-            sys.argv = original_argv
-        except Exception as e:
-            logger.error(f"Classification evaluation failed: {e}")
+            cmd = [
+                sys.executable, classify_script,
+                "--gt_folder", gt_folder,
+                "--pred_folder", pred_folder,
+            ]
+            result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+            if result.returncode != 0:
+                logger.error(f"Classification evaluation failed with code {result.returncode}")
+        else:
+            logger.error(f"classify_eval.py not found: {classify_script}")
 
     if eval_type in ["all", "teds"]:
-        try:
-            from teds_eval import main as teds_eval_main
-            original_argv = sys.argv
-            sys.argv = ['teds_eval.py', '--gt_folder', gt_folder, '--pred_folder', pred_folder]
+        teds_script = os.path.join(hrdoc_utils_path, "teds_eval.py")
+        if os.path.exists(teds_script):
             logger.info("\n--- TEDS Evaluation ---")
-            teds_eval_main()
-            sys.argv = original_argv
-        except Exception as e:
-            logger.error(f"TEDS evaluation failed: {e}")
+            cmd = [
+                sys.executable, teds_script,
+                "--gt_folder", gt_folder,
+                "--pred_folder", pred_folder,
+            ]
+            result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+            if result.returncode != 0:
+                logger.error(f"TEDS evaluation failed with code {result.returncode}")
+        else:
+            logger.error(f"teds_eval.py not found: {teds_script}")
 
 
 def main():
