@@ -22,9 +22,17 @@ def setup_gpu_early(env: str = None):
     """
     在 import torch 之前设置 CUDA_VISIBLE_DEVICES
 
+    优先级：命令行 --gpu > 配置文件 > 系统默认
+
     Args:
         env: 环境名称（dev/test）。如果为 None，会尝试从命令行参数 --env 获取
     """
+    # 优先检查命令行 --gpu 参数
+    gpu_id = _get_gpu_from_argv()
+    if gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+        return
+
     # 如果没有指定 env，尝试从命令行参数获取
     if env is None:
         env = _get_env_from_argv()
@@ -39,6 +47,16 @@ def setup_gpu_early(env: str = None):
             os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu.cuda_visible_devices
     except Exception:
         pass  # 如果加载失败，使用默认 GPU 设置
+
+
+def _get_gpu_from_argv():
+    """从命令行参数中提取 --gpu 值"""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--gpu" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        elif arg.startswith("--gpu="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 def _get_env_from_argv():
