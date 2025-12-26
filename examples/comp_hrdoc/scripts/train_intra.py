@@ -243,6 +243,7 @@ class IntraRegionWithLayoutXLM(nn.Module):
         line_ids: torch.Tensor,
         line_mask: torch.Tensor,
         successor_labels: torch.Tensor = None,
+        role_labels: torch.Tensor = None,  # 4.2.4: Logical role labels
         image: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
         """
@@ -253,10 +254,11 @@ class IntraRegionWithLayoutXLM(nn.Module):
             line_ids: [batch, seq_len] - which line each token belongs to
             line_mask: [batch, num_lines] - valid lines
             successor_labels: [batch, num_lines] - ground truth successors
+            role_labels: [batch, num_lines] - ground truth role labels (4.2.4)
             image: Optional image tensor
 
         Returns:
-            Dict with successor_logits and loss
+            Dict with successor_logits, role_logits, and loss
         """
         batch_size = input_ids.size(0)
         device = input_ids.device
@@ -299,19 +301,23 @@ class IntraRegionWithLayoutXLM(nn.Module):
             pooling="mean",
         )
 
-        # Adjust successor_labels to match the extracted features shape
+        # Adjust successor_labels and role_labels to match the extracted features shape
         # extracted_mask has shape [batch, actual_num_lines] based on data
         # while line_mask/successor_labels are padded to max_lines from dataloader
         actual_num_lines = line_features.size(1)
-        adjusted_labels = None
+        adjusted_successor_labels = None
+        adjusted_role_labels = None
         if successor_labels is not None:
-            adjusted_labels = successor_labels[:, :actual_num_lines]
+            adjusted_successor_labels = successor_labels[:, :actual_num_lines]
+        if role_labels is not None:
+            adjusted_role_labels = role_labels[:, :actual_num_lines]
 
-        # Step 3: Intra-region head
+        # Step 3: Intra-region head (4.2.3 + 4.2.4)
         outputs = self.intra_region(
             line_features=line_features,
             line_mask=extracted_mask,  # Use extracted mask, not batch mask
-            successor_labels=adjusted_labels,
+            successor_labels=adjusted_successor_labels,
+            role_labels=adjusted_role_labels,
         )
 
         # Also return the actual mask and line count for evaluation
@@ -348,6 +354,10 @@ def train_epoch(
         line_ids = batch["line_ids"].to(device)
         line_mask = batch["line_mask"].to(device)
         successor_labels = batch["successor_labels"].to(device)
+        # 4.2.4: Logical role classification labels
+        role_labels = batch.get("class_labels")
+        if role_labels is not None:
+            role_labels = role_labels.to(device)
 
         # Forward pass
         if args.fp16 and scaler is not None:
@@ -359,6 +369,7 @@ def train_epoch(
                     line_ids=line_ids,
                     line_mask=line_mask,
                     successor_labels=successor_labels,
+                    role_labels=role_labels,
                 )
                 loss = outputs["loss"] / args.gradient_accumulation_steps
         else:
@@ -369,6 +380,7 @@ def train_epoch(
                 line_ids=line_ids,
                 line_mask=line_mask,
                 successor_labels=successor_labels,
+                role_labels=role_labels,
             )
             loss = outputs["loss"] / args.gradient_accumulation_steps
 
@@ -448,6 +460,10 @@ def evaluate(
         line_mask = batch["line_mask"].to(device)
         successor_labels = batch["successor_labels"].to(device)
         region_ids = batch["region_ids"].to(device)
+        # 4.2.4: Logical role classification labels
+        role_labels = batch.get("class_labels")
+        if role_labels is not None:
+            role_labels = role_labels.to(device)
 
         # Forward pass
         outputs = model(
@@ -457,6 +473,7 @@ def evaluate(
             line_ids=line_ids,
             line_mask=line_mask,
             successor_labels=successor_labels,
+            role_labels=role_labels,
         )
 
         total_loss += outputs["loss"].item()

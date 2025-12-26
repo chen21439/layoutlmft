@@ -239,20 +239,16 @@ class IntraRegionHead(nn.Module):
         )
 
         # ===== Succeeding Head (forward direction) =====
-        # Biaffine scoring (paper Eq. 7): predicts which line is the successor
+        # Paper Eq. 7: s_ij = FC_q(F_i) · FC_k(F_j) (dot product, NOT biaffine)
         # FC_q and FC_k: 2048 nodes each
         self.succ_head_proj = nn.Linear(hidden_size, proj_size)  # FC_q for successor
         self.succ_dep_proj = nn.Linear(hidden_size, proj_size)   # FC_k for successor
-        self.succ_biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
-        nn.init.xavier_uniform_(self.succ_biaffine)
 
         # ===== Preceding Head (backward direction) =====
         # Additional head per paper: "we employ an additional relation prediction head
         # to further identify the preceding text-line for each text-line"
         self.pred_head_proj = nn.Linear(hidden_size, proj_size)  # FC_q for predecessor
         self.pred_dep_proj = nn.Linear(hidden_size, proj_size)   # FC_k for predecessor
-        self.pred_biaffine = nn.Parameter(torch.zeros(proj_size, proj_size))
-        nn.init.xavier_uniform_(self.pred_biaffine)
 
         # Spatial compatibility features (paper Eq. 8, 9)
         # MLP with 1024 hidden nodes - shared between both heads
@@ -303,9 +299,10 @@ class IntraRegionHead(nn.Module):
             spatial_scores = self.spatial_features(line_bboxes)  # [B, N, N]
 
         # ===== Succeeding Head: predict successor for each line =====
+        # Paper Eq. 7: s_ij = FC_q(F_i) · FC_k(F_j) (dot product)
         succ_head = self.dropout(self.succ_head_proj(enhanced))  # [B, N, 2048]
         succ_dep = self.dropout(self.succ_dep_proj(enhanced))    # [B, N, 2048]
-        succ_scores = torch.einsum('bih,hd,bjd->bij', succ_head, self.succ_biaffine, succ_dep)
+        succ_scores = torch.einsum('bih,bjh->bij', succ_head, succ_dep)  # dot product
         succ_scores = succ_scores * self.scale
         if spatial_scores is not None:
             succ_scores = succ_scores + spatial_scores
@@ -313,7 +310,7 @@ class IntraRegionHead(nn.Module):
         # ===== Preceding Head: predict predecessor for each line =====
         pred_head = self.dropout(self.pred_head_proj(enhanced))  # [B, N, 2048]
         pred_dep = self.dropout(self.pred_dep_proj(enhanced))    # [B, N, 2048]
-        pred_scores = torch.einsum('bih,hd,bjd->bij', pred_head, self.pred_biaffine, pred_dep)
+        pred_scores = torch.einsum('bih,bjh->bij', pred_head, pred_dep)  # dot product
         pred_scores = pred_scores * self.scale
         if spatial_scores is not None:
             pred_scores = pred_scores + spatial_scores
