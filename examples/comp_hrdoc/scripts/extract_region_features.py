@@ -60,6 +60,11 @@ from layoutlmft.models.layoutxlm import (
 )
 from layoutlmft.data.utils import load_image
 
+# 添加 comp_hrdoc 路径
+COMP_HRDOC_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, COMP_HRDOC_PATH)
+from data.comp_hrdoc_loader import convert_filename_to_image_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -385,8 +390,10 @@ class LineFeatureExtractor:
             # 如果换页了，加载新页面的图片
             if page_id != current_page_id:
                 current_page_id = page_id
-                # 构建图片路径: {image_dir}/{file_name}
-                image_path = os.path.join(self.image_dir, page_info['file_name'])
+                # 使用共享函数转换路径
+                image_path = convert_filename_to_image_path(
+                    self.image_dir, page_info['file_name']
+                )
                 self.set_page_image(image_path)
 
             feature = self.extract_line_feature(

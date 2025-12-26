@@ -15,8 +15,249 @@ import torch
 import torch.nn as nn
 from typing import Dict, Optional, List, Any
 
-from .order import OrderModule, OrderLoss, predict_reading_order
+import torch.nn.functional as F
+
+from .order import (
+    OrderTransformerEncoder,
+    InterRegionOrderHead,
+    RelationTypeHead,
+    predict_reading_order,
+)
+from .embeddings import RegionTypeEmbedding, PositionalEmbedding2D
 from .construct import ConstructModule, ConstructLoss, build_tree_from_predictions
+
+
+class PairwiseOrderLoss(nn.Module):
+    """Order Loss using pairwise BCE with reading order indices.
+
+    Unlike OrderLoss (which uses successor indices), this loss function
+    works with reading order positions (0, 1, 2, ...) and computes
+    pairwise binary cross-entropy.
+
+    Predicts: i comes before j if reading_order[i] < reading_order[j]
+    """
+
+    def __init__(
+        self,
+        order_weight: float = 1.0,
+        relation_weight: float = 0.5,
+    ):
+        super().__init__()
+        self.order_weight = order_weight
+        self.relation_weight = relation_weight
+        self.relation_criterion = nn.CrossEntropyLoss(reduction='none', ignore_index=-1)
+
+    def forward(
+        self,
+        order_logits: torch.Tensor,  # [batch, N, N]
+        relation_logits: torch.Tensor,  # [batch, N, N, num_relations]
+        order_labels: torch.Tensor,  # [batch, N] reading order indices (0, 1, 2, ...)
+        relation_labels: torch.Tensor = None,  # [batch, N, N]
+        mask: torch.Tensor = None,  # [batch, N]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            order_logits: [batch, N, N] pairwise order scores
+            relation_logits: [batch, N, N, num_relations]
+            order_labels: [batch, N] reading order positions (0, 1, 2, ...)
+            relation_labels: [batch, N, N] ground truth relation types
+            mask: [batch, N] valid region mask
+
+        Returns:
+            Dict with order_loss, relation_loss, loss
+        """
+        batch_size, num_regions = order_labels.shape
+        device = order_logits.device
+
+        if mask is None:
+            mask = torch.ones(batch_size, num_regions, dtype=torch.bool, device=device)
+
+        # ============ Pairwise Order Loss (BCE) ============
+        # Target: 1 if order[i] < order[j], else 0
+        order_i = order_labels.unsqueeze(2)  # [B, N, 1]
+        order_j = order_labels.unsqueeze(1)  # [B, 1, N]
+        targets = (order_i < order_j).float()  # [B, N, N]
+
+        # Valid pair mask
+        valid_mask = mask.unsqueeze(2) & mask.unsqueeze(1)  # [B, N, N]
+        diag_mask = ~torch.eye(num_regions, dtype=torch.bool, device=device).unsqueeze(0)
+        valid_mask = valid_mask & diag_mask
+
+        # BCE loss
+        order_loss = F.binary_cross_entropy_with_logits(
+            order_logits, targets, reduction='none'
+        )
+        order_loss = (order_loss * valid_mask.float()).sum() / valid_mask.sum().clamp(min=1)
+
+        # ============ Relation Loss ============
+        relation_loss = torch.tensor(0.0, device=device)
+        if relation_labels is not None and self.relation_weight > 0:
+            relation_logits_flat = relation_logits.view(-1, relation_logits.size(-1))
+            relation_labels_flat = relation_labels.view(-1)
+
+            relation_loss_flat = self.relation_criterion(relation_logits_flat, relation_labels_flat)
+            relation_loss_flat = relation_loss_flat * valid_mask.view(-1).float()
+            relation_loss = relation_loss_flat.sum() / valid_mask.sum().clamp(min=1)
+
+        # ============ Total Loss ============
+        total_loss = self.order_weight * order_loss + self.relation_weight * relation_loss
+
+        return {
+            'order_loss': order_loss,
+            'relation_loss': relation_loss,
+            'loss': total_loss,
+        }
+
+
+class FeatureBasedOrderModule(nn.Module):
+    """Order Module for feature-based input (used by DOCModel).
+
+    This module is designed for training with pre-extracted region features
+    (like OrderModuleFromFeatures), but can optionally incorporate visual
+    and text features.
+
+    Unlike the full OrderModule (designed for Detect->Order pipeline),
+    this module takes:
+    - bbox: Region bounding boxes
+    - categories: Region category IDs
+    - region_mask: Valid region mask
+    - visual_features: Optional visual features
+    - text_features: Optional text features
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        num_categories: int = 5,
+        num_heads: int = 12,
+        num_layers: int = 3,
+        ffn_dim: int = 2048,
+        proj_size: int = 2048,
+        mlp_hidden: int = 1024,
+        num_relations: int = 3,
+        dropout: float = 0.1,
+        use_spatial: bool = True,
+        use_visual: bool = False,
+        use_text: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.use_visual = use_visual
+        self.use_text = use_text
+
+        # Category/type embedding
+        self.type_embedding = RegionTypeEmbedding(
+            num_categories=num_categories,
+            hidden_size=hidden_size,
+        )
+
+        # Positional embedding (2D from bbox)
+        self.pos_embedding = PositionalEmbedding2D(
+            hidden_size=hidden_size,
+            use_learned=True,
+        )
+
+        # Optional feature projections
+        if use_visual:
+            self.visual_proj = nn.Linear(hidden_size, hidden_size)
+        if use_text:
+            self.text_proj = nn.Linear(hidden_size, hidden_size)
+
+        # Combine all features into final representation
+        # Input size depends on which features are used
+        combine_input_size = hidden_size * 2  # type_emb + pos_emb
+        if use_visual:
+            combine_input_size += hidden_size
+        if use_text:
+            combine_input_size += hidden_size
+
+        self.combine = nn.Linear(combine_input_size, hidden_size)
+        self.combine_norm = nn.LayerNorm(hidden_size)
+
+        # Transformer encoder (3 layers)
+        self.transformer = OrderTransformerEncoder(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+        )
+
+        # Order prediction head
+        self.order_head = InterRegionOrderHead(
+            hidden_size=hidden_size,
+            proj_size=proj_size,
+            mlp_hidden=mlp_hidden,
+            dropout=dropout,
+            use_spatial=use_spatial,
+        )
+
+        # Relation type classification head
+        self.relation_head = RelationTypeHead(
+            hidden_size=hidden_size,
+            proj_size=proj_size,
+            num_relations=num_relations,
+            dropout=dropout,
+        )
+
+    def forward(
+        self,
+        bbox: torch.Tensor,  # [batch, num_regions, 4]
+        categories: torch.Tensor,  # [batch, num_regions]
+        region_mask: torch.Tensor,  # [batch, num_regions]
+        visual_features: torch.Tensor = None,  # [batch, num_regions, hidden_size]
+        text_features: torch.Tensor = None,  # [batch, num_regions, hidden_size]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            bbox: [batch, num_regions, 4] normalized bounding boxes
+            categories: [batch, num_regions] category/type IDs
+            region_mask: [batch, num_regions] valid region mask
+            visual_features: Optional [batch, num_regions, hidden_size] visual features
+            text_features: Optional [batch, num_regions, hidden_size] text features
+
+        Returns:
+            Dict with:
+                - embeddings: [batch, num_regions, hidden_size] input embeddings
+                - enhanced_features: [batch, num_regions, hidden_size]
+                - order_logits: [batch, num_regions, num_regions]
+                - relation_logits: [batch, num_regions, num_regions, num_relations]
+        """
+        # Build embeddings from type and position
+        type_emb = self.type_embedding(categories)  # [batch, num_regions, hidden_size]
+        pos_emb = self.pos_embedding(bbox)  # [batch, num_regions, hidden_size]
+
+        # Collect all feature components
+        feature_parts = [type_emb, pos_emb]
+
+        if self.use_visual and visual_features is not None:
+            visual_proj = self.visual_proj(visual_features)
+            feature_parts.append(visual_proj)
+
+        if self.use_text and text_features is not None:
+            text_proj = self.text_proj(text_features)
+            feature_parts.append(text_proj)
+
+        # Combine features
+        combined = torch.cat(feature_parts, dim=-1)
+        embeddings = self.combine(combined)
+        embeddings = self.combine_norm(embeddings)
+
+        # Transformer enhancement
+        enhanced = self.transformer(embeddings, mask=region_mask)
+
+        # Order prediction
+        order_logits = self.order_head(enhanced, bbox=bbox, mask=region_mask)
+
+        # Relation type prediction
+        relation_logits = self.relation_head(enhanced, mask=region_mask)
+
+        return {
+            'embeddings': embeddings,
+            'enhanced_features': enhanced,
+            'order_logits': order_logits,
+            'relation_logits': relation_logits,
+        }
 
 
 class DOCModel(nn.Module):
@@ -59,8 +300,8 @@ class DOCModel(nn.Module):
         self.hidden_size = hidden_size
         self.use_construct = use_construct
 
-        # Order Module
-        self.order_module = OrderModule(
+        # Order Module (feature-based, not the full pipeline OrderModule)
+        self.order_module = FeatureBasedOrderModule(
             hidden_size=hidden_size,
             num_categories=num_categories,
             num_heads=num_heads,
@@ -82,7 +323,7 @@ class DOCModel(nn.Module):
             )
 
         # Loss functions
-        self.order_loss_fn = OrderLoss()
+        self.order_loss_fn = PairwiseOrderLoss()
         if use_construct:
             self.construct_loss_fn = ConstructLoss()
 
@@ -146,7 +387,7 @@ class DOCModel(nn.Module):
             order_loss_dict = self.order_loss_fn(
                 order_logits=order_outputs['order_logits'],
                 relation_logits=order_outputs['relation_logits'],
-                reading_orders=reading_orders,
+                order_labels=reading_orders,  # OrderLoss expects 'order_labels'
                 relation_labels=relation_labels,
                 mask=region_mask,
             )

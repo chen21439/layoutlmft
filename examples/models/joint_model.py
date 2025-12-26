@@ -85,6 +85,9 @@ class JointModel(nn.Module):
         Backbone (LayoutLM) → LinePooling → [cls_head, stage3, stage4]
 
     论文公式: L_total = L_cls + α₁·L_par + α₂·L_rel
+
+    注意：Stage 1 单独训练使用 stage/models/stage1_line_level_model.py，
+    它复用了相同的共享模块（LinePooling, LineClassificationHead）。
     """
 
     def __init__(
@@ -174,6 +177,93 @@ class JointModel(nn.Module):
                     frozen_count += param.numel()
         print(f"[JointModel] Frozen visual encoder: {frozen_count:,} parameters")
 
+    def encode_with_micro_batch(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        image: torch.Tensor = None,
+        micro_batch_size: int = None,
+        no_grad: bool = None,
+    ) -> torch.Tensor:
+        """
+        使用 micro-batching 获取 backbone hidden states（可复用的前向计算组件）
+
+        供 forward() 和 predictor.py 调用，避免代码重复。
+
+        Args:
+            input_ids: [num_chunks, seq_len]
+            bbox: [num_chunks, seq_len, 4]
+            attention_mask: [num_chunks, seq_len]
+            image: [num_chunks, C, H, W] or List[Tensor] or None
+            micro_batch_size: micro-batch 大小（默认使用 self.stage1_micro_batch_size）
+            no_grad: 是否禁用梯度（默认使用 self.stage1_no_grad）
+
+        Returns:
+            hidden_states: [num_chunks, seq_len+visual_len, hidden_dim]
+        """
+        device = input_ids.device
+        total_chunks = input_ids.shape[0]
+        micro_bs = micro_batch_size if micro_batch_size is not None else self.stage1_micro_batch_size
+        use_no_grad = no_grad if no_grad is not None else self.stage1_no_grad
+
+        image_is_list = isinstance(image, list) if image is not None else False
+
+        def _run_backbone(ids, bb, mask, img):
+            return self.backbone(
+                input_ids=ids,
+                bbox=bb,
+                attention_mask=mask,
+                image=img,
+                output_hidden_states=True,
+            )
+
+        if total_chunks <= micro_bs:
+            # 小 batch，直接处理
+            if image_is_list and image:
+                img_tensor = torch.tensor(image[0]) if not isinstance(image[0], torch.Tensor) else image[0]
+                img_tensor = img_tensor.unsqueeze(0).to(device)
+            else:
+                img_tensor = image
+
+            if use_no_grad:
+                with torch.no_grad():
+                    outputs = _run_backbone(input_ids, bbox, attention_mask, img_tensor)
+            else:
+                outputs = _run_backbone(input_ids, bbox, attention_mask, img_tensor)
+            return outputs.hidden_states[-1]
+
+        # 大 batch，分批处理
+        all_hidden = []
+        for start_idx in range(0, total_chunks, micro_bs):
+            end_idx = min(start_idx + micro_bs, total_chunks)
+
+            mb_input_ids = input_ids[start_idx:end_idx]
+            mb_bbox = bbox[start_idx:end_idx]
+            mb_attention_mask = attention_mask[start_idx:end_idx]
+
+            if image_is_list and image:
+                mb_images = image[start_idx:end_idx]
+                mb_image = torch.stack([
+                    torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                    for img in mb_images
+                ]).to(device)
+            elif image is not None:
+                mb_image = image[start_idx:end_idx]
+            else:
+                mb_image = None
+
+            if use_no_grad:
+                with torch.no_grad():
+                    mb_outputs = _run_backbone(mb_input_ids, mb_bbox, mb_attention_mask, mb_image)
+            else:
+                mb_outputs = _run_backbone(mb_input_ids, mb_bbox, mb_attention_mask, mb_image)
+
+            all_hidden.append(mb_outputs.hidden_states[-1])
+            del mb_image
+
+        return torch.cat(all_hidden, dim=0)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -211,85 +301,14 @@ class JointModel(nn.Module):
         device = input_ids.device
         total_chunks = input_ids.shape[0]
 
-        # 检查 image 是 list 还是 tensor
-        image_is_list = isinstance(image, list) if image is not None else False
-
         # ==================== Step 1: Backbone 获取 hidden states ====================
-        # 调用 LayoutXLM 获取 token-level hidden states
-        # 注意：不传 labels，不计算 token-level loss
-        micro_bs = self.stage1_micro_batch_size
-
-        if total_chunks <= micro_bs:
-            # 小 batch，直接处理
-            if image_is_list and image:
-                img_tensor = torch.tensor(image[0]) if not isinstance(image[0], torch.Tensor) else image[0]
-                img_tensor = img_tensor.unsqueeze(0).to(device)
-            else:
-                img_tensor = image
-
-            if self.stage1_no_grad:
-                with torch.no_grad():
-                    backbone_outputs = self.backbone(
-                        input_ids=input_ids,
-                        bbox=bbox,
-                        attention_mask=attention_mask,
-                        image=img_tensor,
-                        output_hidden_states=True,
-                    )
-            else:
-                backbone_outputs = self.backbone(
-                    input_ids=input_ids,
-                    bbox=bbox,
-                    attention_mask=attention_mask,
-                    image=img_tensor,
-                    output_hidden_states=True,
-                )
-            hidden_states = backbone_outputs.hidden_states[-1]
-        else:
-            # 大 batch，分批处理
-            all_hidden = []
-
-            for start_idx in range(0, total_chunks, micro_bs):
-                end_idx = min(start_idx + micro_bs, total_chunks)
-
-                mb_input_ids = input_ids[start_idx:end_idx]
-                mb_bbox = bbox[start_idx:end_idx]
-                mb_attention_mask = attention_mask[start_idx:end_idx]
-
-                # 图片按需加载
-                if image_is_list and image:
-                    mb_images = image[start_idx:end_idx]
-                    mb_image = torch.stack([
-                        torch.tensor(img) if not isinstance(img, torch.Tensor) else img
-                        for img in mb_images
-                    ]).to(device)
-                elif image is not None:
-                    mb_image = image[start_idx:end_idx]
-                else:
-                    mb_image = None
-
-                if self.stage1_no_grad:
-                    with torch.no_grad():
-                        mb_outputs = self.backbone(
-                            input_ids=mb_input_ids,
-                            bbox=mb_bbox,
-                            attention_mask=mb_attention_mask,
-                            image=mb_image,
-                            output_hidden_states=True,
-                        )
-                else:
-                    mb_outputs = self.backbone(
-                        input_ids=mb_input_ids,
-                        bbox=mb_bbox,
-                        attention_mask=mb_attention_mask,
-                        image=mb_image,
-                        output_hidden_states=True,
-                    )
-
-                all_hidden.append(mb_outputs.hidden_states[-1])
-                del mb_image
-
-            hidden_states = torch.cat(all_hidden, dim=0)
+        # 使用 encode_with_micro_batch 复用 micro-batching 逻辑
+        hidden_states = self.encode_with_micro_batch(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            image=image,
+        )
 
         # ==================== Step 2: LinePooling 聚合 ====================
         # 截取文本部分的 hidden states（排除视觉 tokens）

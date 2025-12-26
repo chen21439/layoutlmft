@@ -26,8 +26,8 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "An optional input test data file to predict on (a csv or JSON file)."},
     )
-    overwrite_cache: bool = field(
-        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    force_rebuild: bool = field(
+        default=False, metadata={"help": "Force rebuild dataset (delete cache and regenerate)"}
     )
     preprocessing_num_workers: Optional[int] = field(
         default=None,

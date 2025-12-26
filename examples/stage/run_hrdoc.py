@@ -284,12 +284,12 @@ def main():
         dataset_name=dataset_name,
         max_length=512,
         preprocessing_num_workers=data_args.preprocessing_num_workers or 4,
-        overwrite_cache=data_args.overwrite_cache,
         max_train_samples=data_args.max_train_samples,
         max_val_samples=data_args.max_val_samples,
         max_test_samples=data_args.max_test_samples,
         label_all_tokens=data_args.label_all_tokens,
         pad_to_max_length=data_args.pad_to_max_length,
+        force_rebuild=data_args.force_rebuild,
     )
 
     # 先加载原始数据集（用于 column_names、features 和 balanced loss 计算）
@@ -297,7 +297,7 @@ def main():
     datasets = load_hrdoc_raw_datasets(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
         dataset_name=dataset_name,
-        force_rebuild=data_args.overwrite_cache,  # 使用命令行参数控制是否重建缓存
+        force_rebuild=data_args.force_rebuild,
     )
 
     if training_args.do_train:

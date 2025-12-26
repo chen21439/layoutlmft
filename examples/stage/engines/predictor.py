@@ -9,19 +9,20 @@ Predictor - 统一推理接口
 - 接收 Sample，返回 PredictionOutput
 - 不关心 Sample 来自页面级别还是文档级别
 - 内部处理多 chunk 聚合
+- 使用 tasks/ 中的 decode 逻辑，确保训练和评估一致
 """
 
 import torch
 import torch.nn as nn
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
-from collections import Counter
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.batch import Sample, BatchBase, wrap_batch
+from tasks import SemanticClassificationTask
 
 
 @dataclass
@@ -54,14 +55,24 @@ class Predictor:
             output = predictor.predict(sample)
     """
 
-    def __init__(self, model: nn.Module, device: torch.device = None):
+    def __init__(
+        self,
+        model: nn.Module,
+        device: torch.device = None,
+        micro_batch_size: int = 1,
+    ):
         """
         Args:
             model: JointModel 或类似结构（需要有 stage1, stage3, stage4, feature_extractor）
             device: 计算设备
+            micro_batch_size: Stage 1 推理时的 micro-batch 大小（默认 1，与训练一致）
         """
         self.model = model
         self.device = device or next(model.parameters()).device
+        self.micro_batch_size = micro_batch_size
+
+        # 使用 tasks/ 中的统一 decode 逻辑
+        self.cls_task = SemanticClassificationTask(model=model, use_line_level=True)
 
     def predict(self, sample: Sample) -> PredictionOutput:
         """
@@ -129,40 +140,33 @@ class Predictor:
         num_chunks = input_ids.shape[0]
 
         # ==================== Stage 1: Classification ====================
-        stage1_outputs = self.model.stage1(
+        # 使用 encode_with_micro_batch 复用 micro-batching 逻辑（与训练一致）
+        # 推理时强制 no_grad=True 节省显存
+        hidden_states = self.model.encode_with_micro_batch(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
-            output_hidden_states=True,
+            micro_batch_size=self.micro_batch_size,
+            no_grad=True,
         )
 
-        logits = stage1_outputs.logits  # [num_chunks, seq_len, num_classes]
-        hidden_states = stage1_outputs.hidden_states[-1]  # [num_chunks, seq_len, hidden_size]
+        # 截取文本部分的 hidden states（排除视觉 tokens）
+        seq_len = input_ids.shape[1]
+        text_hidden = hidden_states[:, :seq_len, :]  # [num_chunks, seq_len, H]
 
-        # 聚合所有 chunks 的 token predictions
-        all_token_preds = []
-        all_line_ids = []
-
-        for c in range(num_chunks):
-            chunk_logits = logits[c]  # [seq_len, num_classes]
-            chunk_line_ids = line_ids[c].cpu().tolist()
-
-            for i in range(chunk_logits.shape[0]):
-                all_token_preds.append(chunk_logits[i].argmax().item())
-                all_line_ids.append(chunk_line_ids[i])
-
-        # Token -> Line 聚合（多数投票）
-        line_classes = self._aggregate_to_lines(all_token_preds, all_line_ids)
+        # 使用 SemanticClassificationTask 进行分类（与训练时一致）
+        # 内部使用 model.line_pooling + model.cls_head（line-level 模式）
+        line_classes = self.cls_task.decode(
+            hidden_states=text_hidden,
+            line_ids=line_ids,
+        )
 
         if not line_classes:
             return PredictionOutput()
 
         # ==================== Stage 2: Feature Extraction ====================
-        # 注意：hidden_states 包含视觉 tokens (7x7=49)，需要截取文本部分
-        # 与 JointModel.forward() 中的处理保持一致
-        seq_len = input_ids.shape[1]  # 文本序列长度 (512)
-        text_hidden = hidden_states[:, :seq_len, :]  # [num_chunks, seq_len, H]
+        # text_hidden 已经在 Stage 1 中截取好了
 
         # 根据模式选择特征聚合方法（与训练保持一致）
         if num_chunks > 1:
@@ -256,33 +260,8 @@ class Predictor:
             line_ids=sorted_line_ids,
         )
 
-    def _aggregate_to_lines(
-        self,
-        token_preds: List[int],
-        line_ids: List[int],
-        method: str = "majority"
-    ) -> Dict[int, int]:
-        """Token-level 预测聚合到 Line-level"""
-        line_votes = {}
-
-        for pred, line_id in zip(token_preds, line_ids):
-            if line_id < 0:
-                continue
-            if line_id not in line_votes:
-                line_votes[line_id] = []
-            line_votes[line_id].append(pred)
-
-        line_classes = {}
-        for line_id, votes in line_votes.items():
-            if method == "majority":
-                counter = Counter(votes)
-                line_classes[line_id] = counter.most_common(1)[0][0]
-            elif method == "first":
-                line_classes[line_id] = votes[0]
-            else:
-                line_classes[line_id] = votes[0]
-
-        return line_classes
+    # 注意：_aggregate_to_lines 方法已移至 tasks/semantic_cls.py
+    # 统一由 SemanticClassificationTask 处理，确保训练和评估一致
 
     def predict_batch(self, batch: BatchBase) -> List[PredictionOutput]:
         """

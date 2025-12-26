@@ -417,13 +417,12 @@ class HRDocDataLoaderConfig:
     dataset_name: str = "hrdoc"  # 数据集名称，用于区分缓存（如 hrds, hrdh, tender）
     max_length: int = 512
     preprocessing_num_workers: int = 4
-    overwrite_cache: bool = False
     max_train_samples: Optional[int] = None
     max_val_samples: Optional[int] = None
     max_test_samples: Optional[int] = None
     label_all_tokens: bool = True
     pad_to_max_length: bool = True
-    force_rebuild: bool = True
+    force_rebuild: bool = False  # 是否强制重建数据集（删除缓存重新生成）
     document_level: bool = False  # False=页面级别（快速训练），True=文档级别（推理）
 
 
@@ -565,7 +564,7 @@ class HRDocDataLoader:
                 batched=True,
                 remove_columns=remove_columns,
                 num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
+                load_from_cache_file=not self.config.force_rebuild,
             )
             print(f"[DataLoader] Train: {len(tokenized_datasets['train'])} chunks", flush=True)
 
@@ -582,7 +581,7 @@ class HRDocDataLoader:
                 batched=True,
                 remove_columns=remove_columns,
                 num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
+                load_from_cache_file=not self.config.force_rebuild,
             )
             print(f"[DataLoader] Validation: {len(tokenized_datasets['validation'])} chunks", flush=True)
 
@@ -598,7 +597,7 @@ class HRDocDataLoader:
                 batched=True,
                 remove_columns=remove_columns,
                 num_proc=self.config.preprocessing_num_workers,
-                load_from_cache_file=not self.config.overwrite_cache,
+                load_from_cache_file=not self.config.force_rebuild,
             )
             print(f"[DataLoader] Test: {len(tokenized_datasets['test'])} chunks", flush=True)
 

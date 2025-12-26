@@ -238,7 +238,7 @@ def main():
             batched=True,
             remove_columns=remove_columns,
             num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
+            load_from_cache_file=not data_args.force_rebuild,
         )
 
     if training_args.do_eval:
@@ -252,7 +252,7 @@ def main():
             batched=True,
             remove_columns=remove_columns,
             num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
+            load_from_cache_file=not data_args.force_rebuild,
         )
 
     if training_args.do_predict:
@@ -266,7 +266,7 @@ def main():
             batched=True,
             remove_columns=remove_columns,
             num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
+            load_from_cache_file=not data_args.force_rebuild,
         )
 
     # Data collator

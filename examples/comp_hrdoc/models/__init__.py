@@ -5,6 +5,8 @@
 # construct.py: Construct 模块 (层级结构构建)
 # doc_model.py: 统一的 DOC 模型
 # order_only.py: 简化版 Order-only 模型
+# order_from_features.py: 使用预提取特征的 Order 模块
+# construct_only.py: 使用预训练 Order 特征的 Construct 模块 (4.4)
 # backbone.py: LayoutXLM 基座封装
 # heads.py: 任务预测头
 # build.py: 模型构建工厂
@@ -51,6 +53,25 @@ from .order_only import (
     build_order_only_model,
     save_order_only_model,
     load_order_only_model,
+)
+
+from .order_from_features import (
+    OrderModuleFromFeatures,
+    OrderLossFromFeatures,
+    build_order_from_features,
+    save_order_model,
+    load_order_model,
+)
+
+from .construct_only import (
+    ConstructWithOrderFeatures,
+    ConstructFromFeatures,
+    build_construct_with_order,
+    build_construct_from_features,
+    save_construct_model,
+    load_construct_model,
+    compute_construct_metrics,
+    generate_sibling_labels,
 )
 
 from .intra_region import (

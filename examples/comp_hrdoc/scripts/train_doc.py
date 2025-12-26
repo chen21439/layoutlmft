@@ -4,47 +4,24 @@
 Usage:
     python examples/comp_hrdoc/scripts/train_doc.py --env test
     python examples/comp_hrdoc/scripts/train_doc.py --env test --quick
-    python examples/comp_hrdoc/scripts/train_doc.py --env test --order-only
+    python examples/comp_hrdoc/scripts/train_doc.py --env test --new-exp
+    python examples/comp_hrdoc/scripts/train_doc.py --env test --use-construct
 """
 
 # ==================== GPU 设置（必须在 import torch 之前）====================
 import os
 import sys
 
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-def _setup_gpu_early():
-    """在 import torch 之前设置 GPU"""
-    env = "dev"
-    for i, arg in enumerate(sys.argv):
-        if arg == "--env" and i + 1 < len(sys.argv):
-            env = sys.argv[i + 1]
-            break
-
-    config_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "configs", "order.yaml"
-    )
-
-    if os.path.exists(config_path):
-        import yaml
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-
-        gpu_config = config.get('gpu', {})
-        cuda_visible_devices = gpu_config.get(env)
-
-        if cuda_visible_devices:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
-            print(f"[GPU Setup] env={env}, CUDA_VISIBLE_DEVICES={cuda_visible_devices}")
-
-
-_setup_gpu_early()
+from examples.comp_hrdoc.utils.config import setup_environment
+setup_environment()
 # ==================== GPU 设置结束 ====================
 
 import argparse
 import logging
-import yaml
-from pathlib import Path
 from typing import Dict, Optional
 
 import torch
@@ -52,9 +29,6 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from examples.comp_hrdoc.data.comp_hrdoc_loader import (
     CompHRDocConfig,
@@ -69,6 +43,11 @@ from examples.comp_hrdoc.models import (
     OrderOnlyModel,
     build_order_only_model,
     save_order_only_model,
+)
+from examples.comp_hrdoc.utils.experiment_manager import (
+    ExperimentManager,
+    get_artifact_path,
+    ensure_experiment,
 )
 
 logging.basicConfig(
@@ -117,7 +96,14 @@ def parse_args():
     parser.add_argument("--log-steps", type=int, default=50)
     parser.add_argument("--eval-steps", type=int, default=200)
     parser.add_argument("--save-steps", type=int, default=500)
-    parser.add_argument("--output-dir", type=str, default="outputs/doc_model")
+
+    # Experiment management
+    parser.add_argument("--exp", type=str, default=None,
+                        help="Experiment identifier (None for current/latest)")
+    parser.add_argument("--new-exp", action="store_true",
+                        help="Create new experiment")
+    parser.add_argument("--exp-name", type=str, default=None,
+                        help="Experiment name (for new experiments)")
 
     # Quick test
     parser.add_argument("--quick", action="store_true", help="Quick test with small data")
@@ -129,6 +115,7 @@ def parse_args():
 
 def load_config(config_path: str) -> dict:
     """Load YAML config file"""
+    import yaml
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
@@ -355,6 +342,26 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
+    # Setup experiment directory
+    stage_name = "doc" if args.use_construct else "order"
+    artifact_root = get_artifact_path(args.env)
+    exp_manager, exp_dir = ensure_experiment(
+        artifact_root=artifact_root,
+        exp=args.exp,
+        new_exp=args.new_exp,
+        name=args.exp_name or f"DOC Model Training ({stage_name})",
+        description=f"Train DOC model with lr={args.learning_rate}, epochs={args.num_epochs}, construct={args.use_construct}",
+        config=vars(args),
+    )
+
+    # Get stage output directory
+    output_dir = Path(exp_manager.get_stage_dir(args.exp, stage_name, "comp_hrdoc"))
+    logger.info(f"Experiment directory: {exp_dir}")
+    logger.info(f"Stage output directory: {output_dir}")
+
+    # Mark stage as started
+    exp_manager.mark_stage_started(args.exp, stage_name, "comp_hrdoc")
+
     # Quick test mode
     if args.quick:
         logger.info("Quick test mode enabled")
@@ -452,8 +459,6 @@ def main():
     # Training loop
     logger.info("Starting training...")
     best_order_acc = 0.0
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(args.num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{args.num_epochs} =====")
@@ -495,8 +500,16 @@ def main():
     save_fn(model, str(final_path))
     logger.info(f"Saved final model to {final_path}")
 
+    # Mark stage as completed
+    exp_manager.mark_stage_completed(
+        args.exp, stage_name, "comp_hrdoc",
+        best_checkpoint=str(output_dir / "best_model"),
+        metrics={"best_order_accuracy": best_order_acc},
+    )
+
     logger.info("Training complete!")
     logger.info(f"Best order accuracy: {best_order_acc:.4f}")
+    logger.info(f"Model saved to: {output_dir}")
 
 
 if __name__ == "__main__":

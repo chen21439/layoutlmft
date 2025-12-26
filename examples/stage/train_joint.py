@@ -170,7 +170,7 @@ class JointDataArguments:
     covmatch: Optional[str] = field(default=None, metadata={"help": "Covmatch split name (e.g., doc_covmatch_dev50_seed42). If not specified, uses config default."})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
-    overwrite_cache: bool = field(default=False, metadata={"help": "Overwrite cached dataset (force rebuild)"})
+    force_rebuild: bool = field(default=False, metadata={"help": "Force rebuild dataset (delete HuggingFace cache and regenerate)"})
     document_level: bool = field(default=True, metadata={"help": "Use document-level batching (preserves cross-page relations)"})
 
 
@@ -422,31 +422,63 @@ class AMPDiagnosticCallback(TrainerCallback):
 
 
 class JointLoggingCallback(TrainerCallback):
-    """记录联合训练的详细日志"""
+    """记录联合训练的详细日志（美化版）"""
+
+    def __init__(self, total_steps: int = None):
+        self.total_steps = total_steps
+        self.best_parent_acc = 0.0
+        self.best_rel_acc = 0.0
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs is None:
             return
 
-        # 格式化日志输出
         step = state.global_step
-        log_parts = [f"Step {step}"]
+        total = self.total_steps or state.max_steps or 1
 
-        if "loss" in logs:
-            log_parts.append(f"loss={logs['loss']:.4f}")
-        if "cls_loss" in logs:
-            log_parts.append(f"cls={logs['cls_loss']:.4f}")
-        if "parent_loss" in logs:
-            log_parts.append(f"parent={logs['parent_loss']:.4f}")
-        if "rel_loss" in logs:
-            log_parts.append(f"rel={logs['rel_loss']:.4f}")
-        if "parent_acc" in logs:
-            log_parts.append(f"p_acc={logs['parent_acc']:.2%}")
-        if "rel_acc" in logs:
-            log_parts.append(f"r_acc={logs['rel_acc']:.2%}")
+        # 跳过没有 loss 的日志（如 eval 结果）
+        if "loss" not in logs:
+            return
 
-        if len(log_parts) > 1:
-            logger.info(" | ".join(log_parts))
+        # 进度条
+        progress = step / total
+        bar_width = 20
+        filled = int(bar_width * progress)
+        bar = "█" * filled + "░" * (bar_width - filled)
+
+        # 学习率
+        lr = logs.get("learning_rate", 0)
+        lr_str = f"{lr:.2e}" if lr > 0 else "N/A"
+
+        # 各任务指标
+        cls_loss = logs.get("cls_loss", 0)
+        parent_loss = logs.get("parent_loss", 0)
+        rel_loss = logs.get("rel_loss", 0)
+        parent_acc = logs.get("parent_acc", 0)
+        rel_acc = logs.get("rel_acc", 0)
+
+        # 更新最佳
+        if parent_acc > self.best_parent_acc:
+            self.best_parent_acc = parent_acc
+        if rel_acc > self.best_rel_acc:
+            self.best_rel_acc = rel_acc
+
+        # 构建输出
+        header = f"Step {step:>5}/{total} [{bar}] {progress*100:>5.1f}%  lr={lr_str}"
+
+        # 任务指标（带趋势指示）
+        parent_indicator = "▲" if parent_acc >= self.best_parent_acc else " "
+        rel_indicator = "▲" if rel_acc >= self.best_rel_acc else " "
+
+        tasks = (
+            f"  loss={logs['loss']:.4f}  │  "
+            f"cls={cls_loss:.3f}  │  "
+            f"parent={parent_loss:.3f} ({parent_acc:>5.1%}){parent_indicator}  │  "
+            f"rel={rel_loss:.3f} ({rel_acc:>5.1%}){rel_indicator}"
+        )
+
+        logger.info(header)
+        logger.info(tasks)
 
 
 class E2EEvaluationCallback(TrainerCallback):
@@ -492,7 +524,7 @@ class E2EEvaluationCallback(TrainerCallback):
             verbose=True,
         )
 
-        # 打印结果（紧凑表格格式）
+        # 打印结果
         line_macro = output.line_macro_f1 * 100
         line_acc = output.line_accuracy * 100
         parent_acc = output.parent_accuracy * 100
@@ -500,8 +532,24 @@ class E2EEvaluationCallback(TrainerCallback):
         rel_macro = output.relation_macro_f1 * 100
         num_lines = output.num_lines
 
+        # 格式化 delta（带符号和颜色指示）
+        def fmt_delta(d, threshold=0.5):
+            if d >= threshold:
+                return f"↑{d:+.1f}"
+            elif d <= -threshold:
+                return f"↓{d:+.1f}"
+            else:
+                return f" {d:+.1f}"
+
         # 计算与历史平均值的对比
         avg_n = min(3, len(self.history))
+
+        # 表格输出
+        logger.info("")
+        logger.info("╔══════════════════════════════════════════════════════════════╗")
+        logger.info(f"║           Evaluation Results @ Step {global_step:<6}                  ║")
+        logger.info("╠══════════════════════════════════════════════════════════════╣")
+
         if avg_n > 0:
             recent = self.history[-avg_n:]
             avg_line = sum(h[1] for h in recent) / avg_n
@@ -512,36 +560,24 @@ class E2EEvaluationCallback(TrainerCallback):
             delta_parent = parent_acc - avg_parent
             delta_rel = rel_macro - avg_rel
 
-            # 格式化 delta（带符号）
-            def fmt_delta(d):
-                if d >= 0:
-                    return f"+{d:.1f}"
-                else:
-                    return f"{d:.1f}"
+            logger.info(f"║  Metric       │ Current  │  Avg({avg_n})  │  Delta       ║")
+            logger.info("║───────────────┼──────────┼──────────┼──────────────║")
+            logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │  {avg_line:>5.1f}%  │  {fmt_delta(delta_line):>6}      ║")
+            logger.info(f"║  Parent(Acc)  │  {parent_acc:>5.1f}%  │  {avg_parent:>5.1f}%  │  {fmt_delta(delta_parent):>6}      ║")
+            logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │  {avg_rel:>5.1f}%  │  {fmt_delta(delta_rel):>6}      ║")
 
-            # 表格式输出（带对比）
-            logger.info("┌───────────────────────────────────────────────────────────┐")
-            logger.info(f"│  Metric       │ Current │ Avg({avg_n})  │ Delta  │")
-            logger.info("├───────────────────────────────────────────────────────────┤")
-            logger.info(f"│  Line(F1)     │  {line_macro:5.1f}%  │  {avg_line:5.1f}%  │ {fmt_delta(delta_line):>6} │")
-            logger.info(f"│  Parent(Acc)  │  {parent_acc:5.1f}%  │  {avg_parent:5.1f}%  │ {fmt_delta(delta_parent):>6} │")
-            logger.info(f"│  Rel(F1)      │  {rel_macro:5.1f}%  │  {avg_rel:5.1f}%  │ {fmt_delta(delta_rel):>6} │")
-            logger.info("└───────────────────────────────────────────────────────────┘")
-
-            # 一行摘要（带 delta）
             summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel)})"
         else:
-            # 第一次评估，无历史对比
-            logger.info("┌───────────────────────────────────────────────────────────┐")
-            logger.info(f"│  Metric       │ Current │")
-            logger.info("├───────────────────────────────────────────────────────────┤")
-            logger.info(f"│  Line(F1)     │  {line_macro:5.1f}%  │")
-            logger.info(f"│  Parent(Acc)  │  {parent_acc:5.1f}%  │")
-            logger.info(f"│  Rel(F1)      │  {rel_macro:5.1f}%  │")
-            logger.info("└───────────────────────────────────────────────────────────┘")
+            logger.info(f"║  Metric       │ Current  │                           ║")
+            logger.info("║───────────────┼──────────┼───────────────────────────║")
+            logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │                           ║")
+            logger.info(f"║  Parent(Acc)  │  {parent_acc:>5.1f}%  │                           ║")
+            logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │                           ║")
             summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
 
-        logger.info(f"  Lines evaluated: {num_lines}")
+        logger.info("╠══════════════════════════════════════════════════════════════╣")
+        logger.info(f"║  Lines evaluated: {num_lines:<43} ║")
+        logger.info("╚══════════════════════════════════════════════════════════════╝")
         logger.info(summary)
 
         # 保存到历史记录
@@ -614,10 +650,9 @@ def prepare_datasets(tokenizer, data_args: JointDataArguments, training_args: Jo
         dataset_name=data_args.dataset,  # 使用数据集名称区分缓存（hrds, hrdh, tender 等）
         max_length=512,
         preprocessing_num_workers=num_workers,
-        overwrite_cache=data_args.overwrite_cache,
         max_train_samples=data_args.max_train_samples if data_args.max_train_samples > 0 else None,
         max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
-        force_rebuild=data_args.overwrite_cache,  # 统一使用 overwrite_cache 控制缓存
+        force_rebuild=data_args.force_rebuild,
         document_level=data_args.document_level,  # False=页面级别（快），True=文档级别（慢）
     )
 
@@ -740,7 +775,8 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
     os.environ["HRDOC_DATA_DIR"] = data_dir
 
     # Covmatch 目录 (命令行参数优先于配置文件)
-    if data_args.covmatch:
+    covmatch_from_cli = data_args.covmatch is not None
+    if covmatch_from_cli:
         # 使用命令行指定的 covmatch
         config.dataset.covmatch = data_args.covmatch
         logger.info(f"Using covmatch from command line: {data_args.covmatch}")
@@ -749,7 +785,23 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
         os.environ["HRDOC_SPLIT_DIR"] = covmatch_dir
         logger.info(f"Covmatch directory: {covmatch_dir}")
     else:
-        logger.warning(f"Covmatch directory not found: {covmatch_dir}")
+        if covmatch_from_cli:
+            # 命令行明确指定了 covmatch，但目录不存在，退出
+            logger.error(f"Covmatch directory not found: {covmatch_dir}")
+            logger.error(f"Specified covmatch '{data_args.covmatch}' does not exist.")
+            logger.error(f"Available covmatch directories can be found in: {os.path.dirname(covmatch_dir)}")
+            # 列出可用的 covmatch 目录
+            parent_dir = os.path.dirname(covmatch_dir)
+            if os.path.exists(parent_dir):
+                available = [d for d in os.listdir(parent_dir) if d.startswith("doc_covmatch")]
+                if available:
+                    logger.error(f"Available covmatch options: {', '.join(sorted(available))}")
+                else:
+                    logger.error(f"No covmatch directories found in {parent_dir}")
+            sys.exit(1)
+        else:
+            # 使用配置文件默认值，只是警告
+            logger.warning(f"Covmatch directory not found: {covmatch_dir}, using default directory structure")
 
     # GPU 设置
     if config.gpu.cuda_visible_devices:
