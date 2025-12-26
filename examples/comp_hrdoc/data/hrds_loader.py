@@ -195,10 +195,16 @@ class HRDSDataset(Dataset):
         lines_data: List[Dict],
         line_id_to_idx: Dict[int, int],
     ) -> Dict[int, int]:
-        """Assign region IDs based on parent_id hierarchy
+        """Assign region IDs based on intra-region reading order (connect relations).
 
-        Lines with same root ancestor belong to same region.
-        Uses Union-Find to group connected components.
+        Per paper Section 4.2.3:
+        - A "text region" is defined by intra-region reading order relationships
+        - Lines connected by successor chains belong to the same region
+        - Uses Union-Find to group lines connected by "connect" relations
+
+        This aligns region grouping with successor prediction:
+        - successor_labels: derived from "connect" relations
+        - region_ids: also derived from "connect" relations (same definition)
         """
         n = len(lines_data)
         parent = list(range(n))  # Union-Find parent array
@@ -213,10 +219,13 @@ class HRDSDataset(Dataset):
             if px != py:
                 parent[px] = py
 
-        # Union lines based on parent_id relationships
+        # Union lines based on "connect" relations ONLY (intra-region reading order)
+        # This matches the paper's definition: region = lines connected by successor chains
         for i, line in enumerate(lines_data):
             parent_id = line.get('parent_id', -1)
-            if parent_id >= 0 and parent_id in line_id_to_idx:
+            relation = line.get('relation', '')
+            # Only "connect" relation represents intra-region reading order
+            if parent_id >= 0 and relation == 'connect' and parent_id in line_id_to_idx:
                 parent_idx = line_id_to_idx[parent_id]
                 union(i, parent_idx)
 
