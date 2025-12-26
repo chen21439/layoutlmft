@@ -76,10 +76,11 @@ def load_hrdoc_raw_datasets_batched(
 
         batch_cache = os.path.join(cache_dir, f"batch_{batch_idx:04d}.arrow")
 
-        # 检查缓存
-        if os.path.exists(batch_cache):
-            print(f"[Batch {batch_idx+1}/{num_batches}] Loading from cache: {batch_cache}", flush=True)
-            batch_ds = Dataset.from_file(batch_cache)
+        # 检查缓存（缓存是目录，不是文件）
+        batch_cache_dir = batch_cache.replace('.arrow', '')
+        if os.path.exists(batch_cache_dir) and os.path.isdir(batch_cache_dir):
+            print(f"[Batch {batch_idx+1}/{num_batches}] Loading from cache", flush=True)
+            batch_ds = Dataset.load_from_disk(batch_cache_dir)
             all_train_data.append(batch_ds)
             continue
 
@@ -178,10 +179,12 @@ def load_hrdoc_raw_datasets_batched(
 
         # 保存批次
         if batch_examples:
-            batch_ds = Dataset.from_list(batch_examples)
+            # 转换为 dict of lists 格式（兼容旧版 datasets）
+            batch_dict = {k: [ex[k] for ex in batch_examples] for k in batch_examples[0].keys()}
+            batch_ds = Dataset.from_dict(batch_dict)
             batch_ds.save_to_disk(batch_cache.replace('.arrow', ''))
             all_train_data.append(batch_ds)
-            print(f"  Saved {len(batch_examples)} examples to {batch_cache}", flush=True)
+            print(f"  Saved {len(batch_examples)} examples to cache", flush=True)
 
     # 合并所有批次
     print(f"[BatchLoader] Merging {len(all_train_data)} batches...", flush=True)
