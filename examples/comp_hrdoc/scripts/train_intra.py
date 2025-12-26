@@ -22,9 +22,10 @@ def _setup_gpu_early():
             env = sys.argv[i + 1]
             break
 
+    # 根据环境加载对应配置文件 (dev.yaml / test.yaml)
     config_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "configs", "order.yaml"
+        "configs", f"{env}.yaml"
     )
 
     if os.path.exists(config_path):
@@ -33,7 +34,7 @@ def _setup_gpu_early():
             config = yaml.safe_load(f)
 
         gpu_config = config.get('gpu', {})
-        cuda_visible_devices = gpu_config.get(env)
+        cuda_visible_devices = gpu_config.get('cuda_visible_devices')
 
         if cuda_visible_devices:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_visible_devices)
