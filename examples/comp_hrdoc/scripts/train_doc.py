@@ -77,6 +77,16 @@ def parse_args():
     parser.add_argument("--no-spatial", dest="use_spatial", action="store_false")
     parser.add_argument("--use-construct", action="store_true", default=True)
     parser.add_argument("--no-construct", dest="use_construct", action="store_false")
+    parser.add_argument("--use-semantic", action="store_true", default=False,
+                        help="Enable 4.2 semantic classification for end-to-end training")
+    parser.add_argument("--semantic-num-layers", type=int, default=1,
+                        help="Number of Transformer layers in semantic classification module")
+    parser.add_argument("--cls-weight", type=float, default=1.0,
+                        help="Weight for classification loss")
+    parser.add_argument("--order-weight", type=float, default=1.0,
+                        help="Weight for order loss")
+    parser.add_argument("--construct-weight", type=float, default=1.0,
+                        help="Weight for construct loss")
 
     # Data
     parser.add_argument("--max-regions", type=int, default=128)
@@ -144,9 +154,13 @@ def train_epoch(
     model.train()
 
     total_loss = 0.0
+    total_cls_loss = 0.0
     total_order_loss = 0.0
     total_construct_loss = 0.0
     num_batches = 0
+
+    # Check if model uses semantic classification
+    use_semantic = getattr(model, 'use_semantic', False)
 
     progress_bar = tqdm(dataloader, desc="Training")
 
@@ -176,6 +190,7 @@ def train_epoch(
                     reading_orders=reading_orders,
                     parent_labels=parent_ids,
                     sibling_labels=sibling_labels,
+                    category_labels=categories if use_semantic else None,
                 )
                 loss = outputs["loss"] / args.gradient_accumulation_steps
         else:
@@ -186,6 +201,7 @@ def train_epoch(
                 reading_orders=reading_orders,
                 parent_labels=parent_ids,
                 sibling_labels=sibling_labels,
+                category_labels=categories if use_semantic else None,
             )
             loss = outputs["loss"] / args.gradient_accumulation_steps
 
@@ -208,6 +224,12 @@ def train_epoch(
 
         # Record losses
         total_loss += outputs["loss"].item()
+
+        cls_loss = outputs.get("cls_loss", torch.tensor(0.0))
+        if isinstance(cls_loss, torch.Tensor):
+            cls_loss = cls_loss.item()
+        total_cls_loss += cls_loss
+
         order_loss = outputs.get("order_loss", outputs.get("loss", torch.tensor(0.0)))
         if isinstance(order_loss, torch.Tensor):
             order_loss = order_loss.item()
@@ -221,13 +243,17 @@ def train_epoch(
         num_batches += 1
 
         # Update progress bar
-        progress_bar.set_postfix({
+        postfix = {
             "loss": f"{outputs['loss'].item():.4f}",
             "order": f"{order_loss:.4f}",
-        })
+        }
+        if use_semantic:
+            postfix["cls"] = f"{cls_loss:.4f}"
+        progress_bar.set_postfix(postfix)
 
     return {
         "loss": total_loss / num_batches,
+        "cls_loss": total_cls_loss / num_batches,
         "order_loss": total_order_loss / num_batches,
         "construct_loss": total_construct_loss / num_batches,
     }
@@ -243,11 +269,17 @@ def evaluate(
     model.eval()
 
     total_loss = 0.0
+    total_cls_loss = 0.0
     total_order_loss = 0.0
     total_construct_loss = 0.0
-    total_correct = 0
-    total_count = 0
+    total_order_correct = 0
+    total_order_count = 0
+    total_cls_correct = 0
+    total_cls_count = 0
     num_batches = 0
+
+    # Check if model uses semantic classification
+    use_semantic = getattr(model, 'use_semantic', False)
 
     for batch in tqdm(dataloader, desc="Evaluating"):
         bboxes = batch["bboxes"].to(device)
@@ -270,9 +302,16 @@ def evaluate(
             reading_orders=reading_orders,
             parent_labels=parent_ids,
             sibling_labels=sibling_labels,
+            category_labels=categories if use_semantic else None,
         )
 
         loss_val = outputs["loss"].item()
+
+        cls_loss = outputs.get("cls_loss", torch.tensor(0.0))
+        if isinstance(cls_loss, torch.Tensor):
+            cls_loss = cls_loss.item()
+        total_cls_loss += cls_loss
+
         order_loss = outputs.get("order_loss", outputs.get("loss", torch.tensor(0.0)))
         if isinstance(order_loss, torch.Tensor):
             order_loss = order_loss.item()
@@ -297,22 +336,35 @@ def evaluate(
         from examples.comp_hrdoc.models.order import predict_reading_order
         pred_orders = predict_reading_order(order_logits, region_mask)
 
-        # Accumulate accuracy stats per batch
+        # Accumulate order accuracy stats per batch
         correct = (pred_orders == reading_orders) & region_mask
-        total_correct += correct.sum().item()
-        total_count += region_mask.sum().item()
+        total_order_correct += correct.sum().item()
+        total_order_count += region_mask.sum().item()
+
+        # Compute category accuracy if semantic classification enabled
+        if use_semantic and "category_logits" in outputs:
+            pred_categories = outputs["category_logits"].argmax(dim=-1)
+            cls_correct = (pred_categories == categories) & region_mask
+            total_cls_correct += cls_correct.sum().item()
+            total_cls_count += region_mask.sum().item()
 
         num_batches += 1
 
-    # Compute accuracy
-    order_acc = total_correct / max(total_count, 1)
+    # Compute accuracies
+    order_acc = total_order_correct / max(total_order_count, 1)
+    cls_acc = total_cls_correct / max(total_cls_count, 1) if use_semantic else 0.0
 
-    return {
+    results = {
         "loss": total_loss / num_batches,
+        "cls_loss": total_cls_loss / num_batches,
         "order_loss": total_order_loss / num_batches,
         "construct_loss": total_construct_loss / num_batches,
         "order_accuracy": order_acc,
     }
+    if use_semantic:
+        results["cls_accuracy"] = cls_acc
+
+    return results
 
 
 def main():
@@ -414,7 +466,15 @@ def main():
         )
         save_fn = save_order_only_model
     else:
-        logger.info("Building DOC model...")
+        model_desc = "DOC model"
+        if args.use_semantic:
+            model_desc = "End-to-End DOC model (4.2 + 4.3 + 4.4)"
+        elif args.use_construct:
+            model_desc = "DOC model (4.3 + 4.4)"
+        else:
+            model_desc = "DOC model (4.3 only)"
+        logger.info(f"Building {model_desc}...")
+
         model = build_doc_model(
             hidden_size=args.hidden_size,
             num_categories=5,
@@ -424,6 +484,11 @@ def main():
             dropout=args.dropout,
             use_spatial=args.use_spatial,
             use_construct=args.use_construct,
+            use_semantic=args.use_semantic,
+            semantic_num_layers=args.semantic_num_layers,
+            cls_weight=args.cls_weight,
+            order_weight=args.order_weight,
+            construct_weight=args.construct_weight,
         )
         save_fn = save_doc_model
 
@@ -473,20 +538,30 @@ def main():
             args=args,
             scaler=scaler,
         )
-        logger.info(
+        train_log = (
             f"Train - Loss: {train_metrics['loss']:.4f}, "
             f"Order: {train_metrics['order_loss']:.4f}, "
             f"Construct: {train_metrics['construct_loss']:.4f}"
         )
+        if args.use_semantic:
+            train_log += f", Cls: {train_metrics['cls_loss']:.4f}"
+        logger.info(train_log)
 
         # Evaluate
         val_metrics = evaluate(model, val_loader, device)
-        logger.info(
+        val_log = (
             f"Val - Loss: {val_metrics['loss']:.4f}, "
             f"Order: {val_metrics['order_loss']:.4f}, "
             f"Construct: {val_metrics['construct_loss']:.4f}"
         )
-        logger.info(f"Val - Order Accuracy: {val_metrics['order_accuracy']:.4f}")
+        if args.use_semantic:
+            val_log += f", Cls: {val_metrics['cls_loss']:.4f}"
+        logger.info(val_log)
+
+        acc_log = f"Val - Order Accuracy: {val_metrics['order_accuracy']:.4f}"
+        if args.use_semantic and 'cls_accuracy' in val_metrics:
+            acc_log += f", Cls Accuracy: {val_metrics['cls_accuracy']:.4f}"
+        logger.info(acc_log)
 
         # Save best model
         if val_metrics['order_accuracy'] > best_order_acc:

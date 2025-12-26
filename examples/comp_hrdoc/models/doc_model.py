@@ -4,9 +4,12 @@ Based on "Detect-Order-Construct: A Unified Framework for
 Hierarchical Document Structure Analysis" paper.
 
 Combines three stages:
-1. Detect: Region detection and classification (handled by data)
-2. Order: Reading order prediction
-3. Construct: Hierarchical structure construction
+1. Detect: Region detection (handled by data)
+2. Semantic Classification: Region type classification (4.2)
+3. Order: Reading order prediction (4.3)
+4. Construct: Hierarchical structure construction (4.4)
+
+End-to-end training: 4.2 + 4.3 + 4.4
 """
 
 import os
@@ -25,6 +28,135 @@ from .order import (
 )
 from .embeddings import RegionTypeEmbedding, PositionalEmbedding2D
 from .construct import ConstructModule, ConstructLoss, build_tree_from_predictions
+
+
+# ==================== 4.2 Semantic Classification Module ====================
+
+class SemanticClassificationModule(nn.Module):
+    """Semantic Classification Module (Paper Section 4.2)
+
+    Predicts region categories (figure, table, paragraph, etc.) from
+    spatial features. This enables end-to-end training without requiring
+    pre-labeled categories.
+
+    Architecture:
+        bbox → PositionalEmbedding2D → [TransformerEncoder] → ClassificationHead → category_logits
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 768,
+        num_categories: int = 5,  # 0=pad, 1=fig, 2=tab, 3=para, 4=other
+        num_heads: int = 12,
+        num_layers: int = 1,  # Lightweight: 1 layer is sufficient
+        dropout: float = 0.1,
+        use_transformer: bool = True,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_categories = num_categories
+        self.use_transformer = use_transformer
+
+        # Position embedding from bbox
+        self.pos_embedding = PositionalEmbedding2D(
+            hidden_size=hidden_size,
+            use_learned=True,
+        )
+
+        # Optional Transformer for context modeling
+        if use_transformer:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_size,
+                nhead=num_heads,
+                dim_feedforward=hidden_size * 4,
+                dropout=dropout,
+                activation='gelu',
+                batch_first=True,
+            )
+            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, num_categories),
+        )
+
+    def forward(
+        self,
+        bbox: torch.Tensor,           # [batch, num_regions, 4]
+        region_mask: torch.Tensor,    # [batch, num_regions]
+        visual_features: torch.Tensor = None,  # [batch, num_regions, hidden_size]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            bbox: Normalized bounding boxes [batch, N, 4]
+            region_mask: Valid region mask [batch, N]
+            visual_features: Optional visual features from backbone
+
+        Returns:
+            Dict with:
+                - category_logits: [batch, N, num_categories]
+                - category_features: [batch, N, hidden_size] encoded features
+        """
+        batch_size, num_regions = bbox.shape[:2]
+
+        # Get positional features
+        pos_features = self.pos_embedding(bbox)  # [B, N, H]
+
+        # Combine with visual features if available
+        if visual_features is not None:
+            features = pos_features + visual_features
+        else:
+            features = pos_features
+
+        # Apply Transformer for context
+        if self.use_transformer:
+            # Create attention mask (True = masked/ignored)
+            attn_mask = ~region_mask  # [B, N]
+            features = self.transformer(
+                features,
+                src_key_padding_mask=attn_mask,
+            )
+
+        # Classification
+        category_logits = self.classifier(features)  # [B, N, num_categories]
+
+        return {
+            'category_logits': category_logits,
+            'category_features': features,
+        }
+
+
+class SemanticClassificationLoss(nn.Module):
+    """Loss function for semantic classification"""
+
+    def __init__(self, ignore_index: int = 0):  # 0 is padding
+        super().__init__()
+        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='none')
+
+    def forward(
+        self,
+        logits: torch.Tensor,   # [batch, N, num_categories]
+        labels: torch.Tensor,   # [batch, N]
+        mask: torch.Tensor,     # [batch, N]
+    ) -> torch.Tensor:
+        """Compute classification loss with masking"""
+        batch_size, num_regions, num_classes = logits.shape
+
+        # Flatten for cross entropy
+        logits_flat = logits.view(-1, num_classes)
+        labels_flat = labels.view(-1)
+
+        # Compute loss
+        loss = self.criterion(logits_flat, labels_flat)
+        loss = loss.view(batch_size, num_regions)
+
+        # Apply mask
+        loss = (loss * mask.float()).sum() / mask.sum().clamp(min=1)
+
+        return loss
 
 
 class PairwiseOrderLoss(nn.Module):
@@ -261,11 +393,14 @@ class FeatureBasedOrderModule(nn.Module):
 
 
 class DOCModel(nn.Module):
-    """Complete Detect-Order-Construct Model
+    """Complete Detect-Order-Construct Model (End-to-End)
 
-    This model takes detected regions (from Detect stage) and:
-    1. Predicts reading order (Order stage)
-    2. Predicts hierarchical structure (Construct stage)
+    This model implements the full DOC pipeline:
+    1. Semantic Classification (4.2): Predict region categories
+    2. Order (4.3): Predict reading order
+    3. Construct (4.4): Predict hierarchical structure
+
+    End-to-end training enables joint optimization of all stages.
     """
 
     def __init__(
@@ -281,6 +416,11 @@ class DOCModel(nn.Module):
         use_visual: bool = False,
         use_text: bool = False,
         use_construct: bool = True,
+        use_semantic: bool = False,  # NEW: Enable 4.2 semantic classification
+        semantic_num_layers: int = 1,
+        cls_weight: float = 1.0,  # Weight for classification loss
+        order_weight: float = 1.0,  # Weight for order loss
+        construct_weight: float = 1.0,  # Weight for construct loss
     ):
         """
         Args:
@@ -295,12 +435,34 @@ class DOCModel(nn.Module):
             use_visual: Whether to use visual features
             use_text: Whether to use text features
             use_construct: Whether to use Construct module
+            use_semantic: Whether to use Semantic Classification module (4.2)
+            semantic_num_layers: Number of Transformer layers in Semantic module
+            cls_weight: Weight for classification loss
+            order_weight: Weight for order loss
+            construct_weight: Weight for construct loss
         """
         super().__init__()
         self.hidden_size = hidden_size
+        self.num_categories = num_categories
         self.use_construct = use_construct
+        self.use_semantic = use_semantic
+        self.cls_weight = cls_weight
+        self.order_weight = order_weight
+        self.construct_weight = construct_weight
 
-        # Order Module (feature-based, not the full pipeline OrderModule)
+        # ==================== 4.2 Semantic Classification (optional) ====================
+        if use_semantic:
+            self.semantic_module = SemanticClassificationModule(
+                hidden_size=hidden_size,
+                num_categories=num_categories,
+                num_heads=num_heads,
+                num_layers=semantic_num_layers,
+                dropout=dropout,
+                use_transformer=True,
+            )
+            self.semantic_loss_fn = SemanticClassificationLoss(ignore_index=0)
+
+        # ==================== 4.3 Order Module ====================
         self.order_module = FeatureBasedOrderModule(
             hidden_size=hidden_size,
             num_categories=num_categories,
@@ -313,7 +475,7 @@ class DOCModel(nn.Module):
             use_text=use_text,
         )
 
-        # Construct Module (optional)
+        # ==================== 4.4 Construct Module (optional) ====================
         if use_construct:
             self.construct_module = ConstructModule(
                 hidden_size=hidden_size,
@@ -330,20 +492,22 @@ class DOCModel(nn.Module):
     def forward(
         self,
         bbox: torch.Tensor,                    # [batch, num_regions, 4]
-        categories: torch.Tensor,              # [batch, num_regions]
-        region_mask: torch.Tensor,             # [batch, num_regions]
+        categories: torch.Tensor = None,       # [batch, num_regions] GT categories (optional if use_semantic)
+        region_mask: torch.Tensor = None,      # [batch, num_regions]
         visual_features: torch.Tensor = None,  # [batch, num_regions, visual_dim]
         text_features: torch.Tensor = None,    # [batch, num_regions, text_dim]
         reading_orders: torch.Tensor = None,   # [batch, num_regions] GT reading order
         relation_labels: torch.Tensor = None,  # [batch, num_regions, num_regions]
         parent_labels: torch.Tensor = None,    # [batch, num_regions] GT parent indices
         sibling_labels: torch.Tensor = None,   # [batch, num_regions, num_regions]
+        category_labels: torch.Tensor = None,  # [batch, num_regions] GT categories for 4.2 loss
+        use_predicted_categories: bool = False,  # Use predicted categories instead of GT
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass through DOC model
+        """Forward pass through DOC model (End-to-End)
 
         Args:
             bbox: Bounding boxes [batch, num_regions, 4]
-            categories: Region categories [batch, num_regions]
+            categories: Region categories [batch, num_regions] (used if not use_semantic)
             region_mask: Valid region mask [batch, num_regions]
             visual_features: Optional visual features
             text_features: Optional text features
@@ -351,9 +515,12 @@ class DOCModel(nn.Module):
             relation_labels: Ground truth relation labels (for training)
             parent_labels: Ground truth parent indices (for training)
             sibling_labels: Ground truth sibling matrix (for training)
+            category_labels: Ground truth categories for semantic classification loss
+            use_predicted_categories: If True, use predicted categories for Order module
 
         Returns:
             Dict containing:
+                - category_logits: [batch, N, num_categories] (if use_semantic)
                 - order_logits: [batch, num_regions, num_regions]
                 - relation_logits: [batch, num_regions, num_regions, num_relations]
                 - enhanced_features: [batch, num_regions, hidden_size]
@@ -361,16 +528,65 @@ class DOCModel(nn.Module):
                 - sibling_logits: [batch, num_regions, num_regions, 2] (if use_construct)
                 - root_logits: [batch, num_regions] (if use_construct)
                 - loss: Total loss (if training labels provided)
+                - cls_loss: Semantic classification loss (if use_semantic)
                 - order_loss: Order module loss
                 - construct_loss: Construct module loss (if use_construct)
         """
         device = bbox.device
+        batch_size = bbox.shape[0]
         outputs = {}
 
-        # ==================== Order Stage ====================
+        # Default region mask
+        if region_mask is None:
+            region_mask = torch.ones(batch_size, bbox.shape[1], dtype=torch.bool, device=device)
+
+        # ==================== 4.2 Semantic Classification Stage ====================
+        cls_loss = torch.tensor(0.0, device=device)
+
+        if self.use_semantic:
+            semantic_outputs = self.semantic_module(
+                bbox=bbox,
+                region_mask=region_mask,
+                visual_features=visual_features,
+            )
+
+            outputs['category_logits'] = semantic_outputs['category_logits']
+            outputs['category_features'] = semantic_outputs['category_features']
+
+            # Determine categories to use for Order module
+            if use_predicted_categories or categories is None:
+                # Use predicted categories (inference mode or end-to-end)
+                pred_categories = semantic_outputs['category_logits'].argmax(dim=-1)
+                categories_for_order = pred_categories
+            else:
+                # Use GT categories (teacher forcing during training)
+                categories_for_order = categories
+
+            # Compute semantic classification loss
+            if category_labels is not None:
+                cls_loss = self.semantic_loss_fn(
+                    logits=semantic_outputs['category_logits'],
+                    labels=category_labels,
+                    mask=region_mask,
+                )
+            elif categories is not None:
+                # Use categories as labels if category_labels not provided
+                cls_loss = self.semantic_loss_fn(
+                    logits=semantic_outputs['category_logits'],
+                    labels=categories,
+                    mask=region_mask,
+                )
+
+            outputs['cls_loss'] = cls_loss
+        else:
+            # Not using semantic classification, use provided categories
+            categories_for_order = categories
+            outputs['cls_loss'] = cls_loss
+
+        # ==================== 4.3 Order Stage ====================
         order_outputs = self.order_module(
             bbox=bbox,
-            categories=categories,
+            categories=categories_for_order,
             region_mask=region_mask,
             visual_features=visual_features,
             text_features=text_features,
@@ -387,7 +603,7 @@ class DOCModel(nn.Module):
             order_loss_dict = self.order_loss_fn(
                 order_logits=order_outputs['order_logits'],
                 relation_logits=order_outputs['relation_logits'],
-                order_labels=reading_orders,  # OrderLoss expects 'order_labels'
+                order_labels=reading_orders,
                 relation_labels=relation_labels,
                 mask=region_mask,
             )
@@ -395,7 +611,7 @@ class DOCModel(nn.Module):
             outputs['order_loss'] = order_loss_dict['order_loss']
             outputs['relation_loss'] = order_loss_dict['relation_loss']
 
-        # ==================== Construct Stage ====================
+        # ==================== 4.4 Construct Stage ====================
         construct_loss = torch.tensor(0.0, device=device)
 
         if self.use_construct:
@@ -436,27 +652,32 @@ class DOCModel(nn.Module):
                 outputs['sibling_loss'] = construct_loss_dict['sibling_loss']
                 outputs['root_loss'] = construct_loss_dict['root_loss']
 
-        # Total loss
-        total_loss = order_loss + construct_loss
+        # ==================== Total Loss (Weighted Combination) ====================
+        total_loss = (
+            self.cls_weight * cls_loss +
+            self.order_weight * order_loss +
+            self.construct_weight * construct_loss
+        )
         outputs['loss'] = total_loss
-
-        # For compatibility with order_only training
-        outputs['cls_loss'] = torch.tensor(0.0, device=device)
 
         return outputs
 
     def predict(
         self,
         bbox: torch.Tensor,
-        categories: torch.Tensor,
-        region_mask: torch.Tensor,
+        categories: torch.Tensor = None,
+        region_mask: torch.Tensor = None,
         visual_features: torch.Tensor = None,
         text_features: torch.Tensor = None,
     ) -> Dict[str, Any]:
-        """Inference mode - predict reading order and hierarchy
+        """Inference mode - predict categories, reading order and hierarchy
+
+        If use_semantic=True, categories are predicted automatically.
+        Otherwise, categories must be provided.
 
         Returns:
             Dict with:
+                - predicted_categories: [batch, N] (if use_semantic)
                 - reading_order: [batch, num_regions] predicted reading order
                 - tree_structure: List of tree nodes (if use_construct)
         """
@@ -467,6 +688,7 @@ class DOCModel(nn.Module):
                 region_mask=region_mask,
                 visual_features=visual_features,
                 text_features=text_features,
+                use_predicted_categories=self.use_semantic,  # Use predicted if semantic enabled
             )
 
             # Predict reading order
@@ -479,6 +701,12 @@ class DOCModel(nn.Module):
                 'reading_order': reading_order,
                 'order_logits': outputs['order_logits'],
             }
+
+            # Include predicted categories if semantic classification enabled
+            if self.use_semantic:
+                pred_categories = outputs['category_logits'].argmax(dim=-1)
+                results['predicted_categories'] = pred_categories
+                results['category_logits'] = outputs['category_logits']
 
             # Predict hierarchy
             if self.use_construct:
@@ -510,8 +738,21 @@ def build_doc_model(
     use_visual: bool = False,
     use_text: bool = False,
     use_construct: bool = True,
+    use_semantic: bool = False,
+    semantic_num_layers: int = 1,
+    cls_weight: float = 1.0,
+    order_weight: float = 1.0,
+    construct_weight: float = 1.0,
 ) -> DOCModel:
-    """Build DOC model with specified configuration"""
+    """Build DOC model with specified configuration
+
+    Args:
+        use_semantic: Enable 4.2 semantic classification for end-to-end training
+        semantic_num_layers: Number of Transformer layers in semantic module
+        cls_weight: Weight for classification loss
+        order_weight: Weight for order loss
+        construct_weight: Weight for construct loss
+    """
     return DOCModel(
         hidden_size=hidden_size,
         num_categories=num_categories,
@@ -524,6 +765,11 @@ def build_doc_model(
         use_visual=use_visual,
         use_text=use_text,
         use_construct=use_construct,
+        use_semantic=use_semantic,
+        semantic_num_layers=semantic_num_layers,
+        cls_weight=cls_weight,
+        order_weight=order_weight,
+        construct_weight=construct_weight,
     )
 
 
@@ -539,7 +785,12 @@ def save_doc_model(model: DOCModel, save_path: str, config: dict = None):
     if config is None:
         config = {
             'hidden_size': model.hidden_size,
+            'num_categories': model.num_categories,
             'use_construct': model.use_construct,
+            'use_semantic': model.use_semantic,
+            'cls_weight': model.cls_weight,
+            'order_weight': model.order_weight,
+            'construct_weight': model.construct_weight,
         }
 
     config_path = os.path.join(save_path, "config.json")
