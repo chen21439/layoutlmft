@@ -782,6 +782,11 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
     data_dir = config.dataset.get_data_dir(data_args.dataset)
     os.environ["HRDOC_DATA_DIR"] = data_dir
 
+    # tender 数据集默认不使用缓存（数据量小，避免缓存问题）
+    if data_args.dataset == "tender" and not data_args.force_rebuild:
+        data_args.force_rebuild = True
+        logger.info("tender dataset: force_rebuild enabled by default")
+
     # Covmatch 目录 (命令行参数优先于配置文件)
     covmatch_from_cli = data_args.covmatch is not None
     if covmatch_from_cli:
