@@ -3,19 +3,27 @@
 """
 Dev Split Creator with Coverage + Distribution Matching
 
-Two-stage greedy algorithm:
-  Stage 1 (Coverage): Select docs until all Tier-1 classes meet minimum thresholds
-  Stage 2 (Distribution): Continue selecting to match overall distribution
+Two modes:
+  1. covmatch (default): Two-stage greedy algorithm for HRDoc datasets
+     - Stage 1 (Coverage): Select docs until Tier-1 classes meet thresholds
+     - Stage 2 (Distribution): Continue selecting to match overall distribution
 
-Output naming: covmatch/doc_covmatch_dev{pct}_seed{seed}/
+  2. random: Simple random split (recommended for small/custom datasets)
+     - Just shuffles and splits, seed controls which docs are selected
+
+Output naming: covmatch/doc_{mode}_dev{pct}_seed{seed}/
   - train_doc_ids.json
   - dev_doc_ids.json
   - split_report.json
 
 Usage:
+    # Covmatch mode (for HRDS/HRDH)
     python scripts/create_dev_covmatch.py --env dev --dataset hrds
-    python scripts/create_dev_covmatch.py --env dev --dataset hrdh
     python scripts/create_dev_covmatch.py --env test --dataset hrds --dev_ratio 0.10 --seed 42
+
+    # Random mode (for small datasets like tender)
+    python scripts/create_dev_covmatch.py --env test --dataset tender --mode random --dev_count 1 --seed 42
+    python scripts/create_dev_covmatch.py --env test --dataset tender --mode random --dev_count 1 --seed 43
 """
 
 import os
@@ -552,9 +560,15 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default=None, choices=["hrds", "hrdh", "tender"],
                         help="Dataset to split (default: from config)")
 
+    # Split mode
+    parser.add_argument("--mode", type=str, default="covmatch", choices=["covmatch", "random"],
+                        help="Split mode: covmatch (coverage+distribution) or random (simple random)")
+
     # Split parameters
     parser.add_argument("--dev_ratio", type=float, default=0.10,
                         help="Dev set ratio (default: 0.10)")
+    parser.add_argument("--dev_count", type=int, default=None,
+                        help="Exact number of dev docs (overrides dev_ratio)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: 42)")
 
@@ -582,16 +596,22 @@ def main():
         return
 
     # Output directory naming
-    dev_pct = int(args.dev_ratio * 100)
-    split_name = f"doc_covmatch_dev{dev_pct}_seed{args.seed}"
+    if args.dev_count is not None:
+        split_name = f"doc_{args.mode}_dev{args.dev_count}_seed{args.seed}"
+    else:
+        dev_pct = int(args.dev_ratio * 100)
+        split_name = f"doc_{args.mode}_dev{dev_pct}_seed{args.seed}"
     output_dir = os.path.join(data_dir, "covmatch", split_name)
 
     print(f"Environment:  {args.env}")
     print(f"Dataset:      {dataset_name}")
+    print(f"Mode:         {args.mode}")
     print(f"Data dir:     {data_dir}")
     print(f"Train dir:    {train_dir}")
     print(f"Output dir:   {output_dir}")
     print(f"Dev ratio:    {args.dev_ratio}")
+    if args.dev_count is not None:
+        print(f"Dev count:    {args.dev_count} (overrides ratio)")
     print(f"Seed:         {args.seed}")
 
     if args.dry_run:
@@ -609,12 +629,26 @@ def main():
     print(f"Relations: {sorted(global_stats['relation_counts'].keys())}")
 
     # Calculate target dev size
-    target_dev_count = int(len(doc_ids) * args.dev_ratio)
-    print(f"\nTarget dev size: {target_dev_count} docs ({args.dev_ratio:.0%})")
+    if args.dev_count is not None:
+        target_dev_count = min(args.dev_count, len(doc_ids) - 1)
+    else:
+        target_dev_count = int(len(doc_ids) * args.dev_ratio)
+    print(f"\nTarget dev size: {target_dev_count} docs")
 
-    # Run selection
-    dev_ids = select_dev_docs(doc_stats, global_stats, doc_ids, target_dev_count, args.seed)
-    train_ids = sorted(set(doc_ids) - set(dev_ids))
+    # Run selection based on mode
+    if args.mode == "random":
+        # Simple random split
+        random.seed(args.seed)
+        shuffled = doc_ids.copy()
+        random.shuffle(shuffled)
+        dev_ids = sorted(shuffled[:target_dev_count])
+        train_ids = sorted(shuffled[target_dev_count:])
+        print(f"\nRandom split complete:")
+        print(f"  Dev docs: {dev_ids}")
+    else:
+        # Covmatch mode
+        dev_ids = select_dev_docs(doc_stats, global_stats, doc_ids, target_dev_count, args.seed)
+        train_ids = sorted(set(doc_ids) - set(dev_ids))
 
     print(f"\nFinal split: train={len(train_ids)}, dev={len(dev_ids)}")
 
