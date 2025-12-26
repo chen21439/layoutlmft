@@ -142,12 +142,15 @@ class JointModel(nn.Module):
         self.stage1 = stage1_model
         self.feature_extractor = feature_extractor
 
-        # 如果冻结 backbone，同时冻结其参数
+        # 冻结状态记录（不在 __init__ 中立即冻结，由外部调用 freeze 方法）
+        self._stage1_frozen = False
+        self._visual_frozen = False
+
+        # 兼容旧代码：如果 __init__ 时指定了冻结，立即执行
         if stage1_no_grad:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
+            self.freeze_stage1()
         elif freeze_visual:
-            self._freeze_visual_encoder()
+            self.freeze_visual_encoder()
 
         # 关系分类损失
         if use_focal_loss:
@@ -156,23 +159,91 @@ class JointModel(nn.Module):
         else:
             self.relation_criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
-    def _freeze_visual_encoder(self):
-        """冻结视觉编码器（ResNet + visual_proj），只训练 Transformer"""
+    def freeze_stage1(self):
+        """
+        冻结 Stage1 backbone（使用 PyTorch 官方 API）
+
+        PyTorch API: nn.Module.requires_grad_(False) 递归冻结所有参数
+        """
+        self.stage1.requires_grad_(False)
+        self._stage1_frozen = True
+        self.stage1_no_grad = True
+        frozen_count = sum(p.numel() for p in self.stage1.parameters())
+        print(f"[JointModel] Frozen stage1: {frozen_count:,} parameters")
+
+    def freeze_visual_encoder(self):
+        """
+        冻结视觉编码器（ResNet + visual_proj），只训练 Transformer
+
+        PyTorch API: nn.Module.requires_grad_(False) 递归冻结所有参数
+        """
         frozen_count = 0
-        # LayoutLMv2/LayoutXLM 的视觉编码器在 layoutlmv2.visual 和 layoutlmv2.visual_proj
         if hasattr(self.stage1, 'layoutlmv2'):
             layoutlmv2 = self.stage1.layoutlmv2
-            # 冻结 ResNet backbone
+            # 使用 PyTorch 官方 API 冻结
             if hasattr(layoutlmv2, 'visual'):
-                for param in layoutlmv2.visual.parameters():
-                    param.requires_grad = False
-                    frozen_count += param.numel()
-            # 冻结 visual projection
+                layoutlmv2.visual.requires_grad_(False)
+                frozen_count += sum(p.numel() for p in layoutlmv2.visual.parameters())
             if hasattr(layoutlmv2, 'visual_proj'):
-                for param in layoutlmv2.visual_proj.parameters():
-                    param.requires_grad = False
-                    frozen_count += param.numel()
+                layoutlmv2.visual_proj.requires_grad_(False)
+                frozen_count += sum(p.numel() for p in layoutlmv2.visual_proj.parameters())
+        self._visual_frozen = True
         print(f"[JointModel] Frozen visual encoder: {frozen_count:,} parameters")
+
+    # 兼容旧代码
+    _freeze_visual_encoder = freeze_visual_encoder
+
+    def get_trainable_param_groups(self, lr_stage1: float, lr_stage34: float, weight_decay: float = 0.01):
+        """
+        返回用于 optimizer 的参数组（只包含 requires_grad=True 的参数）
+
+        Args:
+            lr_stage1: Stage1 学习率
+            lr_stage34: Stage3/4 学习率
+            weight_decay: 权重衰减
+
+        Returns:
+            list: optimizer 参数组
+        """
+        param_groups = []
+
+        # Stage1: 只有未冻结时才添加
+        stage1_params = [p for p in self.stage1.parameters() if p.requires_grad]
+        if stage1_params:
+            param_groups.append({
+                "params": stage1_params,
+                "lr": lr_stage1,
+                "weight_decay": weight_decay,
+            })
+
+        # cls_head: 跟随 stage1 的冻结状态
+        cls_head_params = [p for p in self.cls_head.parameters() if p.requires_grad]
+        if cls_head_params:
+            param_groups.append({
+                "params": cls_head_params,
+                "lr": lr_stage1,
+                "weight_decay": weight_decay,
+            })
+
+        # Stage3
+        stage3_params = [p for p in self.stage3.parameters() if p.requires_grad]
+        if stage3_params:
+            param_groups.append({
+                "params": stage3_params,
+                "lr": lr_stage34,
+                "weight_decay": 0.0,
+            })
+
+        # Stage4
+        stage4_params = [p for p in self.stage4.parameters() if p.requires_grad]
+        if stage4_params:
+            param_groups.append({
+                "params": stage4_params,
+                "lr": lr_stage34,
+                "weight_decay": 0.0,
+            })
+
+        return param_groups
 
     def encode_with_micro_batch(
         self,

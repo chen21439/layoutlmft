@@ -219,11 +219,9 @@ class JointTrainingArguments(TrainingArguments):
     disable_stage34: bool = field(default=False, metadata={"help": "Disable Stage 3/4"})
     eval_before_train: bool = field(default=False, metadata={"help": "Run evaluation before training starts (to get baseline metrics)"})
 
-    # 断点续训（默认自动检测）
-    resume_from_checkpoint: str = field(
-        default="auto",
-        metadata={"help": "Path to checkpoint to resume from. 'auto'=auto-detect, 'none'=start fresh."}
-    )
+    # 注：删除了 resume_from_checkpoint 参数
+    # 现在统一使用 model_path 加载权重，optimizer 根据当前 freeze 设置重新创建
+    # 这样避免了"冻结设置改变导致 optimizer 参数组不匹配"的问题
 
     # 兼容旧参数
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
@@ -263,34 +261,35 @@ class JointTrainer(Trainer):
         self._current_loss_dict = {}
 
     def create_optimizer(self):
-        """创建优化器，为不同模块设置不同学习率"""
+        """
+        创建优化器，为不同模块设置不同学习率
 
+        使用 JointModel.get_trainable_param_groups() 获取参数组，
+        该方法会根据当前冻结状态自动过滤 requires_grad=False 的参数。
+        """
         if self.optimizer is not None:
             return self.optimizer
 
-        model = self.model
+        # 使用模型提供的方法获取参数组（自动处理冻结状态）
+        optimizer_grouped_parameters = self.model.get_trainable_param_groups(
+            lr_stage1=self.args.learning_rate,
+            lr_stage34=self.learning_rate_stage34,
+            weight_decay=self.args.weight_decay,
+        )
 
-        # 分组参数
-        optimizer_grouped_parameters = [
-            # Stage 1: 使用 args.learning_rate
-            {
-                "params": [p for n, p in model.stage1.named_parameters() if p.requires_grad],
-                "lr": self.args.learning_rate,
-                "weight_decay": self.args.weight_decay,
-            },
-            # Stage 3: 使用 learning_rate_stage34
-            {
-                "params": [p for n, p in model.stage3.named_parameters() if p.requires_grad],
-                "lr": self.learning_rate_stage34,
-                "weight_decay": 0.0,
-            },
-            # Stage 4: 使用 learning_rate_stage34
-            {
-                "params": [p for n, p in model.stage4.named_parameters() if p.requires_grad],
-                "lr": self.learning_rate_stage34,
-                "weight_decay": 0.0,
-            },
-        ]
+        # 过滤空参数组
+        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
+
+        if not optimizer_grouped_parameters:
+            raise ValueError("No trainable parameters found. Check freeze settings.")
+
+        # 打印参数组信息
+        total_params = sum(sum(p.numel() for p in g["params"]) for g in optimizer_grouped_parameters)
+        logger.info(f"[Optimizer] Creating AdamW with {len(optimizer_grouped_parameters)} param groups, "
+                    f"{total_params:,} trainable parameters")
+        for i, g in enumerate(optimizer_grouped_parameters):
+            num_params = sum(p.numel() for p in g["params"])
+            logger.info(f"  Group {i}: lr={g['lr']}, params={num_params:,}")
 
         self.optimizer = AdamW(optimizer_grouped_parameters)
         return self.optimizer
@@ -993,53 +992,31 @@ def main():
     # 加载模型
     logger.info("Loading models...")
 
-    # 检测是否从 joint checkpoint 续训
-    joint_checkpoint = None
-
-    if training_args.resume_from_checkpoint and training_args.resume_from_checkpoint.lower() != "none":
-        if training_args.resume_from_checkpoint == "auto":
-            joint_checkpoint = get_last_checkpoint(training_args.output_dir)
-        else:
-            joint_checkpoint = training_args.resume_from_checkpoint
-
-        # 验证 checkpoint 有效性（必须有 pytorch_model.bin + trainer_state.json）
-        if joint_checkpoint:
-            has_pytorch_model = os.path.isfile(os.path.join(joint_checkpoint, "pytorch_model.bin"))
-            has_trainer_state = os.path.isfile(os.path.join(joint_checkpoint, "trainer_state.json"))
-
-            if has_pytorch_model and has_trainer_state:
-                logger.info(f"Found valid checkpoint: {joint_checkpoint}")
-            else:
-                logger.warning(f"Invalid checkpoint (missing pytorch_model.bin or trainer_state.json): {joint_checkpoint}")
-                logger.warning("Please delete old checkpoints and restart training")
-                joint_checkpoint = None
-
     # Stage 1: LayoutXLM
-    # 优先级：model_path 显式指定 > joint_checkpoint/stage1 > 自动检测
-    joint_model_path = None  # 如果 model_path 是 joint checkpoint，记录下来用于后续加载完整权重
+    # 简化后的加载逻辑：
+    #   - model_path 指定 joint checkpoint → 加载完整权重
+    #   - model_path 指定 LayoutXLM 目录 → 加载预训练权重
+    #   - 未指定 → 从头训练
+    joint_model_path = None
 
     if model_args.model_path:
-        # 用户显式指定了 model_path，检测是否是 joint checkpoint 结构
         specified_path = model_args.model_name_or_path
         stage1_subdir = os.path.join(specified_path, "stage1")
         joint_pytorch_model = os.path.join(specified_path, "pytorch_model.bin")
 
         if os.path.isfile(os.path.join(stage1_subdir, "config.json")) and os.path.isfile(joint_pytorch_model):
-            # 是 joint checkpoint 结构
+            # Joint checkpoint 结构：config from stage1/, weights from pytorch_model.bin
             stage1_path = stage1_subdir
             joint_model_path = specified_path
             logger.info(f"Loading from joint checkpoint: {specified_path}")
             logger.info(f"  - Stage1 config from: {stage1_path}")
+            logger.info(f"  - Weights will be loaded from: {joint_pytorch_model}")
         else:
-            # 标准 LayoutXLM 目录结构
+            # 标准 LayoutXLM/HuggingFace 目录结构
             stage1_path = specified_path
-            logger.info(f"Loading Stage 1 from specified path: {stage1_path}")
-    elif joint_checkpoint:
-        # 续训且未指定 model_path，从 checkpoint 加载
-        stage1_path = os.path.join(joint_checkpoint, "stage1")
-        logger.info(f"Resuming: Loading Stage 1 from checkpoint: {stage1_path}")
+            logger.info(f"Loading Stage 1 from: {stage1_path}")
     else:
-        # 首次训练，使用自动检测的路径
+        # 未指定 model_path，使用默认预训练模型
         stage1_path = model_args.model_name_or_path
         logger.info(f"Fresh start: Loading Stage 1 from: {stage1_path}")
 
@@ -1198,8 +1175,8 @@ def main():
     )
 
     # 训练
-    if joint_checkpoint:
-        logger.info(f"Resuming from checkpoint: {joint_checkpoint}")
+    if joint_model_path:
+        logger.info(f"Training with weights loaded from: {joint_model_path}")
     else:
         logger.info("Starting fresh training")
 
@@ -1216,7 +1193,8 @@ def main():
         logger.info("=" * 60)
 
     logger.info("Starting training...")
-    train_result = trainer.train(resume_from_checkpoint=joint_checkpoint)
+    # 注：不再传 resume_from_checkpoint，optimizer 根据当前 freeze 设置重新创建
+    train_result = trainer.train()
 
     # 保存最终模型
     trainer.save_model()
