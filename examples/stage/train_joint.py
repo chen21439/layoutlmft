@@ -217,6 +217,7 @@ class JointTrainingArguments(TrainingArguments):
 
     # 功能开关
     disable_stage34: bool = field(default=False, metadata={"help": "Disable Stage 3/4"})
+    eval_before_train: bool = field(default=False, metadata={"help": "Run evaluation before training starts (to get baseline metrics)"})
 
     # 断点续训（默认自动检测）
     resume_from_checkpoint: str = field(
@@ -1193,6 +1194,18 @@ def main():
         logger.info(f"Resuming from checkpoint: {joint_checkpoint}")
     else:
         logger.info("Starting fresh training")
+
+    # 训练前评估（获取 baseline 指标）
+    if training_args.eval_before_train and eval_dataset is not None:
+        logger.info("=" * 60)
+        logger.info("Running pre-training evaluation (baseline metrics)...")
+        logger.info("=" * 60)
+        pre_train_metrics = trainer.evaluate()
+        if pre_train_metrics:
+            trainer.log_metrics("eval_before_train", pre_train_metrics)
+            trainer.save_metrics("eval_before_train", pre_train_metrics)
+            logger.info(f"Pre-training metrics: {pre_train_metrics}")
+        logger.info("=" * 60)
 
     logger.info("Starting training...")
     train_result = trainer.train(resume_from_checkpoint=joint_checkpoint)
