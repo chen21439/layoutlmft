@@ -328,6 +328,7 @@ class CompHRDocDataset(Dataset):
             'reading_labels': sample['reading_labels'],
             'parent_ids': sample['parent_ids'],
             'relations': sample['relations'],
+            'successor_labels': sample['successor_labels'],  # 论文4.2.3格式：后继索引
         }
 
         # 加载图像（可选）
