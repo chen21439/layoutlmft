@@ -68,6 +68,11 @@ from examples.comp_hrdoc.data.line_collator_v2 import (
     LineLevelCollatorV2,
     create_dataloaders_v2,
 )
+from examples.comp_hrdoc.data.hrds_loader import (
+    HRDSDataset,
+    HRDSLayoutXLMCollator,
+    create_hrds_layoutxlm_dataloaders,
+)
 from examples.comp_hrdoc.models import (
     IntraRegionModule,
     predict_successors,
@@ -116,7 +121,9 @@ def parse_args():
 
     # Data
     parser.add_argument("--data-path", type=str, default=None,
-                        help="Path to unified_layout_analysis_train.json")
+                        help="Path to data (JSON file for HRDH, directory for HRDS)")
+    parser.add_argument("--data-format", type=str, default="hrdh", choices=["hrdh", "hrds"],
+                        help="Data format: hrdh=unified JSON file, hrds=individual JSON files per doc")
     parser.add_argument("--max-length", type=int, default=512,
                         help="Max sequence length for tokenization")
     parser.add_argument("--max-lines", type=int, default=128)
@@ -165,12 +172,23 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def get_data_path(env: str) -> str:
-    """Get data path based on environment"""
-    paths = {
-        "dev": "/mnt/e/models/data/Section/Comp_HRDoc/HRDH_MSRA_POD_TRAIN/unified_layout_analysis_train.json",
-        "test": "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TRAIN/unified_layout_analysis_train.json",
-    }
+def get_data_path(env: str, data_format: str = "hrdh") -> str:
+    """Get data path based on environment and format
+
+    Args:
+        env: Environment ('dev' or 'test')
+        data_format: Data format ('hrdh' for unified JSON, 'hrds' for individual files)
+    """
+    if data_format == "hrds":
+        paths = {
+            "dev": "/mnt/e/models/data/Section/HRDS/train",
+            "test": "/data/LLM_group/layoutlmft/data/HRDS/train",
+        }
+    else:  # hrdh
+        paths = {
+            "dev": "/mnt/e/models/data/Section/Comp_HRDoc/HRDH_MSRA_POD_TRAIN/unified_layout_analysis_train.json",
+            "test": "/data/LLM_group/layoutlmft/data/Comp_HRDoc/HRDH_MSRA_POD_TRAIN/unified_layout_analysis_train.json",
+        }
     return paths.get(env, paths["dev"])
 
 
@@ -589,8 +607,9 @@ def main():
         logger.info(f"Stage output directory: {output_dir}")
 
     # Paths
-    data_path = args.data_path or get_data_path(args.env)
+    data_path = args.data_path or get_data_path(args.env, args.data_format)
     layoutxlm_path = args.layoutxlm_path or get_layoutxlm_path(args.env)
+    logger.info(f"Data format: {args.data_format}")
     logger.info(f"Data path: {data_path}")
     logger.info(f"LayoutXLM path: {layoutxlm_path}")
 
@@ -606,8 +625,21 @@ def main():
     tokenizer = LayoutXLMTokenizerFast.from_pretrained(layoutxlm_path)
 
     # Create dataloaders
-    logger.info(f"Creating dataloaders (collator version: {args.collator_version})...")
-    if args.collator_version == "v2":
+    logger.info(f"Creating dataloaders (format: {args.data_format}, collator: {args.collator_version})...")
+
+    if args.data_format == "hrds":
+        # HRDS format: individual JSON files per document
+        train_loader, val_loader = create_hrds_layoutxlm_dataloaders(
+            data_dir=data_path,
+            tokenizer=tokenizer,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            max_lines=args.max_lines,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            val_split_ratio=args.val_split_ratio,
+        )
+    elif args.collator_version == "v2":
         # V2: is_split_into_words=True approach (recommended)
         train_dataset = LineLevelDataset(
             data_path=data_path,
