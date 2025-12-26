@@ -234,9 +234,16 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
         guid = 0
         doc_count = 0
-        for file in sorted(os.listdir(ann_dir)):
-            if not file.endswith('.json'):
-                continue
+
+        # 获取文件列表并计算总数，用于显示进度
+        all_files = sorted([f for f in os.listdir(ann_dir) if f.endswith('.json')])
+        total_files = len(all_files)
+        logger.info(f"  Found {total_files} JSON files in {ann_dir}")
+
+        for file_idx, file in enumerate(all_files):
+            # 每 10 个文件输出一次进度（避免日志过多）
+            if file_idx % 10 == 0 or file_idx == total_files - 1:
+                print(f"  [Dataset] Processing file {file_idx + 1}/{total_files} ({100 * (file_idx + 1) // total_files}%)", flush=True)
 
             # 快速模式：达到 max_docs 后停止
             if max_docs is not None and doc_count >= max_docs:

@@ -42,15 +42,28 @@ def check_tree(json_file_path, gt_info, pred_info):
             json_file_path, 2, "number of nodes not equal"
         ))
         return 2
+    def safe_int(val):
+        """将 parent_id 安全转换为整数，无效值返回 -1"""
+        if val is None or val == "":
+            return -1
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return -1
+
     parent_ids = {}
     for i in range(len(pred_info)):
-        parent_ids[i] = pred_info[i]["parent_id"]
+        parent_ids[i] = safe_int(pred_info[i]["parent_id"])
     for loop_time in range(len(pred_info)):
         Valid = True
         for item_id in range(len(pred_info)):
             if parent_ids[item_id] == -1: continue
             Valid = False
-            parent_ids[item_id] = pred_info[parent_ids[item_id]]["parent_id"]
+            pid = parent_ids[item_id]
+            if 0 <= pid < len(pred_info):
+                parent_ids[item_id] = safe_int(pred_info[pid]["parent_id"])
+            else:
+                parent_ids[item_id] = -1
         if Valid: break
     if len(set(parent_ids.values())) != 1:
         vis_digraph_py(complete_json(pred_info, gt_info), os.path.splitext(json_file_path)[0])
