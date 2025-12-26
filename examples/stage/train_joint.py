@@ -389,10 +389,12 @@ class JointTrainer(Trainer):
         # 保存完整模型状态（标准格式，供 Trainer resume 使用）
         torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
 
-        # 保存 tokenizer 到根目录（两种格式，确保 Fast tokenizer 可加载）
+        # 保存 tokenizer 到根目录
         if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(output_dir, legacy_format=True)   # sentencepiece
-            self.tokenizer.save_pretrained(output_dir, legacy_format=False)  # tokenizer.json
+            self.tokenizer.save_pretrained(output_dir)
+            logger.info(f"Tokenizer saved to {output_dir}")
+        else:
+            logger.warning("Tokenizer is None, skipping tokenizer save")
 
         # 保存 trainer_state.json（用于续训）
         self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
@@ -939,9 +941,10 @@ def main():
     # 标记 stage 开始
     exp_manager.mark_stage_started(training_args.exp, "joint", data_args.dataset)
 
-    # 加载 tokenizer（统一从 model_path 根目录加载）
+    # 加载 tokenizer
     logger.info("Loading tokenizer...")
     tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
+    logger.info(f"Tokenizer loaded from: {model_args.model_name_or_path}")
     assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集
