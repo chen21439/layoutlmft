@@ -14,6 +14,8 @@ HRDoc 统一数据加载模块
 
 import os
 import logging
+import pickle
+import hashlib
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 
@@ -606,11 +608,31 @@ class HRDocDataLoader:
         self._tokenized_datasets = tokenized_datasets
         return tokenized_datasets
 
+    def _get_cache_path(self, split_name: str) -> str:
+        """生成文档级别缓存文件路径"""
+        # 基于关键参数生成唯一的缓存 key
+        cache_key_parts = [
+            self.config.dataset_name,
+            split_name,
+            str(self.config.max_length),
+            str(self.config.label_all_tokens),
+            self.tokenizer.name_or_path if hasattr(self.tokenizer, 'name_or_path') else "unknown",
+        ]
+        cache_key = "_".join(cache_key_parts)
+        cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:12]
+
+        # 缓存目录：~/.cache/hrdoc_doc_level/
+        cache_dir = os.path.expanduser("~/.cache/hrdoc_doc_level")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        return os.path.join(cache_dir, f"{self.config.dataset_name}_{split_name}_{cache_hash}.pkl")
+
     def _prepare_document_level_datasets(self) -> Dict:
         """
         文档级别数据准备（用于推理）
 
         每个样本是一个完整文档，保持全局 line_id
+        支持缓存机制，避免重复 tokenization
         """
         print("[DataLoader] Using DOCUMENT-LEVEL mode (for inference)", flush=True)
 
@@ -619,6 +641,21 @@ class HRDocDataLoader:
         def process_split(split_name, max_samples=None):
             if split_name not in self._raw_datasets:
                 return None
+
+            # 检查缓存
+            cache_path = self._get_cache_path(split_name)
+            if not self.config.force_rebuild and os.path.exists(cache_path):
+                print(f"[DataLoader] Loading {split_name} from cache: {cache_path}", flush=True)
+                try:
+                    with open(cache_path, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    # 检查 max_samples 限制
+                    if max_samples is not None:
+                        cached_data = cached_data[:max_samples]
+                    print(f"[DataLoader] {split_name}: {len(cached_data)} documents (from cache)", flush=True)
+                    return cached_data
+                except Exception as e:
+                    print(f"[DataLoader] Cache load failed: {e}, rebuilding...", flush=True)
 
             dataset = self._raw_datasets[split_name]
 
@@ -635,8 +672,6 @@ class HRDocDataLoader:
             print(f"[DataLoader] Found {len(doc_pages)} documents from {len(dataset)} pages", flush=True)
 
             doc_names = list(doc_pages.keys())
-            if max_samples is not None:
-                doc_names = doc_names[:max_samples]
 
             print(f"[DataLoader] Tokenizing {split_name} ({len(doc_names)} documents)...", flush=True)
 
@@ -648,6 +683,18 @@ class HRDocDataLoader:
                 result = self._process_document_pages(doc_name, pages)
                 if result is not None:
                     processed_docs.append(result)
+
+            # 保存到缓存
+            try:
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(processed_docs, f)
+                print(f"[DataLoader] Saved {split_name} cache to: {cache_path}", flush=True)
+            except Exception as e:
+                print(f"[DataLoader] Warning: Failed to save cache: {e}", flush=True)
+
+            # 应用 max_samples 限制
+            if max_samples is not None:
+                processed_docs = processed_docs[:max_samples]
 
             print(f"[DataLoader] {split_name}: {len(processed_docs)} documents", flush=True)
             return processed_docs

@@ -57,6 +57,10 @@ def parse_args():
     parser.add_argument("--env", type=str, default=None,
                         help="Environment: dev, test, or auto-detect")
 
+    # GPU selection (overrides config file)
+    parser.add_argument("--gpu", type=str, default=None,
+                        help="GPU ID to use (e.g., '0', '0,1'). Overrides config file.")
+
     # Dataset selection
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to evaluate: hrds or hrdh")
@@ -801,8 +805,10 @@ def main():
     else:
         config = get_config()
 
-    # Set GPU
-    if config.gpu.cuda_visible_devices:
+    # Set GPU (command line --gpu overrides config file)
+    if args.gpu:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+    elif config.gpu.cuda_visible_devices:
         os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu.cuda_visible_devices
 
     # Initialize experiment manager
@@ -881,7 +887,8 @@ def main():
     print("=" * 60)
     print(f"Environment:    {config.env}")
     print(f"Dataset:        {args.dataset.upper()}")
-    print(f"Device:         {device}")
+    gpu_id = args.gpu or config.gpu.cuda_visible_devices or "default"
+    print(f"GPU:            {gpu_id} (device: {device})")
     print(f"Experiment:     {os.path.basename(exp_dir)}")
     print("-" * 60)
     print("Model Paths:")

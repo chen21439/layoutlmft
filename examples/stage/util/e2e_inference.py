@@ -242,10 +242,19 @@ def run_e2e_inference_document(
     doc_input_ids = batch["input_ids"][chunk_start:chunk_end]
     doc_bbox = batch["bbox"][chunk_start:chunk_end]
     doc_attention_mask = batch["attention_mask"][chunk_start:chunk_end]
+    doc_line_ids = batch["line_ids"][chunk_start:chunk_end]
+
+    # 处理 image：文档级别模式下可能是 list，需要转换为 tensor
     doc_image = batch.get("image")
     if doc_image is not None:
-        doc_image = doc_image[chunk_start:chunk_end]
-    doc_line_ids = batch["line_ids"][chunk_start:chunk_end]
+        if isinstance(doc_image, list):
+            # list of images -> tensor
+            doc_image = torch.stack([
+                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                for img in doc_image[chunk_start:chunk_end]
+            ]).to(device)
+        else:
+            doc_image = doc_image[chunk_start:chunk_end]
 
     stage1_outputs = model.stage1(
         input_ids=doc_input_ids,

@@ -45,14 +45,21 @@ import numpy as np
 # CUDA_VISIBLE_DEVICES must be set before importing torch
 def _setup_gpu_early():
     """在 import torch 之前设置 GPU，避免 DataParallel 问题"""
-    # 尝试从命令行参数中提取 --env
+    # 优先从命令行参数中提取 --gpu
+    gpu_id = None
     env = "test"  # 默认值
     for i, arg in enumerate(sys.argv):
+        if arg == "--gpu" and i + 1 < len(sys.argv):
+            gpu_id = sys.argv[i + 1]
         if arg == "--env" and i + 1 < len(sys.argv):
             env = sys.argv[i + 1]
-            break
 
-    # 加载配置获取 GPU 设置
+    # 如果命令行指定了 GPU，直接使用
+    if gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+        return
+
+    # 否则从配置文件加载
     try:
         PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         sys.path.insert(0, PROJECT_ROOT)
@@ -167,6 +174,7 @@ class JointDataArguments:
     """联合训练数据参数"""
     env: str = field(default="test", metadata={"help": "Environment: dev, test"})
     dataset: str = field(default="hrds", metadata={"help": "Dataset: hrds, hrdh, tender"})
+    gpu: Optional[str] = field(default=None, metadata={"help": "GPU ID to use (e.g., '0', '0,1'). Overrides config file."})
     covmatch: Optional[str] = field(default=None, metadata={"help": "Covmatch split name (e.g., doc_covmatch_dev50_seed42). If not specified, uses config default."})
     max_train_samples: int = field(default=-1, metadata={"help": "Max train samples (-1 for all)"})
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
