@@ -89,6 +89,9 @@ def main():
     macro_f1 = f1_score(gt_class, pred_class, average='macro')
     micro_f1 = f1_score(gt_class, pred_class, average='micro')
 
+    # 计算 Accuracy（对于单标签分类，micro_f1 = accuracy）
+    accuracy = sum(1 for g, p in zip(gt_class, pred_class) if g == p) / len(gt_class)
+
     # Build id2class mapping
     id2class_dict = {v: k for k, v in class2id_dict.items()}
 
@@ -114,12 +117,13 @@ def main():
     for rank, (class_name, class_id, f1) in enumerate(class_results_sorted, 1):
         logging.info(f"{rank:<6}{class_name:<12}{class_id:<6}{f1:.4f}")
     logging.info("-" * 50)
+    logging.info(f"{'Accuracy:':<24}{accuracy:.4f}")
     logging.info(f"{'Macro F1:':<24}{macro_f1:.4f}")
     logging.info(f"{'Micro F1:':<24}{micro_f1:.4f}")
     logging.info("=" * 50)
 
     # Also print original format for backward compatibility
-    logging.info("detailed_f1 : {}, macro_f1 : {}, micro_f1 : {}".format(str(detailed_f1), macro_f1, micro_f1))
+    logging.info("accuracy : {}, macro_f1 : {}, micro_f1 : {}".format(accuracy, macro_f1, micro_f1))
 
 if __name__ == "__main__":
     main()
