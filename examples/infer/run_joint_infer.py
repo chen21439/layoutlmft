@@ -255,6 +255,15 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
 
             # 获取全局 line_id（优先使用 item 中的 line_id，否则使用索引）
             line_id = item.get("line_id", idx)
+            # 确保 line_id 是整数（与训练时 hrdoc.py 保持一致）
+            if isinstance(line_id, str):
+                line_id = int(line_id) if line_id.lstrip('-').isdigit() else idx
+
+            # 确保 page 是整数（与训练时 hrdoc.py 保持一致）
+            page_num = item.get("page", 0)
+            if isinstance(page_num, str):
+                page_num = int(page_num) if page_num.isdigit() else 0
+            enriched_item["page"] = page_num
 
             # 使用全局 line_id 查找预测结果
             if line_id in preds:
@@ -268,6 +277,11 @@ def run_inference(model_path: str, data_dir: str, output_dir: str = None, config
                 enriched_item["class"] = trans_class(item.get("class", "paraline"))
                 enriched_item["parent_id"] = item.get("parent_id", -1)
                 enriched_item["relation"] = item.get("relation", "connect")
+
+            # 确保 parent_id 是整数
+            if isinstance(enriched_item["parent_id"], str):
+                pid = enriched_item["parent_id"]
+                enriched_item["parent_id"] = int(pid) if pid.lstrip('-').isdigit() else -1
 
             # 添加 line_id 和 is_meta 字段
             enriched_item["line_id"] = line_id
