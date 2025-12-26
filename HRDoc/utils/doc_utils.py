@@ -111,7 +111,11 @@ def generate_doc_tree_from_log_line_level(boxes_texts, parent_idxs, relations):
                 box.ref_parent.add_child(box)
             if relation == 'equality':
                 oldest_bro = box.ref_parent
+                visited = set()  # 防止循环引用导致死循环
                 while oldest_bro.ref_parent_relation == 'equality':
+                    if id(oldest_bro) in visited:
+                        break  # 检测到循环，跳出
+                    visited.add(id(oldest_bro))
                     oldest_bro = oldest_bro.ref_parent
                 if oldest_bro.parent:
                     oldest_bro.parent.add_child(box)
@@ -156,9 +160,17 @@ def vis_digraph_py(json_data: List[Dict], out_folder: str, dig_name: str="doc_vi
         dot.render(format='pdf', directory=out_folder)
 
 def complete_json(pred_info, gt_info):
+    """补全预测信息，从 GT 获取 page 等字段。
+
+    注意：确保数值类型转换，与训练时 hrdoc.py 的处理保持一致。
+    """
     generated_json = []
     for idx, item in enumerate(pred_info):
         item["line_id"] = idx
-        item["page"] = gt_info[idx]["page"]
+        # 确保 page 是整数（与训练时 hrdoc.py 一致）
+        page_val = gt_info[idx].get("page", 0)
+        if isinstance(page_val, str):
+            page_val = int(page_val) if page_val.isdigit() else 0
+        item["page"] = page_val
         generated_json.append(item)
     return generated_json
