@@ -147,17 +147,21 @@ def vis_digraph_py(json_data: List[Dict], out_folder: str, dig_name: str="doc_vi
     if not save_image:
         print("Assign save_image=False will incur not saving any doc tree!")
 
-    import graphviz
-    dot = graphviz.Digraph(dig_name, comment=dig_name+" dot file")
-    """Process Json File, Generate Doc Tree"""
-    for cl in json_data:
-        content  = str(cl["line_id"])
-        dot.node(str(cl["line_id"]), content, \
-            color=Page_Color[cl["page"]%len(Page_Color)], style='filled')
-        dot.edge(str(cl["parent_id"]), str(cl["line_id"]), \
-            color=Relation_Color[cl["relation"]])
-    if save_image:
-        dot.render(format='pdf', directory=out_folder)
+    try:
+        import graphviz
+        dot = graphviz.Digraph(dig_name, comment=dig_name+" dot file")
+        """Process Json File, Generate Doc Tree"""
+        for cl in json_data:
+            content  = str(cl["line_id"])
+            dot.node(str(cl["line_id"]), content, \
+                color=Page_Color[cl["page"]%len(Page_Color)], style='filled')
+            dot.edge(str(cl["parent_id"]), str(cl["line_id"]), \
+                color=Relation_Color[cl["relation"]])
+        if save_image:
+            dot.render(format='pdf', directory=out_folder)
+    except Exception as e:
+        # graphviz 不可用时跳过可视化，不影响 TEDS 评估
+        pass
 
 def complete_json(pred_info, gt_info):
     """补全预测信息，从 GT 获取 page 等字段。

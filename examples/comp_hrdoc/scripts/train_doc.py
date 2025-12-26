@@ -170,6 +170,7 @@ def train_epoch(
         categories = batch["categories"].to(device)
         region_mask = batch["region_mask"].to(device)
         reading_orders = batch["reading_orders"].to(device)
+        successor_labels = batch["successor_labels"].to(device)
         parent_ids = batch.get("parent_ids")
         if parent_ids is not None:
             parent_ids = parent_ids.to(device)
@@ -188,6 +189,7 @@ def train_epoch(
                     categories=categories,
                     region_mask=region_mask,
                     reading_orders=reading_orders,
+                    successor_labels=successor_labels,
                     parent_labels=parent_ids,
                     sibling_labels=sibling_labels,
                     category_labels=categories if use_semantic else None,
@@ -199,6 +201,7 @@ def train_epoch(
                 categories=categories,
                 region_mask=region_mask,
                 reading_orders=reading_orders,
+                successor_labels=successor_labels,
                 parent_labels=parent_ids,
                 sibling_labels=sibling_labels,
                 category_labels=categories if use_semantic else None,
@@ -286,6 +289,7 @@ def evaluate(
         categories = batch["categories"].to(device)
         region_mask = batch["region_mask"].to(device)
         reading_orders = batch["reading_orders"].to(device)
+        successor_labels = batch["successor_labels"].to(device)
         parent_ids = batch.get("parent_ids")
         if parent_ids is not None:
             parent_ids = parent_ids.to(device)
@@ -300,6 +304,7 @@ def evaluate(
             categories=categories,
             region_mask=region_mask,
             reading_orders=reading_orders,
+            successor_labels=successor_labels,
             parent_labels=parent_ids,
             sibling_labels=sibling_labels,
             category_labels=categories if use_semantic else None,
@@ -331,13 +336,13 @@ def evaluate(
             total_order_loss += order_loss
             total_construct_loss += construct_loss
 
-        # Compute order predictions
+        # Compute successor predictions (论文4.2.3: argmax for each row)
         order_logits = outputs["order_logits"]
-        from examples.comp_hrdoc.models.order import predict_reading_order
-        pred_orders = predict_reading_order(order_logits, region_mask)
+        # 对每行做 argmax 得到预测的后继
+        pred_successors = order_logits.argmax(dim=-1)  # [B, N]
 
-        # Accumulate order accuracy stats per batch
-        correct = (pred_orders == reading_orders) & region_mask
+        # Accumulate successor accuracy stats per batch (论文指标)
+        correct = (pred_successors == successor_labels) & region_mask
         total_order_correct += correct.sum().item()
         total_order_count += region_mask.sum().item()
 

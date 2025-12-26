@@ -24,6 +24,7 @@ from .order import (
     OrderTransformerEncoder,
     InterRegionOrderHead,
     RelationTypeHead,
+    OrderLoss,
     predict_reading_order,
 )
 from .embeddings import RegionTypeEmbedding, PositionalEmbedding2D
@@ -484,8 +485,8 @@ class DOCModel(nn.Module):
                 dropout=dropout,
             )
 
-        # Loss functions
-        self.order_loss_fn = PairwiseOrderLoss()
+        # Loss functions (论文4.2.3: Softmax CE for order prediction)
+        self.order_loss_fn = OrderLoss()
         if use_construct:
             self.construct_loss_fn = ConstructLoss()
 
@@ -496,7 +497,8 @@ class DOCModel(nn.Module):
         region_mask: torch.Tensor = None,      # [batch, num_regions]
         visual_features: torch.Tensor = None,  # [batch, num_regions, visual_dim]
         text_features: torch.Tensor = None,    # [batch, num_regions, text_dim]
-        reading_orders: torch.Tensor = None,   # [batch, num_regions] GT reading order
+        reading_orders: torch.Tensor = None,   # [batch, num_regions] GT reading order positions
+        successor_labels: torch.Tensor = None, # [batch, num_regions] GT successor indices (论文4.2.3格式)
         relation_labels: torch.Tensor = None,  # [batch, num_regions, num_regions]
         parent_labels: torch.Tensor = None,    # [batch, num_regions] GT parent indices
         sibling_labels: torch.Tensor = None,   # [batch, num_regions, num_regions]
@@ -597,13 +599,13 @@ class DOCModel(nn.Module):
         outputs['order_logits'] = order_outputs['order_logits']
         outputs['relation_logits'] = order_outputs['relation_logits']
 
-        # Order loss
+        # Order loss (论文4.2.3: 使用successor_labels + Softmax CE)
         order_loss = torch.tensor(0.0, device=device)
-        if reading_orders is not None:
+        if successor_labels is not None:
             order_loss_dict = self.order_loss_fn(
                 order_logits=order_outputs['order_logits'],
                 relation_logits=order_outputs['relation_logits'],
-                order_labels=reading_orders,
+                order_labels=successor_labels,  # 使用 successor indices
                 relation_labels=relation_labels,
                 mask=region_mask,
             )
