@@ -193,57 +193,60 @@ class JointModel(nn.Module):
     # 兼容旧代码
     _freeze_visual_encoder = freeze_visual_encoder
 
-    def get_trainable_param_groups(self, lr_stage1: float, lr_stage34: float, weight_decay: float = 0.01):
+    def get_param_groups(self, lr_stage1: float, lr_stage34: float, weight_decay: float = 0.01):
         """
-        返回用于 optimizer 的参数组（只包含 requires_grad=True 的参数）
+        返回用于 optimizer 的参数组（始终包含所有模块，保持结构一致）
+
+        路径 A 设计：冻结通过 requires_grad=False 实现，参数仍在 optimizer 中
+        - 冻结的参数 grad=None，optimizer 不会更新
+        - 这样 resume_from_checkpoint 时参数组结构一致，不会 mismatch
 
         Args:
-            lr_stage1: Stage1 学习率
+            lr_stage1: Stage1 学习率（冻结时设为 0）
             lr_stage34: Stage3/4 学习率
             weight_decay: 权重衰减
 
         Returns:
-            list: optimizer 参数组
+            list: optimizer 参数组（固定 4 组：stage1, cls_head, stage3, stage4）
         """
-        param_groups = []
+        # 冻结时 lr=0（双保险：requires_grad=False + lr=0）
+        effective_lr_stage1 = 0.0 if self._stage1_frozen else lr_stage1
 
-        # Stage1: 只有未冻结时才添加
-        stage1_params = [p for p in self.stage1.parameters() if p.requires_grad]
-        if stage1_params:
-            param_groups.append({
-                "params": stage1_params,
-                "lr": lr_stage1,
-                "weight_decay": weight_decay,
-            })
-
-        # cls_head: 跟随 stage1 的冻结状态
-        cls_head_params = [p for p in self.cls_head.parameters() if p.requires_grad]
-        if cls_head_params:
-            param_groups.append({
-                "params": cls_head_params,
-                "lr": lr_stage1,
-                "weight_decay": weight_decay,
-            })
-
-        # Stage3
-        stage3_params = [p for p in self.stage3.parameters() if p.requires_grad]
-        if stage3_params:
-            param_groups.append({
-                "params": stage3_params,
+        param_groups = [
+            # Stage1: 始终包含，冻结时 lr=0
+            {
+                "params": list(self.stage1.parameters()),
+                "lr": effective_lr_stage1,
+                "weight_decay": weight_decay if not self._stage1_frozen else 0.0,
+                "name": "stage1",
+            },
+            # cls_head: 跟随 stage1
+            {
+                "params": list(self.cls_head.parameters()),
+                "lr": effective_lr_stage1,
+                "weight_decay": weight_decay if not self._stage1_frozen else 0.0,
+                "name": "cls_head",
+            },
+            # Stage3: 始终可训练
+            {
+                "params": list(self.stage3.parameters()),
                 "lr": lr_stage34,
                 "weight_decay": 0.0,
-            })
-
-        # Stage4
-        stage4_params = [p for p in self.stage4.parameters() if p.requires_grad]
-        if stage4_params:
-            param_groups.append({
-                "params": stage4_params,
+                "name": "stage3",
+            },
+            # Stage4: 始终可训练
+            {
+                "params": list(self.stage4.parameters()),
                 "lr": lr_stage34,
                 "weight_decay": 0.0,
-            })
+                "name": "stage4",
+            },
+        ]
 
         return param_groups
+
+    # 兼容旧代码
+    get_trainable_param_groups = get_param_groups
 
     def encode_with_micro_batch(
         self,

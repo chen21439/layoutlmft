@@ -219,10 +219,6 @@ class JointTrainingArguments(TrainingArguments):
     disable_stage34: bool = field(default=False, metadata={"help": "Disable Stage 3/4"})
     eval_before_train: bool = field(default=False, metadata={"help": "Run evaluation before training starts (to get baseline metrics)"})
 
-    # 注：删除了 resume_from_checkpoint 参数
-    # 现在统一使用 model_path 加载权重，optimizer 根据当前 freeze 设置重新创建
-    # 这样避免了"冻结设置改变导致 optimizer 参数组不匹配"的问题
-
     # 兼容旧参数
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
 
@@ -264,32 +260,31 @@ class JointTrainer(Trainer):
         """
         创建优化器，为不同模块设置不同学习率
 
-        使用 JointModel.get_trainable_param_groups() 获取参数组，
-        该方法会根据当前冻结状态自动过滤 requires_grad=False 的参数。
+        路径 A 设计：始终保持 4 个参数组（stage1, cls_head, stage3, stage4）
+        - 冻结的模块通过 requires_grad=False + lr=0 实现不更新
+        - 参数组结构不变，确保 resume_from_checkpoint 时 optimizer state 能正确加载
         """
         if self.optimizer is not None:
             return self.optimizer
 
-        # 使用模型提供的方法获取参数组（自动处理冻结状态）
-        optimizer_grouped_parameters = self.model.get_trainable_param_groups(
+        # 获取参数组（固定 4 组，冻结模块 lr=0）
+        optimizer_grouped_parameters = self.model.get_param_groups(
             lr_stage1=self.args.learning_rate,
             lr_stage34=self.learning_rate_stage34,
             weight_decay=self.args.weight_decay,
         )
 
-        # 过滤空参数组
-        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
-
-        if not optimizer_grouped_parameters:
-            raise ValueError("No trainable parameters found. Check freeze settings.")
-
         # 打印参数组信息
         total_params = sum(sum(p.numel() for p in g["params"]) for g in optimizer_grouped_parameters)
-        logger.info(f"[Optimizer] Creating AdamW with {len(optimizer_grouped_parameters)} param groups, "
-                    f"{total_params:,} trainable parameters")
-        for i, g in enumerate(optimizer_grouped_parameters):
+        trainable_params = sum(sum(p.numel() for p in g["params"] if p.requires_grad) for g in optimizer_grouped_parameters)
+        logger.info(f"[Optimizer] Creating AdamW with {len(optimizer_grouped_parameters)} param groups")
+        logger.info(f"[Optimizer] Total params: {total_params:,}, Trainable: {trainable_params:,}")
+        for g in optimizer_grouped_parameters:
+            name = g.get("name", "unknown")
             num_params = sum(p.numel() for p in g["params"])
-            logger.info(f"  Group {i}: lr={g['lr']}, params={num_params:,}")
+            num_trainable = sum(p.numel() for p in g["params"] if p.requires_grad)
+            frozen_tag = " (frozen)" if g["lr"] == 0 else ""
+            logger.info(f"  {name}: lr={g['lr']}, params={num_params:,}, trainable={num_trainable:,}{frozen_tag}")
 
         self.optimizer = AdamW(optimizer_grouped_parameters)
         return self.optimizer
@@ -1196,8 +1191,9 @@ def main():
         logger.info("=" * 60)
 
     logger.info("Starting training...")
-    # 注：不再传 resume_from_checkpoint，optimizer 根据当前 freeze 设置重新创建
-    train_result = trainer.train()
+    # 使用 HF Trainer 的 resume_from_checkpoint 参数
+    # 路径 A：参数组结构保持一致，可以正常 resume optimizer state
+    train_result = trainer.train(resume_from_checkpoint=joint_model_path)
 
     # 保存最终模型
     trainer.save_model()

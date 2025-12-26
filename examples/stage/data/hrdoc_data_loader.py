@@ -86,8 +86,9 @@ def load_hrdoc_raw_datasets_batched(
 
         print(f"[Batch {batch_idx+1}/{num_batches}] Processing files {start}-{end}...", flush=True)
 
-        # 处理这批文件
+        # 处理这批文件（带超时保护）
         batch_examples = []
+        batch_errors = 0
         for file_idx, filename in enumerate(batch_files):
             filepath = os.path.join(ann_dir, filename)
             doc_name = filename.replace('.json', '')
@@ -174,8 +175,13 @@ def load_hrdoc_raw_datasets_batched(
                         })
 
             except Exception as e:
-                print(f"  [Error] {filename}: {e}", flush=True)
+                batch_errors += 1
+                if batch_errors <= 3:  # 只打印前3个错误
+                    print(f"  [Error] {filename}: {e}", flush=True)
                 continue
+
+        if batch_errors > 0:
+            print(f"  [Warning] {batch_errors} files had errors in this batch", flush=True)
 
         # 保存批次
         if batch_examples:
