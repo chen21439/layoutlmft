@@ -526,7 +526,7 @@ class E2EEvaluationCallback(TrainerCallback):
         self.data_collator = data_collator
         self.compute_teds = compute_teds
         self._evaluator = None
-        # 历史评估记录：[(step, line_f1, parent_acc, rel_f1), ...]
+        # 历史评估记录：[(step, line_f1, line_acc, parent_acc, rel_f1, rel_acc), ...]
         self.history = []
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
@@ -580,27 +580,35 @@ class E2EEvaluationCallback(TrainerCallback):
 
         if avg_n > 0:
             recent = self.history[-avg_n:]
-            avg_line = sum(h[1] for h in recent) / avg_n
-            avg_parent = sum(h[2] for h in recent) / avg_n
-            avg_rel = sum(h[3] for h in recent) / avg_n
+            avg_line_f1 = sum(h[1] for h in recent) / avg_n
+            avg_line_acc = sum(h[2] for h in recent) / avg_n
+            avg_parent = sum(h[3] for h in recent) / avg_n
+            avg_rel_f1 = sum(h[4] for h in recent) / avg_n
+            avg_rel_acc = sum(h[5] for h in recent) / avg_n
 
-            delta_line = line_macro - avg_line
+            delta_line_f1 = line_macro - avg_line_f1
+            delta_line_acc = line_acc - avg_line_acc
             delta_parent = parent_acc - avg_parent
-            delta_rel = rel_macro - avg_rel
+            delta_rel_f1 = rel_macro - avg_rel_f1
+            delta_rel_acc = rel_acc - avg_rel_acc
 
             logger.info(f"║  Metric       │ Current  │  Avg({avg_n})  │  Delta       ║")
             logger.info("║───────────────┼──────────┼──────────┼──────────────║")
-            logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │  {avg_line:>5.1f}%  │  {fmt_delta(delta_line):>6}      ║")
+            logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │  {avg_line_f1:>5.1f}%  │  {fmt_delta(delta_line_f1):>6}      ║")
+            logger.info(f"║  Line(Acc)    │  {line_acc:>5.1f}%  │  {avg_line_acc:>5.1f}%  │  {fmt_delta(delta_line_acc):>6}      ║")
             logger.info(f"║  Parent(Acc)  │  {parent_acc:>5.1f}%  │  {avg_parent:>5.1f}%  │  {fmt_delta(delta_parent):>6}      ║")
-            logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │  {avg_rel:>5.1f}%  │  {fmt_delta(delta_rel):>6}      ║")
+            logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │  {avg_rel_f1:>5.1f}%  │  {fmt_delta(delta_rel_f1):>6}      ║")
+            logger.info(f"║  Rel(Acc)     │  {rel_acc:>5.1f}%  │  {avg_rel_acc:>5.1f}%  │  {fmt_delta(delta_rel_acc):>6}      ║")
 
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel)})"
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel_f1)})"
         else:
             logger.info(f"║  Metric       │ Current  │                           ║")
             logger.info("║───────────────┼──────────┼───────────────────────────║")
             logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │                           ║")
+            logger.info(f"║  Line(Acc)    │  {line_acc:>5.1f}%  │                           ║")
             logger.info(f"║  Parent(Acc)  │  {parent_acc:>5.1f}%  │                           ║")
             logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │                           ║")
+            logger.info(f"║  Rel(Acc)     │  {rel_acc:>5.1f}%  │                           ║")
             summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
 
         logger.info("╠══════════════════════════════════════════════════════════════╣")
@@ -609,7 +617,7 @@ class E2EEvaluationCallback(TrainerCallback):
         logger.info(summary)
 
         # 保存到历史记录
-        self.history.append((global_step, line_macro, parent_acc, rel_macro))
+        self.history.append((global_step, line_macro, line_acc, parent_acc, rel_macro, rel_acc))
 
     def _evaluate_e2e_legacy(self, model, device, global_step: int) -> Dict[str, float]:
         """运行端到端评估 - 调用共享的 hrdoc_eval.evaluate_e2e"""
