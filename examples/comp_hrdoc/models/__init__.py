@@ -125,6 +125,21 @@ __all__ = [
     'build_order_only_model',
     'save_order_only_model',
     'load_order_only_model',
+    # Order from Features
+    'OrderModuleFromFeatures',
+    'OrderLossFromFeatures',
+    'build_order_from_features',
+    'save_order_model',
+    'load_order_model',
+    # Construct-only Model (4.4)
+    'ConstructWithOrderFeatures',
+    'ConstructFromFeatures',
+    'build_construct_with_order',
+    'build_construct_from_features',
+    'save_construct_model',
+    'load_construct_model',
+    'compute_construct_metrics',
+    'generate_sibling_labels',
     # Intra-region Module (4.2)
     'IntraRegionHead',
     'IntraRegionLoss',
