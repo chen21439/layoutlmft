@@ -384,8 +384,12 @@ class JointTrainer(Trainer):
 
         # 保存 tokenizer 到根目录
         if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(output_dir)
-            logger.info(f"Tokenizer saved to {output_dir}")
+            try:
+                self.tokenizer.save_pretrained(output_dir)
+                logger.info(f"Tokenizer saved to {output_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to save tokenizer: {e}")
+                logger.warning("Tokenizer files may be incomplete, but model weights are saved correctly")
         else:
             logger.warning("Tokenizer is None, skipping tokenizer save")
 
@@ -933,9 +937,11 @@ def main():
     exp_manager.mark_stage_started(training_args.exp, "joint", data_args.dataset)
 
     # 加载 tokenizer
+    # 优先从配置文件的 base model 加载（确保完整），而不是从 joint checkpoint
     logger.info("Loading tokenizer...")
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
-    logger.info(f"Tokenizer loaded from: {model_args.model_name_or_path}")
+    tokenizer_path = config.model.local_path or config.model.name_or_path
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
+    logger.info(f"Tokenizer loaded from: {tokenizer_path}")
     assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集

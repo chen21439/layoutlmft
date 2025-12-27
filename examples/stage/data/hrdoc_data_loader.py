@@ -32,6 +32,8 @@ def load_hrdoc_raw_datasets_batched(
     dataset_name: str = "hrdh",
     batch_size: int = 100,
     cache_dir: str = None,
+    batch_timeout: int = 300,
+    skip_failed_batches: bool = True,
 ) -> DatasetDict:
     """
     分批加载大型数据集（如 HRDH），避免一次性处理所有文件导致卡住
@@ -40,19 +42,30 @@ def load_hrdoc_raw_datasets_batched(
     1. 将文件分成多个批次（每批 batch_size 个文件）
     2. 每批独立处理，保存为临时 Arrow 文件
     3. 最后合并所有批次
+    4. 如果某批次处理超时或失败，跳过它继续处理后续批次
 
     Args:
         data_dir: 数据目录（如 /data/HRDH）
         dataset_name: 数据集名称（hrdh, hrds, tender）
         batch_size: 每批处理的文件数
         cache_dir: 缓存目录，默认使用 {data_dir}/.cache
+        batch_timeout: 每批处理的超时时间（秒），默认 300 秒
+        skip_failed_batches: 是否跳过失败的批次继续处理（默认 True）
 
     Returns:
         合并后的 DatasetDict
     """
     import json
+    import signal
     from layoutlmft.data.utils import load_image, normalize_bbox
     from layoutlmft.data.labels import trans_class, LABEL2ID
+
+    # 超时异常
+    class BatchTimeoutError(Exception):
+        pass
+
+    def timeout_handler(signum, frame):
+        raise BatchTimeoutError("Batch processing timeout")
 
     if cache_dir is None:
         cache_dir = os.path.join(data_dir, ".cache", "batched")
@@ -66,8 +79,10 @@ def load_hrdoc_raw_datasets_batched(
     num_batches = (total_files + batch_size - 1) // batch_size
 
     print(f"[BatchLoader] Total {total_files} files, splitting into {num_batches} batches", flush=True)
+    print(f"[BatchLoader] Timeout per batch: {batch_timeout}s, skip_failed={skip_failed_batches}", flush=True)
 
     all_train_data = []
+    failed_batches = []
 
     for batch_idx in range(num_batches):
         start = batch_idx * batch_size
@@ -80,117 +95,176 @@ def load_hrdoc_raw_datasets_batched(
         batch_cache_dir = batch_cache.replace('.arrow', '')
         if os.path.exists(batch_cache_dir) and os.path.isdir(batch_cache_dir):
             print(f"[Batch {batch_idx+1}/{num_batches}] Loading from cache", flush=True)
-            batch_ds = Dataset.load_from_disk(batch_cache_dir)
-            all_train_data.append(batch_ds)
-            continue
+            try:
+                batch_ds = Dataset.load_from_disk(batch_cache_dir)
+                all_train_data.append(batch_ds)
+                continue
+            except Exception as e:
+                print(f"[Batch {batch_idx+1}/{num_batches}] Cache corrupted, reprocessing: {e}", flush=True)
 
         print(f"[Batch {batch_idx+1}/{num_batches}] Processing files {start}-{end}...", flush=True)
 
-        # 处理这批文件（带超时保护）
-        batch_examples = []
-        batch_errors = 0
-        for file_idx, filename in enumerate(batch_files):
-            filepath = os.path.join(ann_dir, filename)
-            doc_name = filename.replace('.json', '')
+        # 设置超时（仅在 Unix 系统上有效）
+        try:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(batch_timeout)
+        except (AttributeError, ValueError):
+            # Windows 或不支持 SIGALRM 的系统
+            old_handler = None
 
-            try:
-                with open(filepath, 'r', encoding='utf8') as f:
-                    data = json.load(f)
+        try:
+            # 处理这批文件（带超时保护）
+            batch_examples = []
+            batch_errors = 0
+            for file_idx, filename in enumerate(batch_files):
+                filepath = os.path.join(ann_dir, filename)
+                doc_name = filename.replace('.json', '')
 
-                # 按页分组
-                if isinstance(data, list):
-                    pages_data = {}
-                    for item in data:
-                        page_num = item.get("page", 0)
-                        if isinstance(page_num, str):
-                            page_num = int(page_num) if page_num.isdigit() else 0
-                        if page_num not in pages_data:
-                            pages_data[page_num] = []
-                        pages_data[page_num].append(item)
-                else:
-                    pages_data = {0: data.get("form", [])}
+                try:
+                    with open(filepath, 'r', encoding='utf8') as f:
+                        data = json.load(f)
 
-                # 处理每页
-                for page_num in sorted(pages_data.keys()):
-                    form_data = pages_data[page_num]
+                    # 按页分组
+                    if isinstance(data, list):
+                        pages_data = {}
+                        for item in data:
+                            page_num = item.get("page", 0)
+                            if isinstance(page_num, str):
+                                page_num = int(page_num) if page_num.isdigit() else 0
+                            if page_num not in pages_data:
+                                pages_data[page_num] = []
+                            pages_data[page_num].append(item)
+                    else:
+                        pages_data = {0: data.get("form", [])}
 
-                    # 查找图片
-                    img_path = os.path.join(img_dir, doc_name, f"{page_num}.png")
-                    if not os.path.exists(img_path):
-                        img_path = os.path.join(img_dir, doc_name, f"{page_num}.jpg")
-                    if not os.path.exists(img_path):
-                        img_path = os.path.join(img_dir, doc_name, f"{doc_name}_{page_num}.jpg")
-                    if not os.path.exists(img_path):
-                        continue
+                    # 处理每页
+                    for page_num in sorted(pages_data.keys()):
+                        form_data = pages_data[page_num]
 
-                    image, size = load_image(img_path)
+                        # 查找图片
+                        img_path = os.path.join(img_dir, doc_name, f"{page_num}.png")
+                        if not os.path.exists(img_path):
+                            img_path = os.path.join(img_dir, doc_name, f"{page_num}.jpg")
+                        if not os.path.exists(img_path):
+                            img_path = os.path.join(img_dir, doc_name, f"{doc_name}_{page_num}.jpg")
+                        if not os.path.exists(img_path):
+                            continue
 
-                    # 处理行
-                    tokens, bboxes, ner_tags, line_ids = [], [], [], []
-                    line_parent_ids, line_relations = [], []
+                        image, size = load_image(img_path)
 
-                    for item in form_data:
-                        label = trans_class(item.get("class", item.get("label", "paraline")),
-                                          all_lines=form_data, unit=item)
-                        if isinstance(label, str):
-                            label = LABEL2ID.get(label, 0)
+                        # 处理行
+                        tokens, bboxes, ner_tags, line_ids = [], [], [], []
+                        line_parent_ids, line_relations = [], []
 
-                        words = item.get("words", [{"text": item.get("text", ""), "box": item.get("box", [0,0,0,0])}])
-                        words = [w for w in words if w.get("text", "").strip()]
-                        if not words:
-                            words = [{"text": "[EMPTY]", "box": item.get("box", [0,0,0,0])}]
+                        for item in form_data:
+                            label = trans_class(item.get("class", item.get("label", "paraline")),
+                                              all_lines=form_data, unit=item)
+                            if isinstance(label, str):
+                                label = LABEL2ID.get(label, 0)
 
-                        item_line_id = item.get("line_id", item.get("id", 0))
-                        parent_id = item.get("parent_id", -1)
-                        if parent_id == "" or parent_id is None:
-                            parent_id = -1
-                        else:
-                            try:
-                                parent_id = int(parent_id)
-                            except:
+                            words = item.get("words", [{"text": item.get("text", ""), "box": item.get("box", [0,0,0,0])}])
+                            words = [w for w in words if w.get("text", "").strip()]
+                            if not words:
+                                words = [{"text": "[EMPTY]", "box": item.get("box", [0,0,0,0])}]
+
+                            item_line_id = item.get("line_id", item.get("id", 0))
+                            parent_id = item.get("parent_id", -1)
+                            if parent_id == "" or parent_id is None:
                                 parent_id = -1
+                            else:
+                                try:
+                                    parent_id = int(parent_id)
+                                except:
+                                    parent_id = -1
 
-                        relation = item.get("relation", "none") or "none"
-                        line_parent_ids.append(parent_id)
-                        line_relations.append(relation)
+                            relation = item.get("relation", "none") or "none"
+                            line_parent_ids.append(parent_id)
+                            line_relations.append(relation)
 
-                        for w in words:
-                            tokens.append(w.get("text", ""))
-                            ner_tags.append(label)
-                            bboxes.append(normalize_bbox(w.get("box", [0,0,0,0]), size))
-                            line_ids.append(item_line_id)
+                            for w in words:
+                                tokens.append(w.get("text", ""))
+                                ner_tags.append(label)
+                                bboxes.append(normalize_bbox(w.get("box", [0,0,0,0]), size))
+                                line_ids.append(item_line_id)
 
-                    if tokens:
-                        batch_examples.append({
-                            "id": f"{batch_idx}_{file_idx}_{page_num}",
-                            "document_name": doc_name,
-                            "page_number": page_num,
-                            "tokens": tokens,
-                            "bboxes": bboxes,
-                            "ner_tags": ner_tags,
-                            "image": image,
-                            "line_ids": line_ids,
-                            "line_parent_ids": line_parent_ids,
-                            "line_relations": line_relations,
-                        })
+                        if tokens:
+                            batch_examples.append({
+                                "id": f"{batch_idx}_{file_idx}_{page_num}",
+                                "document_name": doc_name,
+                                "page_number": page_num,
+                                "tokens": tokens,
+                                "bboxes": bboxes,
+                                "ner_tags": ner_tags,
+                                "image": image,
+                                "line_ids": line_ids,
+                                "line_parent_ids": line_parent_ids,
+                                "line_relations": line_relations,
+                            })
 
-            except Exception as e:
-                batch_errors += 1
-                if batch_errors <= 3:  # 只打印前3个错误
-                    print(f"  [Error] {filename}: {e}", flush=True)
-                continue
+                except Exception as e:
+                    batch_errors += 1
+                    if batch_errors <= 3:  # 只打印前3个错误
+                        print(f"  [Error] {filename}: {e}", flush=True)
+                    continue
 
-        if batch_errors > 0:
-            print(f"  [Warning] {batch_errors} files had errors in this batch", flush=True)
+                # 每处理 10 个文件，重置超时时间
+                if (file_idx + 1) % 10 == 0 and old_handler is not None:
+                    try:
+                        signal.alarm(batch_timeout)
+                    except:
+                        pass
 
-        # 保存批次
-        if batch_examples:
-            # 转换为 dict of lists 格式（兼容旧版 datasets）
-            batch_dict = {k: [ex[k] for ex in batch_examples] for k in batch_examples[0].keys()}
-            batch_ds = Dataset.from_dict(batch_dict)
-            batch_ds.save_to_disk(batch_cache.replace('.arrow', ''))
-            all_train_data.append(batch_ds)
-            print(f"  Saved {len(batch_examples)} examples to cache", flush=True)
+            # 取消超时
+            if old_handler is not None:
+                try:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                except:
+                    pass
+
+            if batch_errors > 0:
+                print(f"  [Warning] {batch_errors} files had errors in this batch", flush=True)
+
+            # 保存批次
+            if batch_examples:
+                # 转换为 dict of lists 格式（兼容旧版 datasets）
+                batch_dict = {k: [ex[k] for ex in batch_examples] for k in batch_examples[0].keys()}
+                batch_ds = Dataset.from_dict(batch_dict)
+                batch_ds.save_to_disk(batch_cache.replace('.arrow', ''))
+                all_train_data.append(batch_ds)
+                print(f"  Saved {len(batch_examples)} examples to cache", flush=True)
+
+        except BatchTimeoutError:
+            # 取消超时
+            if old_handler is not None:
+                try:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                except:
+                    pass
+            print(f"[Batch {batch_idx+1}/{num_batches}] TIMEOUT after {batch_timeout}s, skipping...", flush=True)
+            failed_batches.append(batch_idx + 1)
+            if not skip_failed_batches:
+                raise
+            continue
+
+        except Exception as batch_error:
+            # 取消超时
+            if old_handler is not None:
+                try:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+                except:
+                    pass
+            print(f"[Batch {batch_idx+1}/{num_batches}] FAILED: {batch_error}, skipping...", flush=True)
+            failed_batches.append(batch_idx + 1)
+            if not skip_failed_batches:
+                raise
+            continue
+
+    # 汇报失败的批次
+    if failed_batches:
+        print(f"[BatchLoader] WARNING: {len(failed_batches)} batches failed: {failed_batches}", flush=True)
 
     # 合并所有批次
     print(f"[BatchLoader] Merging {len(all_train_data)} batches...", flush=True)
