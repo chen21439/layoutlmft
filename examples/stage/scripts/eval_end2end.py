@@ -889,7 +889,6 @@ def main():
     print("\n" + "=" * 60)
     print("End-to-End Evaluation Completed!")
     print("=" * 60)
-    print(f"Predictions saved to: {pred_dir}")
     print("\nTo view detailed results, check the log output above.")
 
 
