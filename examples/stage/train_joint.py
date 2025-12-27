@@ -152,10 +152,7 @@ logger = logging.getLogger(__name__)
 class JointModelArguments:
     """联合模型参数"""
     model_name_or_path: str = field(
-        default=None, metadata={"help": "Stage 1 model path (if None, auto-detect from experiment)"}
-    )
-    model_path: str = field(
-        default=None, metadata={"help": "Alias for model_name_or_path (shorter name)"}
+        default=None, metadata={"help": "Stage1 base model or joint checkpoint path (HuggingFace ID or local path)"}
     )
     use_gru: bool = field(default=True, metadata={"help": "Use GRU decoder (paper method)"})
     use_soft_mask: bool = field(default=True, metadata={"help": "Use Soft-Mask (paper method)"})
@@ -776,12 +773,10 @@ def load_config_and_setup(data_args: JointDataArguments, training_args: JointTra
         name=training_args.exp_name or f"Joint {data_args.dataset.upper()}",
     )
 
-    # 设置模型路径（优先级：model_path > model_name_or_path > 自动检测）
-    if model_args.model_path:
-        model_args.model_name_or_path = model_args.model_path
+    # 设置模型路径（优先级：model_name_or_path > 自动检测）
+    if model_args.model_name_or_path:
         logger.info(f"Using manually specified model: {model_args.model_name_or_path}")
-
-    if model_args.model_name_or_path is None:
+    else:
         stage1_dir = exp_manager.get_stage_dir(training_args.exp, "stage1", data_args.dataset)
         stage1_model = get_latest_checkpoint(stage1_dir)
 
@@ -993,31 +988,25 @@ def main():
 
     # Stage 1: LayoutXLM
     # 简化后的加载逻辑：
-    #   - model_path 指定 joint checkpoint → 加载完整权重
-    #   - model_path 指定 LayoutXLM 目录 → 加载预训练权重
-    #   - 未指定 → 从头训练
+    #   - model_name_or_path 指向 joint checkpoint（有 stage1/ 和 pytorch_model.bin）→ 加载完整权重
+    #   - model_name_or_path 指向 LayoutXLM 目录 → 加载预训练权重
     joint_model_path = None
+    specified_path = model_args.model_name_or_path
 
-    if model_args.model_path:
-        specified_path = model_args.model_name_or_path
-        stage1_subdir = os.path.join(specified_path, "stage1")
-        joint_pytorch_model = os.path.join(specified_path, "pytorch_model.bin")
+    stage1_subdir = os.path.join(specified_path, "stage1")
+    joint_pytorch_model = os.path.join(specified_path, "pytorch_model.bin")
 
-        if os.path.isfile(os.path.join(stage1_subdir, "config.json")) and os.path.isfile(joint_pytorch_model):
-            # Joint checkpoint 结构：config from stage1/, weights from pytorch_model.bin
-            stage1_path = stage1_subdir
-            joint_model_path = specified_path
-            logger.info(f"Loading from joint checkpoint: {specified_path}")
-            logger.info(f"  - Stage1 config from: {stage1_path}")
-            logger.info(f"  - Weights will be loaded from: {joint_pytorch_model}")
-        else:
-            # 标准 LayoutXLM/HuggingFace 目录结构
-            stage1_path = specified_path
-            logger.info(f"Loading Stage 1 from: {stage1_path}")
+    if os.path.isfile(os.path.join(stage1_subdir, "config.json")) and os.path.isfile(joint_pytorch_model):
+        # Joint checkpoint 结构：config from stage1/, weights from pytorch_model.bin
+        stage1_path = stage1_subdir
+        joint_model_path = specified_path
+        logger.info(f"Loading from joint checkpoint: {specified_path}")
+        logger.info(f"  - Stage1 config from: {stage1_path}")
+        logger.info(f"  - Weights will be loaded from: {joint_pytorch_model}")
     else:
-        # 未指定 model_path，使用默认预训练模型
-        stage1_path = model_args.model_name_or_path
-        logger.info(f"Fresh start: Loading Stage 1 from: {stage1_path}")
+        # 标准 LayoutXLM/HuggingFace 目录结构
+        stage1_path = specified_path
+        logger.info(f"Loading Stage 1 from: {stage1_path}")
 
     stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
     stage1_config.num_labels = NUM_LABELS
@@ -1193,9 +1182,11 @@ def main():
         logger.info("=" * 60)
 
     logger.info("Starting training...")
-    # 使用 HF Trainer 的 resume_from_checkpoint 参数
-    # 路径 A：参数组结构保持一致，可以正常 resume optimizer state
-    train_result = trainer.train(resume_from_checkpoint=joint_model_path)
+    # 解法1：只加载模型权重，不恢复 optimizer state
+    # - 模型权重已在上面通过 load_state_dict() 加载
+    # - 不使用 resume_from_checkpoint，避免 optimizer 参数组不匹配
+    # - 创建新的 optimizer，支持 stage1_no_grad 改变冻结策略
+    train_result = trainer.train()
 
     # 保存最终模型
     trainer.save_model()
