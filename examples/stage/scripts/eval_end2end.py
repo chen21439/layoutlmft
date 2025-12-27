@@ -48,6 +48,11 @@ from util.checkpoint_utils import get_latest_checkpoint, get_best_model
 from util.experiment_manager import ensure_experiment
 from tasks.parent_finding import ParentFindingTask
 
+# 添加 examples/ 到路径（用于导入 models.build）
+EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)
+sys.path.insert(0, EXAMPLES_ROOT)
+from models.build import load_joint_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,116 +110,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_stage1_model(model_path: str, device: str):
-    """加载 Stage 1 模型（LayoutXLM）
-
-    Joint checkpoint 结构：
-        checkpoint-25/
-        ├── stage1/           # model config + weights
-        ├── tokenizer files   # tokenizer 在根目录
-    """
-    import torch
-
-    from layoutlmft.models.layoutxlm import (
-        LayoutXLMForTokenClassification,
-        LayoutXLMConfig,
-        LayoutXLMTokenizerFast,
-    )
-    from layoutlmft.data.labels import NUM_LABELS, get_id2label, get_label2id
-
-    logger.info(f"Loading Stage 1 model from: {model_path}")
-
-    # Load config and model
-    config = LayoutXLMConfig.from_pretrained(model_path)
-    config.num_labels = NUM_LABELS
-    config.id2label = get_id2label()
-    config.label2id = get_label2id()
-
-    model = LayoutXLMForTokenClassification.from_pretrained(model_path, config=config)
-    model.to(device)
-    model.eval()
-
-    # Load tokenizer（joint checkpoint 时 tokenizer 在父目录）
-    tokenizer_path = model_path
-    if model_path.endswith("/stage1") or model_path.endswith("\\stage1"):
-        tokenizer_path = os.path.dirname(model_path)
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
-
-    logger.info(f"  Loaded model with {NUM_LABELS} labels")
-    return model, tokenizer
-
-
-def load_stage3_model(model_path: str, device: str, use_gru: bool = True, num_classes: int = 14):
-    """加载 Stage 3 模型（ParentFinder）"""
-    import torch
-
-    logger.info(f"Loading Stage 3 model from: {model_path}")
-
-    # Load checkpoint or state_dict
-    checkpoint = torch.load(model_path, map_location=device)
-
-    # 根据模型类型创建
-    if use_gru:
-        from train_parent_finder import ParentFinderGRU
-        model = ParentFinderGRU(
-            hidden_size=768,
-            gru_hidden_size=512,
-            num_classes=num_classes,
-            dropout=0.1,
-            use_soft_mask=False,  # 推理时不需要 soft mask
-        )
-    else:
-        from train_parent_finder import SimpleParentFinder
-        model = SimpleParentFinder(hidden_size=768, dropout=0.1)
-
-    # 兼容两种保存格式：checkpoint (dict with 'model_state_dict') 或直接 state_dict
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        val_acc = checkpoint.get('val_acc', checkpoint.get('parent_acc', 'N/A'))
-    else:
-        model.load_state_dict(checkpoint)
-        val_acc = 'N/A'
-
-    model.to(device)
-    model.eval()
-
-    logger.info(f"  Loaded model with val_acc: {val_acc}")
-
-    return model
-
-
-def load_stage4_model(model_path: str, device: str):
-    """加载 Stage 4 模型（RelationClassifier）"""
-    import torch
-    from layoutlmft.models.relation_classifier import MultiClassRelationClassifier
-
-    logger.info(f"Loading Stage 4 model from: {model_path}")
-
-    # Load checkpoint or state_dict
-    checkpoint = torch.load(model_path, map_location=device)
-
-    # Create model
-    model = MultiClassRelationClassifier(
-        hidden_size=768,
-        num_relations=4,
-        use_geometry=True,
-        dropout=0.1
-    )
-
-    # 兼容两种保存格式：checkpoint (dict with 'model_state_dict') 或直接 state_dict
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        val_f1 = checkpoint.get('val_f1', 'N/A')
-    else:
-        model.load_state_dict(checkpoint)
-        val_f1 = 'N/A'
-
-    model.to(device)
-    model.eval()
-
-    logger.info(f"  Loaded model with val_f1: {val_f1}")
-
-    return model
+# 模型加载已统一使用 models/build.py 中的 load_joint_model()
+# 删除了原有的 load_stage1_model, load_stage3_model, load_stage4_model 函数
 
 
 def run_inference(
@@ -890,42 +787,31 @@ def main():
         print("\n[Dry run mode - exiting without evaluation]")
         return
 
-    # Check required paths
-    if not stage1_model_path or not os.path.exists(stage1_model_path):
-        logger.error(f"Stage 1 model not found: {stage1_model_path}")
-        logger.error("Please run Stage 1 training first.")
+    # 确定 checkpoint 目录
+    if args.checkpoint:
+        checkpoint_dir = args.checkpoint
+    else:
+        # 从 stage1_model_path 推导（stage1_model_path 是 checkpoint/stage1）
+        checkpoint_dir = os.path.dirname(stage1_model_path)
+
+    # 检查 checkpoint 目录
+    if not os.path.exists(checkpoint_dir):
+        logger.error(f"Checkpoint not found: {checkpoint_dir}")
         sys.exit(1)
 
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load models
+    # 使用统一的 load_joint_model 加载模型（复用 models/build.py）
     logger.info("\nLoading models...")
-    stage1_model, tokenizer = load_stage1_model(stage1_model_path, device)
+    model, tokenizer = load_joint_model(checkpoint_dir, device, config)
 
-    # Stage 3/4 models
-    stage3_model = None
-    stage4_model = None
-    if stage3_model_path and os.path.exists(stage3_model_path):
-        try:
-            stage3_model = load_stage3_model(stage3_model_path, device, use_gru=True)
-        except Exception as e:
-            logger.warning(f"Failed to load Stage 3 model: {e}")
-            logger.warning("Stage 3 model not loaded - parent prediction will default to ROOT")
-
-    if stage4_model_path and os.path.exists(stage4_model_path):
-        try:
-            stage4_model = load_stage4_model(stage4_model_path, device)
-        except Exception as e:
-            logger.warning(f"Failed to load Stage 4 model: {e}")
-            logger.warning("Will use heuristic rules for relation prediction")
-
-    # Run inference
+    # Run inference（从 JointModel 中提取各 stage）
     logger.info("\nRunning inference...")
     pred_dir = run_inference(
-        stage1_model=stage1_model,
-        stage3_model=stage3_model,
-        stage4_model=stage4_model,
+        stage1_model=model.stage1,
+        stage3_model=model.stage3,
+        stage4_model=model.stage4,
         tokenizer=tokenizer,
         data_dir=data_dir,
         output_dir=output_dir,
