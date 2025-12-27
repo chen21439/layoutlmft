@@ -68,8 +68,8 @@ def parse_args():
                         help="GPU ID to use (e.g., '0', '0,1'). Overrides config file.")
 
     # Dataset selection
-    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
-                        help="Dataset to evaluate: hrds or hrdh")
+    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh", "tender"],
+                        help="Dataset to evaluate: hrds, hrdh or tender")
 
     # Experiment management
     parser.add_argument("--exp", type=str, default=None,
@@ -122,6 +122,7 @@ def run_inference(
     data_dir: str,
     output_dir: str,
     device: str,
+    dataset_name: str = "hrds",
     max_samples: int = -1,
     batch_size: int = 1,
 ):
@@ -136,6 +137,7 @@ def run_inference(
         data_dir: 数据目录（包含 test 子目录）
         output_dir: 输出目录
         device: 设备
+        dataset_name: 数据集名称（hrds, hrdh, tender）
         max_samples: 最大样本数
         batch_size: 批大小
 
@@ -144,23 +146,39 @@ def run_inference(
     """
     import torch
     import numpy as np
-    from datasets import load_dataset
     from layoutlmft.data.labels import ID2LABEL, LABEL2ID
     from layoutlmft.models.relation_classifier import compute_geometry_features, RELATION_NAMES
 
+    # 复用训练代码的数据加载逻辑
+    from data import HRDocDataLoader, HRDocDataLoaderConfig
+
     logger.info("Running end-to-end inference...")
 
-    # Set environment for dataset loading
+    # 复用 train_joint.py 的数据加载逻辑
     os.environ["HRDOC_DATA_DIR"] = data_dir
 
-    # Load test dataset
-    import layoutlmft.data.datasets.hrdoc
-    datasets = load_dataset(os.path.abspath(layoutlmft.data.datasets.hrdoc.__file__))
+    loader_config = HRDocDataLoaderConfig(
+        data_dir=data_dir,
+        dataset_name=dataset_name,
+        max_length=512,
+        preprocessing_num_workers=1,
+        max_val_samples=max_samples if max_samples > 0 else None,
+    )
 
-    if "test" not in datasets:
-        raise ValueError("Test split not found in dataset")
+    data_loader = HRDocDataLoader(
+        tokenizer=tokenizer,
+        config=loader_config,
+        include_line_info=True,
+    )
 
-    test_dataset = datasets["test"]
+    data_loader.load_raw_datasets()
+    tokenized_datasets = data_loader.prepare_datasets()
+
+    # 使用 validation 或 test 数据集
+    test_dataset = tokenized_datasets.get("test") or tokenized_datasets.get("validation")
+    if test_dataset is None:
+        raise ValueError("Test/validation split not found in dataset")
+
     logger.info(f"Test dataset size: {len(test_dataset)}")
 
     if max_samples > 0:
@@ -816,6 +834,7 @@ def main():
         data_dir=data_dir,
         output_dir=output_dir,
         device=device,
+        dataset_name=args.dataset,
         max_samples=args.max_samples,
         batch_size=args.batch_size,
     )
