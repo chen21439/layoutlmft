@@ -820,50 +820,70 @@ def main():
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
 
-    # 使用统一的 load_joint_model 加载模型（复用 models/build.py）
+    # ==================== 复用训练代码的逻辑 ====================
+    # 参考 train_joint.py 的评估流程
+
+    # 1. 加载模型（复用 models/build.py）
     logger.info("\nLoading models...")
     model, tokenizer = load_joint_model(checkpoint_dir, device, config)
 
-    # Run inference（从 JointModel 中提取各 stage）
-    logger.info("\nRunning inference...")
-    pred_dir = run_inference(
-        stage1_model=model.stage1,
-        stage3_model=model.stage3,
-        stage4_model=model.stage4,
-        tokenizer=tokenizer,
+    # 2. 加载数据（复用 train_joint.py 的 HRDocDataLoader）
+    logger.info("\nLoading evaluation dataset...")
+    from data import HRDocDataLoader, HRDocDataLoaderConfig
+    from joint_data_collator import HRDocJointDataCollator
+
+    os.environ["HRDOC_DATA_DIR"] = data_dir
+    loader_config = HRDocDataLoaderConfig(
         data_dir=data_dir,
-        output_dir=output_dir,
-        device=device,
         dataset_name=args.dataset,
-        max_samples=args.max_samples,
-        batch_size=args.batch_size,
+        max_length=512,
+        preprocessing_num_workers=1,
+        max_val_samples=args.max_samples if args.max_samples > 0 else None,
     )
 
-    if args.generate_only:
-        logger.info("\n[Generate only mode - skipping evaluation]")
-        logger.info(f"Predictions saved to: {pred_dir}")
-        return
+    data_loader = HRDocDataLoader(
+        tokenizer=tokenizer,
+        config=loader_config,
+        include_line_info=True,
+    )
+    data_loader.load_raw_datasets()
+    tokenized_datasets = data_loader.prepare_datasets()
 
-    # Run evaluations
-    eval_results = {}
+    # 使用 test 或 validation 数据集
+    eval_dataset = tokenized_datasets.get("test") or tokenized_datasets.get("validation")
+    if eval_dataset is None or len(eval_dataset) == 0:
+        logger.error("No evaluation dataset found!")
+        sys.exit(1)
 
-    if not args.skip_classify:
-        classify_result = run_classify_eval(gt_dir, pred_dir, use_subprocess=False)
-        if classify_result:
-            eval_results["classify"] = classify_result
+    logger.info(f"Evaluation dataset: {len(eval_dataset)} samples")
 
-    if not args.skip_teds:
-        teds_result = run_teds_eval(gt_dir, pred_dir, use_subprocess=False)
-        if teds_result:
-            eval_results["teds"] = teds_result
+    # 3. 创建 DataLoader（复用 train_joint.py 的 collator）
+    data_collator = HRDocJointDataCollator(
+        tokenizer=tokenizer,
+        max_length=512,
+    )
 
-    # Save evaluation results
-    if eval_results:
-        results_file = os.path.join(output_dir, "eval_results.json")
-        with open(results_file, "w", encoding="utf-8") as f:
-            # Convert numpy arrays to lists for JSON serialization
-            json.dump(eval_results, f, indent=2, default=lambda x: x.tolist() if hasattr(x, 'tolist') else x)
-        logger.info(f"Evaluation results saved to: {results_file}")
+    eval_dataloader = torch.utils.data.DataLoader(
+        eval_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=data_collator,
+        num_workers=0,
+    )
+
+    # 4. 使用 Evaluator 进行评估（复用 engines/evaluator.py）
+    logger.info("\nRunning evaluation...")
+    from engines.evaluator import Evaluator
+
+    evaluator = Evaluator(model, device)
+    output = evaluator.evaluate(
+        eval_dataloader,
+        compute_teds=not args.skip_teds,
+        verbose=True,
+    )
+
+    # 5. 打印结果
+    evaluator.print_results(output)
 
     # Summary
     print("\n" + "=" * 60)
