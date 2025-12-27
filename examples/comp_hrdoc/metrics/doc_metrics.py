@@ -210,24 +210,25 @@ class DOCMetricsComputer:
             self.parent_labels.extend(labels[valid].tolist())
 
         # Construct - Root (parent_label == -1 表示根节点)
-        if parent_labels is not None:
+        if parent_labels is not None and parent_preds is not None:
             labels = parent_labels.cpu().numpy().flatten()
+            preds = parent_preds.cpu().numpy()
             mask_flat = mask_np.flatten() if mask_np is not None else np.ones_like(labels, dtype=bool)
-            # 真实根节点: parent_label == -1
-            is_root_label = (labels == -1) & mask_flat
-            self.root_labels.extend(is_root_label.astype(int).tolist())
 
-            if parent_preds is not None:
-                preds = parent_preds.cpu().numpy()
-                # 预测为根节点: 预测自己为父节点
-                B, N = parent_preds.shape if len(parent_preds.shape) == 2 else (1, len(parent_preds))
-                indices = np.arange(N)
-                if len(preds.shape) == 1:
-                    is_root_pred = (preds == indices)
-                else:
-                    is_root_pred = (preds == indices[None, :]).flatten()
-                is_root_pred = is_root_pred[mask_flat]
-                self.root_preds.extend(is_root_pred.astype(int).tolist())
+            # 真实根节点: parent_label == -1
+            is_root_label = (labels == -1)
+
+            # 预测为根节点: 预测自己为父节点
+            B, N = parent_preds.shape if len(parent_preds.shape) == 2 else (1, len(parent_preds))
+            indices = np.arange(N)
+            if len(preds.shape) == 1:
+                is_root_pred = (preds == indices)
+            else:
+                is_root_pred = (preds == indices[None, :]).flatten()
+
+            # 只收集mask有效的元素
+            self.root_labels.extend(is_root_label[mask_flat].astype(int).tolist())
+            self.root_preds.extend(is_root_pred[mask_flat].astype(int).tolist())
 
         # Construct - Sibling
         if sibling_preds is not None and sibling_labels is not None:
