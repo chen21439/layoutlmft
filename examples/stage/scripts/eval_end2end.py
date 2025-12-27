@@ -70,7 +70,11 @@ def parse_args():
     parser.add_argument("--exp", type=str, default=None,
                         help="Experiment ID (default: current or latest)")
 
-    # Override paths
+    # Joint checkpoint (recommended)
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Joint checkpoint directory (contains stage1/, stage3.pt, stage4.pt)")
+
+    # Override paths (legacy, prefer --checkpoint)
     parser.add_argument("--stage1_model", type=str, default=None,
                         help="Override Stage 1 model path")
     parser.add_argument("--stage3_model", type=str, default=None,
@@ -808,48 +812,32 @@ def main():
     )
 
     # Determine paths
-    # Stage 1 model
-    if args.stage1_model:
-        stage1_model_path = args.stage1_model
+    # 优先使用 --checkpoint（推荐方式）
+    if args.checkpoint:
+        # Joint checkpoint 模式：从一个目录加载所有 stage
+        checkpoint_dir = args.checkpoint
+        stage1_model_path = os.path.join(checkpoint_dir, "stage1")
+        stage3_model_path = os.path.join(checkpoint_dir, "stage3.pt")
+        stage4_model_path = os.path.join(checkpoint_dir, "stage4.pt")
+        logger.info(f"Using joint checkpoint: {checkpoint_dir}")
     else:
-        stage1_dir = exp_manager.get_stage_dir(args.exp, "stage1", args.dataset)
-        stage1_model_path = get_latest_checkpoint(stage1_dir)
+        # 自动查找模式：从 joint 训练目录查找
+        joint_dir = exp_manager.get_stage_dir(args.exp, "joint", args.dataset)
+        joint_checkpoint = get_latest_checkpoint(joint_dir)
 
-    # Stage 3 model
-    if args.stage3_model:
-        stage3_model_path = args.stage3_model
-    else:
-        # 优先从单独的 stage3 目录查找
-        stage3_dir = exp_manager.get_stage_dir(args.exp, "stage3", args.dataset)
-        stage3_model_path = get_best_model(stage3_dir)
-
-        # 如果没找到，尝试从 joint 训练目录查找
-        if not stage3_model_path:
-            joint_dir = exp_manager.get_stage_dir(args.exp, "joint", args.dataset)
-            joint_checkpoint = get_latest_checkpoint(joint_dir)
-            if joint_checkpoint:
-                joint_stage3_path = os.path.join(joint_checkpoint, "stage3.pt")
-                if os.path.exists(joint_stage3_path):
-                    stage3_model_path = joint_stage3_path
-                    logger.info(f"Using Stage 3 model from joint training: {stage3_model_path}")
-
-    # Stage 4 model
-    if args.stage4_model:
-        stage4_model_path = args.stage4_model
-    else:
-        # 优先从单独的 stage4 目录查找
-        stage4_dir = exp_manager.get_stage_dir(args.exp, "stage4", args.dataset)
-        stage4_model_path = get_best_model(stage4_dir)
-
-        # 如果没找到，尝试从 joint 训练目录查找
-        if not stage4_model_path:
-            joint_dir = exp_manager.get_stage_dir(args.exp, "joint", args.dataset)
-            joint_checkpoint = get_latest_checkpoint(joint_dir)
-            if joint_checkpoint:
-                joint_stage4_path = os.path.join(joint_checkpoint, "stage4.pt")
-                if os.path.exists(joint_stage4_path):
-                    stage4_model_path = joint_stage4_path
-                    logger.info(f"Using Stage 4 model from joint training: {stage4_model_path}")
+        if joint_checkpoint:
+            stage1_model_path = args.stage1_model or os.path.join(joint_checkpoint, "stage1")
+            stage3_model_path = args.stage3_model or os.path.join(joint_checkpoint, "stage3.pt")
+            stage4_model_path = args.stage4_model or os.path.join(joint_checkpoint, "stage4.pt")
+            logger.info(f"Using joint checkpoint: {joint_checkpoint}")
+        else:
+            # 无 joint checkpoint，使用单独的 stage 路径
+            stage1_model_path = args.stage1_model or get_latest_checkpoint(
+                exp_manager.get_stage_dir(args.exp, "stage1", args.dataset))
+            stage3_model_path = args.stage3_model or get_best_model(
+                exp_manager.get_stage_dir(args.exp, "stage3", args.dataset))
+            stage4_model_path = args.stage4_model or get_best_model(
+                exp_manager.get_stage_dir(args.exp, "stage4", args.dataset))
 
     # Output directory
     if args.output_dir:
