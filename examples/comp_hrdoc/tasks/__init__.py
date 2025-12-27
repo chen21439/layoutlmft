@@ -1,5 +1,20 @@
 # tasks - 任务定义层
 # base.py: Task 基类接口 (loss/decode/metrics)
-# detect.py: Detect 任务
-# order.py: Order 任务
-# construct.py: Construct 任务
+# doc_tasks.py: DOC模型任务 (Detect/Order/Construct)
+
+from .base import BaseTask
+
+from .doc_tasks import (
+    DetectTask,
+    OrderTask,
+    ConstructTask,
+    DOCTask,
+)
+
+__all__ = [
+    'BaseTask',
+    'DetectTask',
+    'OrderTask',
+    'ConstructTask',
+    'DOCTask',
+]

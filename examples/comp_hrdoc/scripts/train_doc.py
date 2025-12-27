@@ -268,29 +268,31 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
-    """Evaluate model"""
-    from sklearn.metrics import f1_score
+    """Evaluate model using DOCTask metrics
+
+    计算完整的 Detect-Order-Construct 指标:
+    - 4.2 Detect: Accuracy, Macro F1
+    - 4.3 Order: Accuracy, F1
+    - 4.4 Construct: Parent/Sibling/Root Accuracy, F1
+    """
+    from examples.comp_hrdoc.tasks import DOCTask
+    import math
 
     model.eval()
+
+    # Initialize metrics
+    doc_task = DOCTask({'num_classes': 5})
+    doc_task.reset_metrics()
 
     total_loss = 0.0
     total_cls_loss = 0.0
     total_order_loss = 0.0
     total_construct_loss = 0.0
-    total_order_correct = 0
-    total_order_count = 0
-    total_cls_correct = 0
-    total_cls_count = 0
     num_batches = 0
 
-    # Collect all predictions and labels for F1 computation
-    all_order_preds = []
-    all_order_labels = []
-    all_cls_preds = []
-    all_cls_labels = []
-
-    # Check if model uses semantic classification
+    # Check if model uses semantic classification and construct
     use_semantic = getattr(model, 'use_semantic', False)
+    use_construct = getattr(model, 'use_construct', False)
 
     for batch in tqdm(dataloader, desc="Evaluating"):
         bboxes = batch["bboxes"].to(device)
@@ -318,6 +320,7 @@ def evaluate(
             category_labels=categories if use_semantic else None,
         )
 
+        # Accumulate losses
         loss_val = outputs["loss"].item()
 
         cls_loss = outputs.get("cls_loss", torch.tensor(0.0))
@@ -332,8 +335,7 @@ def evaluate(
         if isinstance(construct_loss, torch.Tensor):
             construct_loss = construct_loss.item()
 
-        # Skip NaN losses and report
-        import math
+        # Skip NaN losses
         if math.isnan(loss_val) or math.isnan(construct_loss):
             logger.warning(f"NaN in eval batch {num_batches}: loss={loss_val}, order={order_loss}, construct={construct_loss}")
             if not math.isnan(order_loss):
@@ -344,67 +346,29 @@ def evaluate(
             total_order_loss += order_loss
             total_construct_loss += construct_loss
 
-        # Compute successor predictions (论文4.2.3: argmax for each row)
-        order_logits = outputs["order_logits"]
-        # 对每行做 argmax 得到预测的后继
-        pred_successors = order_logits.argmax(dim=-1)  # [B, N]
+        # Prepare targets dict
+        targets = {
+            'categories': categories,
+            'successor_labels': successor_labels,
+            'parent_labels': parent_ids,
+            'sibling_labels': sibling_labels,
+        }
 
-        # Accumulate successor accuracy stats per batch (论文指标)
-        correct = (pred_successors == successor_labels) & region_mask
-        total_order_correct += correct.sum().item()
-        total_order_count += region_mask.sum().item()
-
-        # Collect predictions for F1 (only valid regions)
-        # For order: use binary correct/incorrect for F1
-        mask_flat = region_mask.view(-1).cpu().numpy()
-        pred_flat = pred_successors.view(-1).cpu().numpy()
-        label_flat = successor_labels.view(-1).cpu().numpy()
-        # Collect binary correctness (1=correct, 0=incorrect) for order F1
-        order_correct_flat = (pred_flat == label_flat).astype(int)
-        all_order_preds.extend(order_correct_flat[mask_flat.astype(bool)])
-        all_order_labels.extend([1] * int(mask_flat.sum()))  # All should be 1 (correct)
-
-        # Compute category accuracy if semantic classification enabled
-        if use_semantic and "category_logits" in outputs:
-            pred_categories = outputs["category_logits"].argmax(dim=-1)
-            cls_correct = (pred_categories == categories) & region_mask
-            total_cls_correct += cls_correct.sum().item()
-            total_cls_count += region_mask.sum().item()
-
-            # Collect for F1
-            pred_cls_flat = pred_categories.view(-1).cpu().numpy()
-            label_cls_flat = categories.view(-1).cpu().numpy()
-            all_cls_preds.extend(pred_cls_flat[mask_flat.astype(bool)])
-            all_cls_labels.extend(label_cls_flat[mask_flat.astype(bool)])
+        # Update metrics using DOCTask
+        doc_task.update_metrics(outputs, targets, region_mask)
 
         num_batches += 1
 
-    # Compute accuracies
-    order_acc = total_order_correct / max(total_order_count, 1)
-    cls_acc = total_cls_correct / max(total_cls_count, 1) if use_semantic else 0.0
+    # Compute final metrics
+    metrics = doc_task.compute_metrics()
 
-    # Compute F1 scores
-    # Order F1: binary (correct vs incorrect prediction)
-    order_f1 = f1_score(all_order_labels, all_order_preds, average='binary', zero_division=0)
+    # Add loss metrics
+    metrics["loss"] = total_loss / max(num_batches, 1)
+    metrics["cls_loss"] = total_cls_loss / max(num_batches, 1)
+    metrics["order_loss"] = total_order_loss / max(num_batches, 1)
+    metrics["construct_loss"] = total_construct_loss / max(num_batches, 1)
 
-    # Classification F1: macro average over all categories
-    cls_f1 = 0.0
-    if use_semantic and len(all_cls_preds) > 0:
-        cls_f1 = f1_score(all_cls_labels, all_cls_preds, average='macro', zero_division=0)
-
-    results = {
-        "loss": total_loss / num_batches,
-        "cls_loss": total_cls_loss / num_batches,
-        "order_loss": total_order_loss / num_batches,
-        "construct_loss": total_construct_loss / num_batches,
-        "order_accuracy": order_acc,
-        "order_f1": order_f1,
-    }
-    if use_semantic:
-        results["cls_accuracy"] = cls_acc
-        results["cls_f1"] = cls_f1
-
-    return results
+    return metrics
 
 
 def main():
@@ -598,10 +562,28 @@ def main():
             val_log += f", Cls: {val_metrics['cls_loss']:.4f}"
         logger.info(val_log)
 
-        acc_log = f"Val - Order Accuracy: {val_metrics['order_accuracy']:.4f}, Order F1: {val_metrics['order_f1']:.4f}"
+        # Log metrics for each module
+        # 4.2 Detect
         if args.use_semantic and 'cls_accuracy' in val_metrics:
-            acc_log += f", Cls Accuracy: {val_metrics['cls_accuracy']:.4f}, Cls F1: {val_metrics['cls_f1']:.4f}"
-        logger.info(acc_log)
+            logger.info(
+                f"[4.2 Detect] Accuracy: {val_metrics['cls_accuracy']:.4f}, "
+                f"Macro F1: {val_metrics.get('cls_macro_f1', 0):.4f}"
+            )
+
+        # 4.3 Order
+        logger.info(
+            f"[4.3 Order] Accuracy: {val_metrics['order_accuracy']:.4f}, "
+            f"F1: {val_metrics['order_f1']:.4f}"
+        )
+
+        # 4.4 Construct
+        if args.use_construct and 'parent_accuracy' in val_metrics:
+            logger.info(
+                f"[4.4 Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
+                f"Parent F1: {val_metrics.get('parent_f1', 0):.4f}, "
+                f"Sibling Acc: {val_metrics.get('sibling_accuracy', 0):.4f}, "
+                f"Root Acc: {val_metrics.get('root_accuracy', 0):.4f}"
+            )
 
         # Save best model
         if val_metrics['order_accuracy'] > best_order_acc:

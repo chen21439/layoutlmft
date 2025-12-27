@@ -105,6 +105,7 @@ class JointModel(nn.Module):
         stage1_no_grad: bool = False,
         freeze_visual: bool = False,
         cls_dropout: float = 0.1,  # 分类头 dropout
+        use_gt_class: bool = False,  # 使用 GT class 而不是 Stage1 预测（用于 Stage2 训练）
     ):
         super().__init__()
 
@@ -137,6 +138,7 @@ class JointModel(nn.Module):
         self.stage1_micro_batch_size = stage1_micro_batch_size
         self.stage1_no_grad = stage1_no_grad
         self.num_classes = num_classes
+        self.use_gt_class = use_gt_class  # 使用 GT class 而不是 Stage1 预测
 
         # 保存旧接口的引用（兼容性）
         self.stage1 = stage1_model
@@ -583,7 +585,23 @@ class JointModel(nn.Module):
             if self.use_gru:
                 # 准备传入 Stage 3 的 cls_logits
                 stage1_cls_logits = None
-                if outputs.get("logits") is not None:
+
+                if self.use_gt_class and line_labels is not None:
+                    # 使用 GT class 构建 one-hot 向量（用于 Stage 2 训练）
+                    # line_labels: [num_docs, max_lines]，值为类别索引或 -100
+                    max_lines = line_labels.shape[1]
+                    gt_one_hot = torch.zeros(num_docs, max_lines, self.num_classes, device=device)
+                    for b in range(num_docs):
+                        num_lines = int(line_mask[b].sum().item())
+                        for line_idx in range(num_lines):
+                            label = line_labels[b, line_idx].item()
+                            if 0 <= label < self.num_classes:
+                                gt_one_hot[b, line_idx, label] = 1.0
+                    stage1_cls_logits = gt_one_hot * 10.0  # 放大以模拟高置信度 logits
+                    if not hasattr(self, '_logged_using_gt_class'):
+                        print(f"[JointModel] 使用 GT class (one-hot) 作为 Stage3 的 cls_logits")
+                        self._logged_using_gt_class = True
+                elif outputs.get("logits") is not None:
                     if self.use_line_level_cls:
                         # Line-level 模式：直接使用 outputs["logits"]
                         # outputs["logits"]: [num_docs, max_lines, num_classes]
@@ -613,7 +631,7 @@ class JointModel(nn.Module):
                 parent_logits, gru_hidden = self.stage3(
                     line_features, line_mask,
                     return_gru_hidden=True,
-                    cls_logits=stage1_cls_logits  # 传入 Stage 1 的分类 logits
+                    cls_logits=stage1_cls_logits  # 传入 Stage 1 的分类 logits 或 GT one-hot
                 )
                 # gru_hidden: [num_docs, L+1, gru_hidden_size]，包括 ROOT
 

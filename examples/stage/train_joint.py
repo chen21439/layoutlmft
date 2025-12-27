@@ -167,6 +167,7 @@ class JointModelArguments:
     stage1_no_grad: bool = field(default=True, metadata={"help": "Freeze Stage1 (saves memory, only train Stage3/4)"})
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Enable gradient checkpointing for Stage1 (saves ~50-70% GPU memory, slower training)"})
     freeze_visual: bool = field(default=False, metadata={"help": "Freeze visual encoder (ResNet) while training Transformer. Use with stage1_no_grad=False."})
+    use_gt_class: bool = field(default=False, metadata={"help": "Use GT class labels (one-hot) for Stage3/4 instead of Stage1 predictions. Useful for Stage2 training."})
 
 
 @dataclass
@@ -1113,6 +1114,7 @@ def main():
         stage1_micro_batch_size=model_args.stage1_micro_batch_size,
         freeze_visual=model_args.freeze_visual,
         stage1_no_grad=model_args.stage1_no_grad,
+        use_gt_class=model_args.use_gt_class,
     )
     logger.info(f"Stage1: micro_batch={model_args.stage1_micro_batch_size}, no_grad={model_args.stage1_no_grad}, grad_ckpt={model_args.gradient_checkpointing}, freeze_visual={model_args.freeze_visual}")
 

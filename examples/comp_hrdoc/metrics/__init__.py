@@ -44,6 +44,17 @@ from .common import (
     EvaluationReport,
 )
 
+from .doc_metrics import (
+    DOCMetrics,
+    DOCMetricsComputer,
+    DetectMetrics,
+    OrderMetrics,
+    ConstructMetrics,
+    compute_detect_metrics,
+    compute_order_metrics,
+    compute_construct_metrics,
+)
+
 __all__ = [
     # TEDS
     'TEDSMetric',
@@ -75,4 +86,13 @@ __all__ = [
     'compute_pairwise_accuracy',
     'compute_successor_accuracy',
     'EvaluationReport',
+    # DOC Metrics
+    'DOCMetrics',
+    'DOCMetricsComputer',
+    'DetectMetrics',
+    'OrderMetrics',
+    'ConstructMetrics',
+    'compute_detect_metrics',
+    'compute_order_metrics',
+    'compute_construct_metrics',
 ]
