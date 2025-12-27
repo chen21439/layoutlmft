@@ -106,11 +106,15 @@ def parse_args():
 
 
 def load_stage1_model(model_path: str, device: str):
-    """加载 Stage 1 模型（LayoutXLM）"""
-    import torch
-    from transformers import AutoConfig
+    """加载 Stage 1 模型（LayoutXLM）
 
-    # Import LayoutXLM
+    Joint checkpoint 结构：
+        checkpoint-25/
+        ├── stage1/           # model config + weights
+        ├── tokenizer files   # tokenizer 在根目录
+    """
+    import torch
+
     from layoutlmft.models.layoutxlm import (
         LayoutXLMForTokenClassification,
         LayoutXLMConfig,
@@ -120,25 +124,23 @@ def load_stage1_model(model_path: str, device: str):
 
     logger.info(f"Loading Stage 1 model from: {model_path}")
 
-    # Load config
+    # Load config and model
     config = LayoutXLMConfig.from_pretrained(model_path)
     config.num_labels = NUM_LABELS
     config.id2label = get_id2label()
     config.label2id = get_label2id()
 
-    # Load model
-    model = LayoutXLMForTokenClassification.from_pretrained(
-        model_path,
-        config=config,
-    )
+    model = LayoutXLMForTokenClassification.from_pretrained(model_path, config=config)
     model.to(device)
     model.eval()
 
-    # Load tokenizer
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_path)
+    # Load tokenizer（joint checkpoint 时 tokenizer 在父目录）
+    tokenizer_path = model_path
+    if model_path.endswith("/stage1") or model_path.endswith("\\stage1"):
+        tokenizer_path = os.path.dirname(model_path)
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
 
     logger.info(f"  Loaded model with {NUM_LABELS} labels")
-
     return model, tokenizer
 
 
