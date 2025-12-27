@@ -216,6 +216,7 @@ class JointTrainingArguments(TrainingArguments):
     # 功能开关
     disable_stage34: bool = field(default=False, metadata={"help": "Disable Stage 3/4"})
     eval_before_train: bool = field(default=False, metadata={"help": "Run evaluation before training starts (to get baseline metrics)"})
+    save_predictions: bool = field(default=False, metadata={"help": "Save prediction results during evaluation (for inference)"})
 
     # 兼容旧参数
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
@@ -519,10 +520,13 @@ class E2EEvaluationCallback(TrainerCallback):
     使用新的 engines/evaluator.py 统一接口
     """
 
-    def __init__(self, eval_dataloader, data_collator, compute_teds: bool = False):
+    def __init__(self, eval_dataloader, data_collator, compute_teds: bool = False,
+                 save_predictions: bool = False, output_dir: str = None):
         self.eval_dataloader = eval_dataloader
         self.data_collator = data_collator
         self.compute_teds = compute_teds
+        self.save_predictions = save_predictions
+        self.output_dir = output_dir
         self._evaluator = None
         # 历史评估记录：[(step, line_f1, line_acc, parent_acc, rel_f1, rel_acc), ...]
         self.history = []

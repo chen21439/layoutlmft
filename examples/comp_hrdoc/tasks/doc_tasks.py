@@ -467,11 +467,23 @@ class DOCTask:
         # Construct
         if 'parent_logits' in outputs:
             parent_preds = outputs['parent_logits'].argmax(dim=-1)
+            parent_labels = targets.get('parent_labels')
             self.metrics_computer.update(
                 parent_preds=parent_preds,
-                parent_labels=targets.get('parent_labels'),
+                parent_labels=parent_labels,
                 mask=mask,
             )
+            # Root: 复用 construct_only.py 的逻辑
+            # is_root_gt = (parent_labels == -1)
+            # is_root_pred = (root_logits > 0)
+            if 'root_logits' in outputs and parent_labels is not None:
+                root_preds = (outputs['root_logits'] > 0).long()
+                root_labels = (parent_labels == -1).long()
+                self.metrics_computer.update(
+                    root_preds=root_preds,
+                    root_labels=root_labels,
+                    mask=mask,
+                )
 
         if 'sibling_logits' in outputs:
             sibling_preds = outputs['sibling_logits'].argmax(dim=-1)
