@@ -319,6 +319,34 @@ class HRDocDocumentLevelCollator:
             batch["line_parent_ids"] = torch.tensor(padded_parent_ids, dtype=torch.long)
             batch["line_relations"] = torch.tensor(padded_relations, dtype=torch.long)
 
+            # 提取 line_labels（用于 section_parent_weight 加权）
+            padded_line_labels = []
+            chunk_idx = 0
+            for doc_idx in range(batch_size):
+                num_chunks = chunks_per_doc[doc_idx]
+                num_lines = len(all_line_parent_ids[doc_idx])
+
+                # 合并该文档所有 chunks 的 labels 和 line_ids
+                doc_labels = []
+                doc_line_ids = []
+                for i in range(chunk_idx, chunk_idx + num_chunks):
+                    if i < len(padded_labels):
+                        doc_labels.extend(padded_labels[i])
+                    if i < len(padded_line_ids):
+                        doc_line_ids.extend(padded_line_ids[i])
+                chunk_idx += num_chunks
+
+                # 提取每行的 label
+                line_labels = [-100] * max_lines
+                for line_idx in range(num_lines):
+                    for token_label, token_line_id in zip(doc_labels, doc_line_ids):
+                        if token_line_id == line_idx and token_label >= 0:
+                            line_labels[line_idx] = token_label
+                            break
+                padded_line_labels.append(line_labels)
+
+            batch["line_labels"] = torch.tensor(padded_line_labels, dtype=torch.long)
+
         # doc_id 用于调试（不转为 tensor，保持字符串列表）
         batch["doc_id"] = document_names
         batch["json_paths"] = json_paths
