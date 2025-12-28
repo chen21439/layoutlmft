@@ -217,18 +217,19 @@ class CompHRDocDataset(Dataset):
             reading_labels = [ann.get('reading_order_label', 0) for ann in anns_sorted]
             relations = [ann.get('relation', 0) for ann in anns_sorted]
 
-            # 将 parent_id (reading_order_id) 转换为本地索引
-            # 注意: parent_id 对应的是 reading_order_id，不是 annotation id
-            ro_to_idx = {ann.get('reading_order_id', i): i for i, ann in enumerate(anns_sorted)}
+            # 将 parent_id (全局 annotation id) 转换为本地索引
+            # 注意: parent_id 是全局 annotation id，可能跨页面
+            # 只有当 parent 在当前页面内时才能映射，否则视为根节点
+            id_to_idx = {ann['id']: idx for idx, ann in enumerate(anns_sorted)}
             parent_ids = []
             for ann in anns_sorted:
                 pid = ann.get('parent_id', -1)
                 if pid == -1:
                     parent_ids.append(-1)  # 根节点
-                elif pid in ro_to_idx:
-                    parent_ids.append(ro_to_idx[pid])  # 转换为本地索引
+                elif pid in id_to_idx:
+                    parent_ids.append(id_to_idx[pid])  # 转换为本地索引
                 else:
-                    parent_ids.append(-1)  # 父节点不在当前样本中，视为根节点
+                    parent_ids.append(-1)  # 父节点不在当前页面，视为根节点
 
             sample['reading_orders'] = reading_orders
             sample['reading_labels'] = reading_labels
