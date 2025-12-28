@@ -588,18 +588,42 @@ class Predictor:
                 # 一次性推理所有 chunks（line_pooling 会自动聚合跨 chunk 的行）
                 pred = self._run_inference(input_ids, bbox, attention_mask, batch_image, chunk_line_ids)
 
-                # 构建输出（直接覆盖 class, parent_id, relation 字段）
-                output_data = []
-                for idx, item in enumerate(input_data):
-                    # line_classes 的 key 是行索引（0, 1, 2, ...）
-                    pred_class = pred.line_classes.get(idx, 0)
-                    pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
-                    pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+                # 构建输出（和 predict_and_save 保持一致）
+                # pred.line_classes 的 key 是全局 line_id
+                # pred.line_parents/line_relations 的索引是紧凑索引（0, 1, 2, ...）
+                sorted_line_ids = sorted(pred.line_classes.keys())
 
+                # 构建紧凑索引到全局 line_id 的映射
+                # pred_parent 返回的是紧凑索引，需要映射回全局 line_id
+                compact_to_global = {i: lid for i, lid in enumerate(sorted_line_ids)}
+
+                # 为每个输入行设置预测结果
+                output_data = []
+                for item_idx, item in enumerate(input_data):
                     output_item = item.copy()
-                    output_item["class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
-                    output_item["parent_id"] = pred_parent
-                    output_item["relation"] = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
+
+                    # 查找这个 item 对应的紧凑索引
+                    if item_idx in pred.line_classes:
+                        compact_idx = sorted_line_ids.index(item_idx)
+                        pred_class = pred.line_classes[item_idx]
+                        pred_parent_compact = pred.line_parents[compact_idx] if compact_idx < len(pred.line_parents) else -1
+                        pred_relation = pred.line_relations[compact_idx] if compact_idx < len(pred.line_relations) else 0
+
+                        # 将 parent 的紧凑索引映射回全局 line_id
+                        if pred_parent_compact >= 0 and pred_parent_compact in compact_to_global:
+                            pred_parent = compact_to_global[pred_parent_compact]
+                        else:
+                            pred_parent = pred_parent_compact  # -1 (ROOT) 保持不变
+
+                        output_item["class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
+                        output_item["parent_id"] = pred_parent
+                        output_item["relation"] = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
+                    else:
+                        # 该行没有预测结果（可能被跳过）
+                        output_item["class"] = "unknown"
+                        output_item["parent_id"] = -1
+                        output_item["relation"] = "none"
+
                     output_data.append(output_item)
 
                 # 保存到输出目录
