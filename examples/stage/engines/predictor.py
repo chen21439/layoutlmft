@@ -402,6 +402,13 @@ class Predictor:
                 for sample_idx, sample in enumerate(batch):
                     pred = self.predict(sample)
 
+                    # 调试日志
+                    print(f"\n[DEBUG] Sample {batch_idx}-{sample_idx}:")
+                    print(f"  num_lines: {pred.num_lines}")
+                    print(f"  line_classes keys: {sorted(pred.line_classes.keys())[:10]}...")  # 前10个
+                    print(f"  line_parents length: {len(pred.line_parents)}")
+                    print(f"  line_relations length: {len(pred.line_relations)}")
+
                     # 构建结果
                     sample_pred = {
                         "batch_idx": batch_idx,
@@ -411,6 +418,14 @@ class Predictor:
                     }
 
                     sorted_line_ids = sorted(pred.line_classes.keys())
+
+                    # 打印前5行的映射详情
+                    print(f"  First 5 lines mapping:")
+                    for idx, line_id in enumerate(sorted_line_ids[:5]):
+                        pred_class = pred.line_classes.get(line_id, 0)
+                        pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                        print(f"    line_id={line_id}, class={ID2LABEL.get(pred_class, pred_class)}, parent={pred_parent}")
+
                     for idx, line_id in enumerate(sorted_line_ids):
                         pred_class = pred.line_classes.get(line_id, 0)
                         pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
