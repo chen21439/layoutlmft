@@ -193,17 +193,47 @@ class Predictor:
             cls_logits = cls_logits.unsqueeze(0)  # [1, L, num_classes]
 
         if use_gru:
+            # 调试日志：Stage 3 输入
+            print(f"\n[Stage3 Debug] Input shapes:")
+            print(f"  line_features: {line_features.shape}")  # 应该是 [426, H]
+            print(f"  line_mask: {line_mask.shape}, sum={line_mask.sum().item()}")  # 应该是 [426], sum=426
+            print(f"  cls_logits: {cls_logits.shape if cls_logits is not None else None}")  # 应该是 [1, 426, 14]
+
             parent_logits, gru_hidden = self.model.stage3(
                 line_features.unsqueeze(0),
                 line_mask.unsqueeze(0),
                 return_gru_hidden=True,
                 cls_logits=cls_logits  # 传入分类 logits 用于 soft-mask
             )
+
+            # 调试日志：Stage 3 输出
+            print(f"[Stage3 Debug] Output shapes:")
+            print(f"  parent_logits: {parent_logits.shape}")  # 应该是 [1, 427, 427]
+            print(f"  gru_hidden: {gru_hidden.shape}")  # 应该是 [1, 427, 512]
+
+            # 打印 parent_logits 的一些统计
+            print(f"[Stage3 Debug] parent_logits stats:")
+            print(f"  min={parent_logits.min().item():.4f}, max={parent_logits.max().item():.4f}")
+            # 打印第10行的候选父节点分数
+            if parent_logits.shape[1] > 10:
+                row10_logits = parent_logits[0, 10, :10]  # 第10行（line_id=9）的候选父节点
+                print(f"  Row 10 logits (candidates 0-9): {row10_logits.tolist()}")
+                print(f"  Row 10 argmax: {row10_logits.argmax().item()}")
+
             gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
 
             # 复用 tasks/parent_finding.py 的 decode 逻辑
             parent_preds = self.parent_task.decode(parent_logits, line_mask.unsqueeze(0))
             pred_parents = parent_preds[0].tolist()  # [L] -> list
+
+            # 调试日志：预测结果统计
+            from collections import Counter
+            parent_counter = Counter(pred_parents)
+            print(f"[Stage3 Debug] Prediction stats:")
+            print(f"  pred_parents length: {len(pred_parents)}")
+            print(f"  pred_parents[:20]: {pred_parents[:20]}")
+            print(f"  ROOT (-1) count: {parent_counter[-1]}")
+            print(f"  Non-ROOT count: {len(pred_parents) - parent_counter[-1]}")
         else:
             for child_idx in range(1, actual_num_lines):
                 parent_candidates = line_features[:child_idx]
