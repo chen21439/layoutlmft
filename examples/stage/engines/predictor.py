@@ -363,9 +363,11 @@ class Predictor:
         dataloader,
         output_dir: str,
         verbose: bool = True,
-    ) -> str:
+    ) -> List[str]:
         """
         对 dataloader 进行推理并保存结果
+
+        每个文档保存为 {document_name}_infer.json，格式与原始 JSON 一致（数组格式）。
 
         Args:
             dataloader: DataLoader
@@ -373,7 +375,7 @@ class Predictor:
             verbose: 是否显示进度条
 
         Returns:
-            predictions_file: 保存的文件路径
+            output_files: 保存的文件路径列表
         """
         import json
         import os
@@ -391,7 +393,7 @@ class Predictor:
         os.makedirs(output_dir, exist_ok=True)
         self.model.eval()
 
-        all_predictions = []
+        output_files = []
         iterator = tqdm(dataloader, desc="Inference") if verbose else dataloader
 
         with torch.no_grad():
@@ -399,67 +401,85 @@ class Predictor:
                 batch = wrap_batch(raw_batch)
                 batch = batch.to(self.device)
 
+                # 获取文档信息
+                document_names = raw_batch.get("document_names", [])
+                json_paths = raw_batch.get("json_paths", [])
+
                 for sample_idx, sample in enumerate(batch):
                     pred = self.predict(sample)
 
-                    # 调试日志
-                    print(f"\n[DEBUG] Sample {batch_idx}-{sample_idx}:")
+                    # 获取文档名和 JSON 路径
+                    doc_name = document_names[sample_idx] if sample_idx < len(document_names) else f"doc_{batch_idx}_{sample_idx}"
+                    json_path = json_paths[sample_idx] if sample_idx < len(json_paths) else ""
+
+                    print(f"\n[Predictor] Processing: {doc_name}")
                     print(f"  num_lines: {pred.num_lines}")
-                    print(f"  line_classes keys: {sorted(pred.line_classes.keys())[:10]}...")  # 前10个
-                    print(f"  line_parents length: {len(pred.line_parents)}")
-                    print(f"  line_relations length: {len(pred.line_relations)}")
 
-                    # 构建结果
-                    sample_pred = {
-                        "batch_idx": batch_idx,
-                        "sample_idx": sample_idx,
-                        "num_lines": pred.num_lines,
-                        "lines": []
-                    }
+                    # 加载原始 JSON
+                    original_data = []
+                    if json_path and os.path.exists(json_path):
+                        with open(json_path, 'r', encoding='utf-8') as f:
+                            original_data = json.load(f)
+                        print(f"  Loaded original JSON: {len(original_data)} items")
+                    else:
+                        print(f"  Warning: Original JSON not found: {json_path}")
 
+                    # 构建预测结果数组
                     sorted_line_ids = sorted(pred.line_classes.keys())
 
-                    # 打印前5行的映射详情
-                    print(f"  First 5 lines mapping:")
-                    for idx, line_id in enumerate(sorted_line_ids[:5]):
-                        pred_class = pred.line_classes.get(line_id, 0)
-                        pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
-                        print(f"    line_id={line_id}, class={ID2LABEL.get(pred_class, pred_class)}, parent={pred_parent}")
-
+                    # 创建 line_id -> prediction 映射
+                    pred_map = {}
                     for idx, line_id in enumerate(sorted_line_ids):
                         pred_class = pred.line_classes.get(line_id, 0)
                         pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
                         pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
 
-                        sample_pred["lines"].append({
-                            "line_id": line_id,
+                        pred_map[line_id] = {
                             "pred_class": ID2LABEL.get(pred_class, f"cls_{pred_class}"),
                             "pred_class_id": pred_class,
                             "pred_parent": pred_parent,
                             "pred_relation": RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}"),
                             "pred_relation_id": pred_relation,
-                        })
+                        }
 
-                    all_predictions.append(sample_pred)
+                    # 将预测结果添加到原始数据中
+                    output_data = []
+                    for item in original_data:
+                        # 复制原始数据
+                        new_item = dict(item)
+                        # 获取 line_id
+                        line_id = item.get("line_id", item.get("id", -1))
+                        if isinstance(line_id, str):
+                            try:
+                                line_id = int(line_id)
+                            except ValueError:
+                                line_id = -1
+                        # 添加预测结果
+                        if line_id in pred_map:
+                            new_item.update(pred_map[line_id])
+                        output_data.append(new_item)
 
-        # 保存结果
-        predictions_file = os.path.join(output_dir, "predictions.json")
-        with open(predictions_file, "w", encoding="utf-8") as f:
-            json.dump(all_predictions, f, ensure_ascii=False, indent=2)
+                    # 保存为 {document_name}_infer.json
+                    output_file = os.path.join(output_dir, f"{doc_name}_infer.json")
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+                    output_files.append(output_file)
+                    print(f"  Saved: {output_file} ({len(output_data)} items)")
 
         # 保存元信息
         meta_file = os.path.join(output_dir, "meta.json")
         import datetime
         meta = {
             "timestamp": datetime.datetime.now().isoformat(),
-            "num_samples": len(all_predictions),
-            "total_lines": sum(p["num_lines"] for p in all_predictions),
+            "num_documents": len(output_files),
+            "files": [os.path.basename(f) for f in output_files],
         }
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        print(f"\n[Predictor] Saved {len(all_predictions)} predictions to: {predictions_file}")
+        print(f"\n[Predictor] Saved {len(output_files)} documents to: {output_dir}")
         self.model.train()
-        return predictions_file
+        return output_files
 
     # predict_from_dir 已删除，统一使用 HRDocDataLoader + predict_and_save

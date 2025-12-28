@@ -328,6 +328,7 @@ class InferenceDataLoader:
             "chunks": all_chunks,
             "line_parent_ids": all_parent_ids,
             "line_relations": all_relations,
+            "json_path": os.path.join(self.json_dir, f"{document_name}.json"),
         }
 
     def get_dataset(self) -> List[Dict]:

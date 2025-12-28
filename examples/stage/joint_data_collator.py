@@ -216,9 +216,11 @@ class HRDocDocumentLevelCollator:
         all_line_parent_ids = []
         all_line_relations = []
         document_names = []
+        json_paths = []
 
         for doc in features:
             document_names.append(doc["document_name"])
+            json_paths.append(doc.get("json_path", ""))
             chunks = doc["chunks"]
             chunks_per_doc.append(len(chunks))
             all_chunks.extend(chunks)
@@ -319,6 +321,7 @@ class HRDocDocumentLevelCollator:
 
         # doc_id 用于调试（不转为 tensor，保持字符串列表）
         batch["doc_id"] = document_names
+        batch["json_paths"] = json_paths
 
         return batch
 
