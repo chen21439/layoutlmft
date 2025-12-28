@@ -176,6 +176,20 @@ def load_joint_model(
         use_gru=use_gru,
     )
 
+    # ==================== 加载 cls_head 和 line_pooling 权重 ====================
+    # 这些模块保存在 pytorch_model.bin 中，键名为 cls_head.* 和 line_pooling.*
+    cls_head_state = {k[9:]: v for k, v in full_state.items() if k.startswith("cls_head.")}
+    if cls_head_state:
+        model.cls_head.load_state_dict(cls_head_state)
+        logger.info(f"Loaded cls_head ({len(cls_head_state)} keys)")
+    else:
+        logger.warning("cls_head weights not found in checkpoint, using random initialization!")
+
+    line_pooling_state = {k[13:]: v for k, v in full_state.items() if k.startswith("line_pooling.")}
+    if line_pooling_state:
+        model.line_pooling.load_state_dict(line_pooling_state)
+        logger.info(f"Loaded line_pooling ({len(line_pooling_state)} keys)")
+
     model = model.to(device)
     model.eval()
 
