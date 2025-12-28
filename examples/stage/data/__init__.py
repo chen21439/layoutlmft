@@ -19,6 +19,10 @@ from .hrdoc_data_loader import (
     LABEL_LIST,
 )
 
+from .inference_data_loader import (
+    InferenceDataLoader,
+)
+
 from .batch import (
     Sample,
     BatchBase,
@@ -39,6 +43,8 @@ __all__ = [
     "get_id2label",
     "NUM_LABELS",
     "LABEL_LIST",
+    # 推理数据加载
+    "InferenceDataLoader",
     # Batch 抽象
     "Sample",
     "BatchBase",

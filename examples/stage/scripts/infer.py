@@ -1,18 +1,30 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-推理脚本 - 极薄入口
+Inference Script - Direct JSON Loading
 
-功能：
-1. 加载训练好的模型
-2. 对输入数据进行推理
-3. 保存预测结果
+Features:
+1. Load trained model from checkpoint
+2. Load data directly from JSON files (no HuggingFace Datasets)
+3. Run inference and save predictions
 
 Usage:
     python examples/stage/scripts/infer.py \
+        --data_dir /path/to/data \
         --checkpoint /path/to/checkpoint \
-        --input_dir /path/to/input \
         --output_dir /path/to/output
+
+Data directory structure:
+    data_dir/
+    |-- test/           # JSON files
+    |   |-- doc1.json
+    |   +-- doc2.json
+    +-- images/         # Image files
+        |-- doc1/
+        |   |-- 0.png
+        |   +-- 1.png
+        +-- doc2/
+            +-- 0.png
 """
 
 import os
@@ -38,12 +50,10 @@ def parse_args():
 
     parser.add_argument("--env", type=str, default="test",
                         help="Environment: dev or test")
+    parser.add_argument("--data_dir", type=str, required=True,
+                        help="Data directory (must have test/ and images/ subdirs)")
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Checkpoint directory")
-    parser.add_argument("--dataset", type=str, default=None,
-                        help="Dataset name (hrds, hrdh, tender) - uses config file paths")
-    parser.add_argument("--data_dir", type=str, default=None,
-                        help="Custom data directory (must have test/ and images/ subdirs)")
     parser.add_argument("--output_dir", type=str, required=True,
                         help="Output directory for predictions")
     parser.add_argument("--batch_size", type=int, default=1,
@@ -74,6 +84,7 @@ def main():
         os.environ["CUDA_VISIBLE_DEVICES"] = config.gpu.cuda_visible_devices
 
     import torch
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1. Load model
@@ -81,49 +92,21 @@ def main():
     from models.build import load_joint_model
     model, tokenizer = load_joint_model(args.checkpoint, device, config)
 
-    # 2. Load data and run inference
-    from engines.predictor import Predictor
-    predictor = Predictor(model, device)
-
-    # 确定数据目录
-    if args.dataset:
-        data_dir = config.dataset.get_data_dir(args.dataset)
-        dataset_name = args.dataset
-        logger.info(f"Using dataset '{args.dataset}' from config: {data_dir}")
-    elif args.data_dir:
-        data_dir = args.data_dir
-        dataset_name = "infer"
-        logger.info(f"Using custom data directory: {data_dir}")
-    else:
-        logger.error("Please specify --dataset or --data_dir")
-        sys.exit(1)
-
-    # 统一的数据加载逻辑
-    from data import HRDocDataLoader, HRDocDataLoaderConfig
+    # 2. Load data using InferenceDataLoader
+    logger.info(f"Loading data from: {args.data_dir}")
+    from data import InferenceDataLoader
     from joint_data_collator import HRDocDocumentLevelCollator
 
-    os.environ["HRDOC_DATA_DIR"] = data_dir
-
-    loader_config = HRDocDataLoaderConfig(
-        data_dir=data_dir,
-        dataset_name=dataset_name,
-        max_length=512,
-        preprocessing_num_workers=1,
-        max_val_samples=args.max_samples if args.max_samples > 0 else None,
-        document_level=True,
-    )
-
-    data_loader = HRDocDataLoader(
+    data_loader = InferenceDataLoader(
+        data_dir=args.data_dir,
         tokenizer=tokenizer,
-        config=loader_config,
-        include_line_info=True,
+        max_length=512,
+        max_samples=args.max_samples if args.max_samples > 0 else None,
     )
-    data_loader.load_raw_datasets()
-    tokenized_datasets = data_loader.prepare_datasets()
 
-    eval_dataset = tokenized_datasets.get("test") or tokenized_datasets.get("validation")
-    if eval_dataset is None:
-        logger.error("No evaluation dataset found!")
+    eval_dataset = data_loader.load()
+    if not eval_dataset:
+        logger.error("No data loaded!")
         sys.exit(1)
 
     data_collator = HRDocDocumentLevelCollator(
@@ -141,8 +124,11 @@ def main():
 
     logger.info(f"Dataset loaded: {len(eval_dataset)} samples")
 
-    # Run inference
+    # 3. Run inference
     logger.info("Running inference...")
+    from engines.predictor import Predictor
+    predictor = Predictor(model, device)
+
     predictor.predict_and_save(
         dataloader=eval_dataloader,
         output_dir=args.output_dir,
