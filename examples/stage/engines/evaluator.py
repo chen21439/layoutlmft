@@ -649,6 +649,7 @@ class Evaluator:
 
         for i, err in enumerate(section_errors[:10]):  # 只显示前 10 个
             doc_name = err.get("document_name", "unknown")
+            json_path = self._doc_json_paths.get(doc_name, "")
             line_texts = load_doc_texts(doc_name)
 
             child_line_id = err.get("child_line_id", -1)
@@ -664,7 +665,9 @@ class Evaluator:
             gt_p_name = self.id2label.get(gt_p_cls, "ROOT") if gt_p_cls is not None else "ROOT"
             pred_p_name = self.id2label.get(pred_p_cls, "ROOT") if pred_p_cls is not None else "ROOT"
 
-            print(f"│ [{i+1}] 文档: {doc_name:<30}                                                    │")
+            print(f"│ [{i+1}] 文档: {doc_name}")
+            if json_path:
+                print(f"│     文件: {json_path}")
             print(f"│     当前行 (id={child_line_id}): \"{child_text}\"")
             print(f"│     ✓ GT Parent   (id={gt_parent_line_id}, {gt_p_name}): \"{gt_parent_text}\"")
             print(f"│     ✗ Pred Parent (id={pred_parent_line_id}, {pred_p_name}): \"{pred_parent_text}\"")
