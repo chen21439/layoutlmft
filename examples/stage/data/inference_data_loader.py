@@ -117,7 +117,12 @@ def load_single_document(
             if not words:
                 words = [{"text": "[EMPTY]", "box": item.get("box", [0, 0, 0, 0])}]
 
-            item_line_id = item.get("line_id", item.get("id", len(line_parent_ids)))
+            # 确保 line_id 是整数
+            raw_line_id = item.get("line_id", item.get("id", len(line_parent_ids)))
+            try:
+                item_line_id = int(raw_line_id)
+            except (ValueError, TypeError):
+                item_line_id = len(line_parent_ids)
             parent_id = item.get("parent_id", -1)
             if parent_id == "" or parent_id is None:
                 parent_id = -1
