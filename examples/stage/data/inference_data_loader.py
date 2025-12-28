@@ -201,7 +201,15 @@ class InferenceDataLoader:
         self.label2id = get_label2id()
         self.id2label = get_id2label()
 
-        self.json_dir = os.path.join(data_dir, "test")
+        # 自动检测目录结构
+        # 优先: data_dir/test/ + data_dir/images/
+        # 备选: data_dir/ (JSON) + data_dir/images/
+        test_dir = os.path.join(data_dir, "test")
+        if os.path.isdir(test_dir):
+            self.json_dir = test_dir
+        else:
+            self.json_dir = data_dir  # JSON 文件直接在 data_dir 下
+
         self.img_dir = os.path.join(data_dir, "images")
 
         self._dataset = None
