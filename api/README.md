@@ -57,16 +57,7 @@ ENV=test uvicorn api.app.main:app --host 0.0.0.0 --port 9197
 ### 推理
 
 ```bash
-# POST 请求
 curl -X POST http://localhost:9197/predict \
-  -H "Content-Type: application/json" \
-  -d '{"task_id": "task_001", "document_name": "tender_doc"}'
-
-# GET 请求
-curl "http://localhost:9197/predict/task_001/tender_doc"
-
-# 返回合并原始数据的结果
-curl -X POST http://localhost:9197/predict/with-original \
   -H "Content-Type: application/json" \
   -d '{"task_id": "task_001", "document_name": "tender_doc"}'
 ```
@@ -89,27 +80,7 @@ curl http://localhost:9197/config
 }
 ```
 
-### 响应 (`/predict`)
-
-```json
-{
-  "document_name": "tender_doc",
-  "num_lines": 100,
-  "results": [
-    {
-      "line_id": 0,
-      "class_label": "Title",
-      "class_id": 0,
-      "parent_id": -1,
-      "relation": "connect",
-      "relation_id": 0
-    }
-  ],
-  "inference_time_ms": 150.5
-}
-```
-
-### 响应 (`/predict/with-original`)
+### 响应
 
 ```json
 {
@@ -128,6 +99,8 @@ curl http://localhost:9197/config
   ]
 }
 ```
+
+**注意**：模型未加载时返回空数组 `{"data": [], "num_lines": 0, ...}`
 
 ## API 文档
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Predict Router - /predict endpoints
+Predict Router - /predict endpoint
 """
 
 import logging
@@ -10,8 +10,6 @@ from fastapi import APIRouter, HTTPException
 from ..schemas import (
     PredictRequest,
     PredictResponse,
-    PredictWithOriginalResponse,
-    LineResult,
     ErrorResponse,
 )
 from ..service.infer_service import get_infer_service
@@ -31,7 +29,7 @@ router = APIRouter(prefix="/predict", tags=["predict"])
         500: {"model": ErrorResponse},
     },
     summary="Predict document structure",
-    description="Run inference on a single document and return predictions.",
+    description="Run inference on a single document and return predictions merged with original data.",
 )
 async def predict(request: PredictRequest):
     """
@@ -47,77 +45,6 @@ async def predict(request: PredictRequest):
         return PredictResponse(
             document_name=request.document_name,
             num_lines=0,
-            results=[],
-            inference_time_ms=0.0,
-        )
-
-    try:
-        service = get_infer_service()
-        result = service.predict_single(
-            task_id=request.task_id,
-            document_name=request.document_name,
-            return_original=False,
-        )
-
-        # Convert to response model
-        line_results = [
-            LineResult(
-                line_id=r["line_id"],
-                class_label=r["class_label"],
-                class_id=r["class_id"],
-                parent_id=r["parent_id"],
-                relation=r["relation"],
-                relation_id=r["relation_id"],
-            )
-            for r in result["results"]
-        ]
-
-        return PredictResponse(
-            document_name=result["document_name"],
-            num_lines=result["num_lines"],
-            results=line_results,
-            inference_time_ms=result["inference_time_ms"],
-        )
-
-    except FileNotFoundError as e:
-        logger.error(f"File not found: {e}")
-        raise HTTPException(status_code=404, detail=str(e))
-    except ValueError as e:
-        logger.error(f"Value error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        logger.error(f"Runtime error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        logger.exception(f"Unexpected error: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-
-
-@router.post(
-    "/with-original",
-    response_model=PredictWithOriginalResponse,
-    responses={
-        400: {"model": ErrorResponse},
-        404: {"model": ErrorResponse},
-        500: {"model": ErrorResponse},
-    },
-    summary="Predict and merge with original data",
-    description="Run inference and return predictions merged with original JSON data.",
-)
-async def predict_with_original(request: PredictRequest):
-    """
-    Run inference and merge predictions with original JSON data.
-
-    - **task_id**: Task ID (folder name under data_dir_base)
-    - **document_name**: Document name (without .json extension)
-    """
-    # Return empty results if model is not loaded (e.g., still training)
-    model_loader = get_model_loader()
-    if not model_loader.is_loaded:
-        logger.warning("Model not loaded, returning empty results")
-        return PredictWithOriginalResponse(
-            document_name=request.document_name,
-            num_lines=0,
             inference_time_ms=0.0,
             data=[],
         )
@@ -130,7 +57,7 @@ async def predict_with_original(request: PredictRequest):
             return_original=True,
         )
 
-        return PredictWithOriginalResponse(
+        return PredictResponse(
             document_name=result["document_name"],
             num_lines=result["num_lines"],
             inference_time_ms=result["inference_time_ms"],
@@ -149,19 +76,3 @@ async def predict_with_original(request: PredictRequest):
     except Exception as e:
         logger.exception(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-
-
-@router.get(
-    "/{task_id}/{document_name}",
-    response_model=PredictResponse,
-    responses={
-        404: {"model": ErrorResponse},
-        500: {"model": ErrorResponse},
-    },
-    summary="Predict by task_id and document name (GET)",
-    description="Convenience GET endpoint for prediction.",
-)
-async def predict_get(task_id: str, document_name: str):
-    """GET endpoint for prediction (convenience)."""
-    request = PredictRequest(task_id=task_id, document_name=document_name)
-    return await predict(request)
