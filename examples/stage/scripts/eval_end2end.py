@@ -98,6 +98,8 @@ def parse_args():
                         help="Skip classification evaluation (only do TEDS)")
     parser.add_argument("--generate_only", action="store_true",
                         help="Only generate prediction JSONs, skip evaluation")
+    parser.add_argument("--save_predictions", action="store_true",
+                        help="Save predictions to JSON file")
 
     # Other options
     parser.add_argument("--batch_size", type=int, default=1,
@@ -880,6 +882,8 @@ def main():
         eval_dataloader,
         compute_teds=not args.skip_teds,
         verbose=True,
+        save_predictions=args.save_predictions,
+        output_dir=output_dir,
     )
 
     # 5. 打印结果

@@ -100,6 +100,8 @@ class Evaluator:
         compute_teds: bool = False,
         verbose: bool = True,
         debug: bool = False,
+        save_predictions: bool = False,
+        output_dir: str = None,
     ) -> EvaluationOutput:
         """
         评估整个数据集
@@ -109,6 +111,8 @@ class Evaluator:
             compute_teds: 是否计算 TEDS（较慢）
             verbose: 是否显示进度条
             debug: 是否打印调试信息
+            save_predictions: 是否保存预测结果到文件
+            output_dir: 预测结果输出目录
 
         Returns:
             EvaluationOutput: 评估结果
@@ -122,6 +126,9 @@ class Evaluator:
         all_pred_parents = []
         all_gt_relations = []
         all_pred_relations = []
+
+        # 收集预测结果用于保存
+        all_predictions = []
 
         num_samples = 0
 
@@ -148,6 +155,27 @@ class Evaluator:
 
                     # 预测
                     pred = self.predictor.predict(sample)
+
+                    # 收集预测结果用于保存
+                    if save_predictions:
+                        sample_pred = {
+                            "sample_id": num_samples,
+                            "lines": []
+                        }
+                        sorted_line_ids = sorted(pred.line_classes.keys())
+                        for idx, line_id in enumerate(sorted_line_ids):
+                            pred_class = pred.line_classes.get(line_id, 0)
+                            pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                            pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+                            sample_pred["lines"].append({
+                                "line_id": line_id,
+                                "pred_class": self.id2label.get(pred_class, f"cls_{pred_class}"),
+                                "pred_class_id": pred_class,
+                                "pred_parent": pred_parent,
+                                "pred_relation": ID2RELATION.get(pred_relation, f"rel_{pred_relation}"),
+                                "pred_relation_id": pred_relation,
+                            })
+                        all_predictions.append(sample_pred)
 
                     # 收集分类结果
                     for line_id, gt_class in gt["classes"].items():
@@ -297,6 +325,16 @@ class Evaluator:
         output.num_lines = len(all_gt_classes)
         output.num_parent_pairs = len(all_gt_parents)
         output.num_relation_pairs = len(all_gt_relations)
+
+        # 保存预测结果
+        if save_predictions and output_dir:
+            import json
+            import os
+            os.makedirs(output_dir, exist_ok=True)
+            pred_file = os.path.join(output_dir, "predictions.json")
+            with open(pred_file, "w", encoding="utf-8") as f:
+                json.dump(all_predictions, f, ensure_ascii=False, indent=2)
+            print(f"\n[Evaluator] Predictions saved to: {pred_file}")
 
         self.predictor.model.train()
         return output
