@@ -222,7 +222,7 @@ def main():
     parser = argparse.ArgumentParser(description="Document Structure Analysis API")
     parser.add_argument("--env", type=str, default="test", help="Environment (dev/test)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host")
-    parser.add_argument("--port", type=int, default=8000, help="Port")
+    parser.add_argument("--port", type=int, default=9197, help="Port")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload")
 
     args = parser.parse_args()
@@ -231,7 +231,7 @@ def main():
     os.environ["ENV"] = args.env
 
     uvicorn.run(
-        "fastapi.app.main:app",
+        "api.app.main:app",
         host=args.host,
         port=args.port,
         reload=args.reload,

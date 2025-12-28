@@ -36,11 +36,13 @@ async def predict(request: PredictRequest):
     """
     Run inference on a single document.
 
-    - **document_name**: Document name (folder name under data_dir_base)
+    - **task_id**: Task ID (folder name under data_dir_base)
+    - **document_name**: Document name (without .json extension)
     """
     try:
         service = get_infer_service()
         result = service.predict_single(
+            task_id=request.task_id,
             document_name=request.document_name,
             return_original=False,
         )
@@ -94,11 +96,13 @@ async def predict_with_original(request: PredictRequest):
     """
     Run inference and merge predictions with original JSON data.
 
-    Returns the complete document data with prediction fields added.
+    - **task_id**: Task ID (folder name under data_dir_base)
+    - **document_name**: Document name (without .json extension)
     """
     try:
         service = get_infer_service()
         result = service.predict_single(
+            task_id=request.task_id,
             document_name=request.document_name,
             return_original=True,
         )
@@ -125,16 +129,16 @@ async def predict_with_original(request: PredictRequest):
 
 
 @router.get(
-    "/{document_name}",
+    "/{task_id}/{document_name}",
     response_model=PredictResponse,
     responses={
         404: {"model": ErrorResponse},
         500: {"model": ErrorResponse},
     },
-    summary="Predict by document name (GET)",
+    summary="Predict by task_id and document name (GET)",
     description="Convenience GET endpoint for prediction.",
 )
-async def predict_get(document_name: str):
+async def predict_get(task_id: str, document_name: str):
     """GET endpoint for prediction (convenience)."""
-    request = PredictRequest(document_name=document_name)
+    request = PredictRequest(task_id=task_id, document_name=document_name)
     return await predict(request)

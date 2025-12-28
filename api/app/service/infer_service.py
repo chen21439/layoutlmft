@@ -7,9 +7,8 @@ Reuses existing inference code from examples/stage/.
 
 Directory structure:
     data_dir_base/
-    └── {document_name}/
-        ├── test/
-        │   └── {document_name}.json
+    └── {task_id}/
+        ├── {document_name}.json
         └── images/
             └── {document_name}/
                 ├── 0.png
@@ -63,22 +62,23 @@ class InferenceService:
         self.label2id = get_label2id()
         self.id2label = get_id2label()
 
-    def _get_data_dir(self, document_name: str) -> str:
+    def _get_task_dir(self, task_id: str) -> str:
         """
-        Get data directory for a specific document.
+        Get task directory.
 
         Args:
-            document_name: Document name
+            task_id: Task ID
 
         Returns:
-            Path to document's data directory: data_dir_base/{document_name}/
+            Path to task directory: data_dir_base/{task_id}/
         """
         if self.data_dir_base is None:
             raise ValueError("data_dir_base must be configured")
-        return os.path.join(self.data_dir_base, document_name)
+        return os.path.join(self.data_dir_base, task_id)
 
     def predict_single(
         self,
+        task_id: str,
         document_name: str,
         return_original: bool = False,
     ) -> Dict[str, Any]:
@@ -86,6 +86,7 @@ class InferenceService:
         Run inference on a single document.
 
         Args:
+            task_id: Task ID (folder under data_dir_base)
             document_name: Document name (without .json extension)
             return_original: If True, merge predictions with original JSON
 
@@ -94,22 +95,18 @@ class InferenceService:
         """
         start_time = time.time()
 
-        # Resolve paths: data_dir_base/{document_name}/
-        data_dir = self._get_data_dir(document_name)
-        if not os.path.isdir(data_dir):
-            raise FileNotFoundError(f"Document directory not found: {data_dir}")
+        # Resolve paths: data_dir_base/{task_id}/
+        task_dir = self._get_task_dir(task_id)
+        if not os.path.isdir(task_dir):
+            raise FileNotFoundError(f"Task directory not found: {task_dir}")
 
-        # JSON path: data_dir/test/{document_name}.json
-        json_dir = os.path.join(data_dir, "test")
-        if not os.path.isdir(json_dir):
-            json_dir = data_dir
-
-        json_path = os.path.join(json_dir, f"{document_name}.json")
+        # JSON path: task_dir/{document_name}.json
+        json_path = os.path.join(task_dir, f"{document_name}.json")
         if not os.path.exists(json_path):
             raise FileNotFoundError(f"JSON file not found: {json_path}")
 
-        # Image directory: data_dir/images/
-        img_dir = os.path.join(data_dir, "images")
+        # Image directory: task_dir/images/
+        img_dir = os.path.join(task_dir, "images")
         if not os.path.isdir(img_dir):
             raise FileNotFoundError(f"Image directory not found: {img_dir}")
 

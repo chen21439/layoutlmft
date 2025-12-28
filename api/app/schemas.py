@@ -13,9 +13,14 @@ from pydantic import BaseModel, Field
 class PredictRequest(BaseModel):
     """Request model for /predict endpoint."""
 
+    task_id: str = Field(
+        ...,
+        description="Task ID (folder name under data_dir_base)",
+        example="task_001"
+    )
     document_name: str = Field(
         ...,
-        description="Document name (folder name under data_dir_base)",
+        description="Document name (without .json extension)",
         example="tender_doc_001"
     )
 
