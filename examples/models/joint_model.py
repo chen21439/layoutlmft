@@ -590,6 +590,7 @@ class JointModel(nn.Module):
             # 加权 parent loss 相关变量
             weighted_parent_loss = torch.tensor(0.0, device=device)
             total_weight = 0.0
+            section_count = 0  # 统计 section 样本数
 
             if self.use_gru:
                 # 准备传入 Stage 3 的 cls_logits
@@ -678,6 +679,8 @@ class JointModel(nn.Module):
                             if line_labels is not None and b < line_labels.shape[0] and child_idx < line_labels.shape[1]:
                                 child_type = line_labels[b, child_idx].item()
                             weight = self.section_parent_weight if child_type == SECTION_ID else 1.0
+                            if child_type == SECTION_ID:
+                                section_count += 1
 
                             weighted_parent_loss = weighted_parent_loss + loss * weight
                             total_weight += weight
@@ -728,6 +731,15 @@ class JointModel(nn.Module):
             if total_weight > 0:
                 parent_loss = weighted_parent_loss / total_weight
                 self._parent_acc = parent_correct / parent_total
+                # 打印加权统计（每 100 步打印一次）
+                if not hasattr(self, '_parent_debug_step'):
+                    self._parent_debug_step = 0
+                self._parent_debug_step += 1
+                if self._parent_debug_step % 100 == 1:
+                    other_count = parent_total - section_count
+                    print(f"[Parent Loss] section_weight={self.section_parent_weight}, "
+                          f"section_samples={section_count}, other_samples={other_count}, "
+                          f"total_weight={total_weight:.1f}, line_labels={'available' if line_labels is not None else 'None'}")
             elif parent_total > 0:
                 parent_loss = parent_loss / parent_total
                 self._parent_acc = parent_correct / parent_total
