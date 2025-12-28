@@ -484,6 +484,17 @@ class Predictor:
                     sample_pred_map = {k: v for i, (k, v) in enumerate(pred_map.items()) if i < 5}
                     print(f"  pred_map sample (first 5): {sample_pred_map}")
 
+                    # 调试：统计 parent_id 分布，特别是 -1 的情况
+                    parent_counter = Counter(pred.line_parents)
+                    print(f"  parent_id=-1 count: {parent_counter.get(-1, 0)}")
+                    # 打印 parent_id=54 的元素
+                    lines_with_parent_54 = [(line_id, pred_map[line_id]) for line_id in sorted_line_ids
+                                            if pred_map[line_id]['parent_id'] == 54]
+                    if lines_with_parent_54:
+                        print(f"  Lines with parent_id=54 ({len(lines_with_parent_54)}):")
+                        for line_id, info in lines_with_parent_54[:10]:
+                            print(f"    line_id={line_id}: {info}")
+
                     # 将预测结果添加到原始数据中
                     output_data = []
                     for item in original_data:
