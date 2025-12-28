@@ -201,16 +201,19 @@ class InferenceDataLoader:
         self.label2id = get_label2id()
         self.id2label = get_id2label()
 
-        # 自动检测目录结构
-        # 优先: data_dir/test/ + data_dir/images/
-        # 备选: data_dir/ (JSON) + data_dir/images/
+        # 自动检测目录结构（复用 hrdoc.py 的逻辑）
+        # JSON 目录：优先 data_dir/test/，否则 data_dir/
         test_dir = os.path.join(data_dir, "test")
         if os.path.isdir(test_dir):
             self.json_dir = test_dir
         else:
-            self.json_dir = data_dir  # JSON 文件直接在 data_dir 下
+            self.json_dir = data_dir
 
-        self.img_dir = os.path.join(data_dir, "images")
+        # 图片目录：优先 data_dir/images/，否则 data_dir/../images/（HRDS 格式）
+        img_dir = os.path.join(data_dir, "images")
+        if not os.path.isdir(img_dir):
+            img_dir = os.path.join(os.path.dirname(data_dir), "images")
+        self.img_dir = img_dir
 
         self._dataset = None
 
