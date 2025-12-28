@@ -458,6 +458,8 @@ class Predictor:
         """
         从输入目录读取 JSON 文件进行推理（纯推理，无 GT）
 
+        复用训练代码的数据加载逻辑：按页处理，每页加载对应图片
+
         Args:
             input_dir: 输入目录（包含 JSON 文件）
             output_dir: 输出目录
@@ -472,8 +474,9 @@ class Predictor:
         import os
         from glob import glob
         from tqdm import tqdm
+        from collections import defaultdict
 
-        # 复用训练代码的 tokenize 函数和图片加载函数
+        # 复用训练代码的函数（和 HRDocDataLoader 一致）
         from data.hrdoc_data_loader import tokenize_page_with_line_boundary
         from layoutlmft.data.utils import load_image, normalize_bbox
 
@@ -490,7 +493,6 @@ class Predictor:
 
         # 确定图片目录（默认为 input_dir 同级的 images 目录）
         if image_dir is None:
-            # 尝试 input_dir/../images
             parent_dir = os.path.dirname(input_dir.rstrip("/"))
             image_dir = os.path.join(parent_dir, "images")
 
@@ -519,121 +521,123 @@ class Predictor:
                 if not input_data:
                     continue
 
-                # 加载图片（复用训练代码的图片查找逻辑）
-                # 尝试多种路径格式
-                img_path = None
-                page_num = 0  # 默认第 0 页
-                for ext in [".png", ".jpg", ".jpeg"]:
-                    # 格式1: {image_dir}/{doc_name}/{page_num}.png
-                    candidate = os.path.join(image_dir, doc_name, f"{page_num}{ext}")
-                    if os.path.exists(candidate):
-                        img_path = candidate
-                        break
-                    # 格式2: {image_dir}/{doc_name}.png
-                    candidate = os.path.join(image_dir, f"{doc_name}{ext}")
-                    if os.path.exists(candidate):
-                        img_path = candidate
-                        break
-                    # 格式3: {image_dir}/{doc_name}/{doc_name}_{page_num}.png
-                    candidate = os.path.join(image_dir, doc_name, f"{doc_name}_{page_num}{ext}")
-                    if os.path.exists(candidate):
-                        img_path = candidate
-                        break
+                # ========== 复用训练代码逻辑：按页分组 ==========
+                pages_data = defaultdict(list)
+                for idx, item in enumerate(input_data):
+                    page_num = str(item.get("page", "0"))
+                    item["_original_idx"] = idx  # 记录原始索引
+                    pages_data[page_num].append(item)
 
-                if img_path is None:
-                    raise FileNotFoundError(
-                        f"Image not found for '{doc_name}'. Tried:\n"
-                        f"  - {image_dir}/{doc_name}/{page_num}.png/jpg\n"
-                        f"  - {image_dir}/{doc_name}.png/jpg\n"
-                        f"  - {image_dir}/{doc_name}/{doc_name}_{page_num}.png/jpg"
+                # 存储所有页的预测结果
+                all_predictions = {}  # {original_idx: (class, parent, relation)}
+
+                # 按页处理（和训练时一致）
+                for page_num in sorted(pages_data.keys(), key=lambda x: int(x) if x.isdigit() else 0):
+                    page_items = pages_data[page_num]
+
+                    # 查找图片（复用训练代码的查找逻辑）
+                    img_path = None
+                    for ext in [".png", ".jpg", ".jpeg"]:
+                        candidate = os.path.join(image_dir, doc_name, f"{page_num}{ext}")
+                        if os.path.exists(candidate):
+                            img_path = candidate
+                            break
+                        candidate = os.path.join(image_dir, f"{doc_name}{ext}")
+                        if os.path.exists(candidate):
+                            img_path = candidate
+                            break
+                        candidate = os.path.join(image_dir, doc_name, f"{doc_name}_{page_num}{ext}")
+                        if os.path.exists(candidate):
+                            img_path = candidate
+                            break
+
+                    if img_path is None:
+                        print(f"  [Warning] Image not found for page {page_num}, skipping")
+                        continue
+
+                    # 加载图片
+                    image, img_size = load_image(img_path)
+                    image_tensor = torch.tensor(image, device=self.device).unsqueeze(0).float()
+
+                    # 提取文本和 bbox（复用训练代码的归一化逻辑）
+                    tokens = [item.get("text", "") for item in page_items]
+                    raw_bboxes = [item.get("box", [0, 0, 0, 0]) for item in page_items]
+                    bboxes = [normalize_bbox(box, img_size) for box in raw_bboxes]
+                    labels = [0] * len(tokens)  # 推理时无 GT
+                    line_ids = list(range(len(page_items)))  # 页内索引
+
+                    # 复用训练代码的 tokenize 函数
+                    chunks = tokenize_page_with_line_boundary(
+                        tokenizer=tokenizer,
+                        tokens=tokens,
+                        bboxes=bboxes,
+                        labels=labels,
+                        line_ids=line_ids,
+                        max_length=512,
                     )
 
-                # 加载图片
-                image, img_size = load_image(img_path)
-                image_tensor = torch.tensor(image, device=self.device).unsqueeze(0).float()
+                    if not chunks:
+                        continue
 
-                # 提取文本和 bbox（归一化到 [0, 1000]，和训练时一致）
-                tokens = [item.get("text", "") for item in input_data]
-                raw_bboxes = [item.get("box", [0, 0, 0, 0]) for item in input_data]
-                bboxes = [normalize_bbox(box, img_size) for box in raw_bboxes]
-                # 推理时没有真实标签，用 0 填充
-                labels = [0] * len(tokens)
-                line_ids = list(range(len(tokens)))
+                    # 构建 batch
+                    num_chunks = len(chunks)
+                    input_ids = torch.tensor([c["input_ids"] for c in chunks], device=self.device)
+                    bbox = torch.tensor([c["bbox"] for c in chunks], device=self.device)
+                    attention_mask = torch.tensor([c["attention_mask"] for c in chunks], device=self.device)
+                    chunk_line_ids = torch.tensor([c["line_ids"] for c in chunks], device=self.device)
 
-                # 复用训练代码的 tokenize 函数
-                chunks = tokenize_page_with_line_boundary(
-                    tokenizer=tokenizer,
-                    tokens=tokens,
-                    bboxes=bboxes,
-                    labels=labels,
-                    line_ids=line_ids,
-                    max_length=512,
-                )
+                    # 复制 image 到每个 chunk
+                    if num_chunks > 1:
+                        batch_image = image_tensor.expand(num_chunks, -1, -1, -1)
+                    else:
+                        batch_image = image_tensor
 
-                if not chunks:
-                    continue
+                    # 推理
+                    pred = self._run_inference(input_ids, bbox, attention_mask, batch_image, chunk_line_ids)
 
-                # 把所有 chunks 合并成一个 batch（和训练时一致）
-                num_chunks = len(chunks)
-                input_ids = torch.tensor([c["input_ids"] for c in chunks], device=self.device)
-                bbox = torch.tensor([c["bbox"] for c in chunks], device=self.device)
-                attention_mask = torch.tensor([c["attention_mask"] for c in chunks], device=self.device)
-                chunk_line_ids = torch.tensor([c["line_ids"] for c in chunks], device=self.device)
+                    # 收集预测结果，映射回原始索引
+                    sorted_line_ids = sorted(pred.line_classes.keys())
+                    compact_to_page = {i: lid for i, lid in enumerate(sorted_line_ids)}
 
-                # 复制 image 到每个 chunk（和训练时一致）
-                if num_chunks > 1:
-                    batch_image = image_tensor.expand(num_chunks, -1, -1, -1)
-                else:
-                    batch_image = image_tensor
+                    for page_idx, item in enumerate(page_items):
+                        original_idx = item["_original_idx"]
+                        if page_idx in pred.line_classes:
+                            compact_idx = sorted_line_ids.index(page_idx)
+                            pred_class = pred.line_classes[page_idx]
+                            pred_parent = pred.line_parents[compact_idx] if compact_idx < len(pred.line_parents) else -1
+                            pred_relation = pred.line_relations[compact_idx] if compact_idx < len(pred.line_relations) else 0
 
-                # 一次性推理所有 chunks（line_pooling 会自动聚合跨 chunk 的行）
-                pred = self._run_inference(input_ids, bbox, attention_mask, batch_image, chunk_line_ids)
+                            # parent 索引映射：页内紧凑索引 -> 页内原始索引
+                            if pred_parent >= 0 and pred_parent in compact_to_page:
+                                pred_parent = compact_to_page[pred_parent]
 
-                # 调试：打印预测统计
+                            all_predictions[original_idx] = (pred_class, pred_parent, pred_relation)
+
+                # ========== 构建输出 ==========
                 from collections import Counter
-                class_id_counts = Counter(pred.line_classes.values())
-                class_name_counts = {ID2LABEL.get(k, f"cls_{k}"): v for k, v in class_id_counts.items()}
-                print(f"  [{doc_name}] {len(pred.line_classes)} lines predicted: {dict(class_name_counts)}")
+                class_counts = Counter()
 
-                # 构建输出（和 predict_and_save 保持一致）
-                # pred.line_classes 的 key 是全局 line_id
-                # pred.line_parents/line_relations 的索引是紧凑索引（0, 1, 2, ...）
-                sorted_line_ids = sorted(pred.line_classes.keys())
-
-                # 构建紧凑索引到全局 line_id 的映射
-                # pred_parent 返回的是紧凑索引，需要映射回全局 line_id
-                compact_to_global = {i: lid for i, lid in enumerate(sorted_line_ids)}
-
-                # 为每个输入行设置预测结果
                 output_data = []
-                for item_idx, item in enumerate(input_data):
-                    output_item = item.copy()
+                for idx, item in enumerate(input_data):
+                    output_item = {k: v for k, v in item.items() if k != "_original_idx"}
 
-                    # 查找这个 item 对应的紧凑索引
-                    if item_idx in pred.line_classes:
-                        compact_idx = sorted_line_ids.index(item_idx)
-                        pred_class = pred.line_classes[item_idx]
-                        pred_parent_compact = pred.line_parents[compact_idx] if compact_idx < len(pred.line_parents) else -1
-                        pred_relation = pred.line_relations[compact_idx] if compact_idx < len(pred.line_relations) else 0
-
-                        # 将 parent 的紧凑索引映射回全局 line_id
-                        if pred_parent_compact >= 0 and pred_parent_compact in compact_to_global:
-                            pred_parent = compact_to_global[pred_parent_compact]
-                        else:
-                            pred_parent = pred_parent_compact  # -1 (ROOT) 保持不变
-
+                    if idx in all_predictions:
+                        pred_class, pred_parent, pred_relation = all_predictions[idx]
                         output_item["class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
                         output_item["parent_id"] = pred_parent
                         output_item["relation"] = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
+                        class_counts[output_item["class"]] += 1
                     else:
-                        # 该行没有预测结果（可能被跳过）
                         output_item["class"] = "unknown"
                         output_item["parent_id"] = -1
                         output_item["relation"] = "none"
 
                     output_data.append(output_item)
 
-                # 保存到输出目录
+                # 打印统计
+                print(f"  [{doc_name}] {len(all_predictions)} lines: {dict(class_counts.most_common())}")
+
+                # 保存
                 output_file = os.path.join(output_dir, filename)
                 with open(output_file, "w", encoding="utf-8") as f:
                     json.dump(output_data, f, ensure_ascii=False, indent=2)
