@@ -409,8 +409,15 @@ class Predictor:
         """
         import json
         import os
+        import time
         from tqdm import tqdm
         from data.batch import wrap_batch
+
+        # 统计信息
+        total_docs = 0
+        total_pages = 0
+        total_lines = 0
+        start_time = time.time()
 
         # 标签映射
         try:
@@ -444,8 +451,14 @@ class Predictor:
                     doc_name = document_names[sample_idx] if sample_idx < len(document_names) else f"doc_{batch_idx}_{sample_idx}"
                     json_path = json_paths[sample_idx] if sample_idx < len(json_paths) else ""
 
+                    # 更新统计
+                    total_docs += 1
+                    num_chunks = raw_batch.get("chunks_per_doc", [1])[sample_idx] if "chunks_per_doc" in raw_batch else 1
+                    total_pages += num_chunks  # chunks 约等于页数
+                    total_lines += pred.num_lines
+
                     print(f"\n[Predictor] Processing: {doc_name}")
-                    print(f"  num_lines: {pred.num_lines}")
+                    print(f"  num_lines: {pred.num_lines}, chunks: {num_chunks}")
                     # 调试：打印部分 line_classes
                     sample_classes = {k: v for i, (k, v) in enumerate(pred.line_classes.items()) if i < 10}
                     print(f"  line_classes sample (first 10): {sample_classes}")
@@ -520,18 +533,37 @@ class Predictor:
                     output_files.append(output_file)
                     print(f"  Saved: {output_file} ({len(output_data)} items)")
 
+        # 计算推理时间
+        end_time = time.time()
+        inference_time = end_time - start_time
+
         # 保存元信息
         meta_file = os.path.join(output_dir, "meta.json")
         import datetime
         meta = {
             "timestamp": datetime.datetime.now().isoformat(),
             "num_documents": len(output_files),
+            "total_chunks": total_pages,
+            "total_lines": total_lines,
+            "inference_time_seconds": round(inference_time, 2),
             "files": [os.path.basename(f) for f in output_files],
         }
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        print(f"\n[Predictor] Saved {len(output_files)} documents to: {output_dir}")
+        # 打印统计信息
+        print(f"\n{'='*60}")
+        print(f"[Predictor] Inference Summary:")
+        print(f"  Documents: {total_docs}")
+        print(f"  Total chunks (≈pages): {total_pages}")
+        print(f"  Total lines: {total_lines}")
+        print(f"  Inference time: {inference_time:.2f}s")
+        if total_docs > 0:
+            print(f"  Avg time per doc: {inference_time/total_docs:.2f}s")
+        if total_pages > 0:
+            print(f"  Avg time per chunk: {inference_time/total_pages:.3f}s")
+        print(f"  Output dir: {output_dir}")
+        print(f"{'='*60}")
         self.model.train()
         return output_files
 
