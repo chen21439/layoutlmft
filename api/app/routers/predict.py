@@ -15,6 +15,7 @@ from ..schemas import (
     ErrorResponse,
 )
 from ..service.infer_service import get_infer_service
+from ..service.model_loader import get_model_loader
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,17 @@ async def predict(request: PredictRequest):
     - **task_id**: Task ID (folder name under data_dir_base)
     - **document_name**: Document name (without .json extension)
     """
+    # Return empty results if model is not loaded (e.g., still training)
+    model_loader = get_model_loader()
+    if not model_loader.is_loaded:
+        logger.warning("Model not loaded, returning empty results")
+        return PredictResponse(
+            document_name=request.document_name,
+            num_lines=0,
+            results=[],
+            inference_time_ms=0.0,
+        )
+
     try:
         service = get_infer_service()
         result = service.predict_single(
@@ -99,6 +111,17 @@ async def predict_with_original(request: PredictRequest):
     - **task_id**: Task ID (folder name under data_dir_base)
     - **document_name**: Document name (without .json extension)
     """
+    # Return empty results if model is not loaded (e.g., still training)
+    model_loader = get_model_loader()
+    if not model_loader.is_loaded:
+        logger.warning("Model not loaded, returning empty results")
+        return PredictWithOriginalResponse(
+            document_name=request.document_name,
+            num_lines=0,
+            inference_time_ms=0.0,
+            data=[],
+        )
+
     try:
         service = get_infer_service()
         result = service.predict_single(
