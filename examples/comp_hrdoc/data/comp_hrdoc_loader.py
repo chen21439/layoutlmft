@@ -217,15 +217,16 @@ class CompHRDocDataset(Dataset):
             reading_labels = [ann.get('reading_order_label', 0) for ann in anns_sorted]
             relations = [ann.get('relation', 0) for ann in anns_sorted]
 
-            # 将 parent_id (annotation id) 转换为本地索引
-            id_to_idx = {ann['id']: idx for idx, ann in enumerate(anns_sorted)}
+            # 将 parent_id (reading_order_id) 转换为本地索引
+            # 注意: parent_id 对应的是 reading_order_id，不是 annotation id
+            ro_to_idx = {ann.get('reading_order_id', i): i for i, ann in enumerate(anns_sorted)}
             parent_ids = []
             for ann in anns_sorted:
                 pid = ann.get('parent_id', -1)
                 if pid == -1:
                     parent_ids.append(-1)  # 根节点
-                elif pid in id_to_idx:
-                    parent_ids.append(id_to_idx[pid])  # 转换为本地索引
+                elif pid in ro_to_idx:
+                    parent_ids.append(ro_to_idx[pid])  # 转换为本地索引
                 else:
                     parent_ids.append(-1)  # 父节点不在当前样本中，视为根节点
 
