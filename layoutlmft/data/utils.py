@@ -1,5 +1,5 @@
 ﻿import torch
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any, Union
 
 # ---- Detectron2 shims (only used when detectron2 is unavailable) ----
 try:
@@ -91,4 +91,35 @@ def load_image(image_path):
     img_trans = TransformList([ResizeTransform(h=h, w=w, new_h=224, new_w=224)])
     image = torch.tensor(img_trans.apply_image(image).copy()).permute(2, 0, 1)  # copy to make it writeable
     return image, (w, h)
+
+
+def group_items_by_page(data: Union[list, dict]) -> Dict[int, list]:
+    """
+    按 page 字段分组，支持 FUNSD 和 HRDS 格式。
+
+    Args:
+        data: 输入数据
+            - FUNSD 格式: {"form": [...]} - 单页
+            - HRDS 格式: [...] 带 page 字段 - 多页
+
+    Returns:
+        Dict[int, list]: {page_num: [items]}
+    """
+    # FUNSD 格式：单页
+    if isinstance(data, dict) and "form" in data:
+        return {0: data["form"]}
+
+    # HRDS 格式：多页，按 page 字段分组
+    if not isinstance(data, list):
+        return {}
+
+    pages: Dict[int, list] = {}
+    for item in data:
+        page_num = item.get("page", 0)
+        # 确保 page_num 是整数
+        if isinstance(page_num, str):
+            page_num = int(page_num) if page_num.isdigit() else 0
+        pages.setdefault(page_num, []).append(item)
+
+    return pages
 

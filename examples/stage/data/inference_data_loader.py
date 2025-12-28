@@ -17,7 +17,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Any
 
-from layoutlmft.data.utils import load_image, normalize_bbox
+from layoutlmft.data.utils import load_image, normalize_bbox, group_items_by_page
 from layoutlmft.data.labels import trans_class, LABEL2ID
 
 from .hrdoc_data_loader import (
@@ -72,18 +72,11 @@ def load_single_document(
         logger.error(f"Failed to load {filepath}: {e}")
         return None
 
-    # Group by page
-    if isinstance(data, list):
-        pages_data = {}
-        for item in data:
-            page_num = item.get("page", 0)
-            if isinstance(page_num, str):
-                page_num = int(page_num) if page_num.isdigit() else 0
-            if page_num not in pages_data:
-                pages_data[page_num] = []
-            pages_data[page_num].append(item)
-    else:
-        pages_data = {0: data.get("form", [])}
+    # 按页分组（复用 utils.group_items_by_page）
+    pages_data = group_items_by_page(data)
+    if not pages_data:
+        logger.warning(f"Unknown data format in {filepath}")
+        return None
 
     # Process each page
     pages = []

@@ -11,7 +11,7 @@ import os
 
 import datasets
 
-from layoutlmft.data.utils import load_image, normalize_bbox
+from layoutlmft.data.utils import load_image, normalize_bbox, group_items_by_page
 from layoutlmft.data.labels import (
     LABEL_LIST,
     NUM_LABELS,
@@ -262,24 +262,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             with open(file_path, "r", encoding="utf8") as f:
                 data = json.load(f)
 
-            # 支持两种数据格式：
-            # 1. FUNSD格式：{"form": [...]} - 每个文件是一页
-            # 2. HRDS格式：[...] 带 page 字段 - 一个文件多页
-            if isinstance(data, dict) and "form" in data:
-                # FUNSD格式：单页
-                pages_data = {0: data["form"]}
-            elif isinstance(data, list):
-                # HRDS格式：多页，按 page 字段分组
-                pages_data = {}
-                for item in data:
-                    page_num = item.get("page", 0)
-                    # 确保 page_num 是整数（JSON 中可能是字符串）
-                    if isinstance(page_num, str):
-                        page_num = int(page_num) if page_num.isdigit() else 0
-                    if page_num not in pages_data:
-                        pages_data[page_num] = []
-                    pages_data[page_num].append(item)
-            else:
+            # 按页分组（支持 FUNSD 和 HRDS 格式）
+            pages_data = group_items_by_page(data)
+            if not pages_data:
                 logger.warning(f"Unknown data format in {file_path}")
                 continue
 
