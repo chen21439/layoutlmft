@@ -452,6 +452,7 @@ class Predictor:
         input_dir: str,
         output_dir: str,
         tokenizer,
+        image_dir: str = None,
         verbose: bool = True,
     ) -> str:
         """
@@ -461,6 +462,7 @@ class Predictor:
             input_dir: 输入目录（包含 JSON 文件）
             output_dir: 输出目录
             tokenizer: Tokenizer
+            image_dir: 图片目录（默认为 input_dir 同级的 images 目录）
             verbose: 是否显示进度条
 
         Returns:
@@ -471,8 +473,9 @@ class Predictor:
         from glob import glob
         from tqdm import tqdm
 
-        # 复用训练代码的 tokenize 函数
+        # 复用训练代码的 tokenize 函数和图片加载函数
         from data.hrdoc_data_loader import tokenize_page_with_line_boundary
+        from layoutlmft.data.utils import load_image
 
         # 标签映射
         try:
@@ -485,6 +488,17 @@ class Predictor:
         os.makedirs(output_dir, exist_ok=True)
         self.model.eval()
 
+        # 确定图片目录（默认为 input_dir 同级的 images 目录）
+        if image_dir is None:
+            # 尝试 input_dir/../images
+            parent_dir = os.path.dirname(input_dir.rstrip("/"))
+            image_dir = os.path.join(parent_dir, "images")
+
+        if not os.path.isdir(image_dir):
+            raise FileNotFoundError(f"Image directory not found: {image_dir}")
+
+        print(f"[Predictor] Image directory: {image_dir}")
+
         # 找到所有 JSON 文件
         json_files = glob(os.path.join(input_dir, "*.json"))
         if not json_files:
@@ -496,6 +510,7 @@ class Predictor:
         with torch.no_grad():
             for json_file in iterator:
                 filename = os.path.basename(json_file)
+                doc_name = filename.replace(".json", "")
 
                 # 读取输入
                 with open(json_file, "r", encoding="utf-8") as f:
@@ -503,6 +518,39 @@ class Predictor:
 
                 if not input_data:
                     continue
+
+                # 加载图片（复用训练代码的图片查找逻辑）
+                # 尝试多种路径格式
+                img_path = None
+                page_num = 0  # 默认第 0 页
+                for ext in [".png", ".jpg", ".jpeg"]:
+                    # 格式1: {image_dir}/{doc_name}/{page_num}.png
+                    candidate = os.path.join(image_dir, doc_name, f"{page_num}{ext}")
+                    if os.path.exists(candidate):
+                        img_path = candidate
+                        break
+                    # 格式2: {image_dir}/{doc_name}.png
+                    candidate = os.path.join(image_dir, f"{doc_name}{ext}")
+                    if os.path.exists(candidate):
+                        img_path = candidate
+                        break
+                    # 格式3: {image_dir}/{doc_name}/{doc_name}_{page_num}.png
+                    candidate = os.path.join(image_dir, doc_name, f"{doc_name}_{page_num}{ext}")
+                    if os.path.exists(candidate):
+                        img_path = candidate
+                        break
+
+                if img_path is None:
+                    raise FileNotFoundError(
+                        f"Image not found for '{doc_name}'. Tried:\n"
+                        f"  - {image_dir}/{doc_name}/{page_num}.png/jpg\n"
+                        f"  - {image_dir}/{doc_name}.png/jpg\n"
+                        f"  - {image_dir}/{doc_name}/{doc_name}_{page_num}.png/jpg"
+                    )
+
+                # 加载图片
+                image, img_size = load_image(img_path)
+                image_tensor = torch.tensor(image, device=self.device).unsqueeze(0).float()
 
                 # 提取文本和 bbox
                 tokens = [item.get("text", "") for item in input_data]
@@ -536,7 +584,7 @@ class Predictor:
                     chunk_line_ids = torch.tensor([chunk["line_ids"]], device=self.device)
 
                     # 推理
-                    pred = self._run_inference(input_ids, bbox, attention_mask, None, chunk_line_ids)
+                    pred = self._run_inference(input_ids, bbox, attention_mask, image_tensor, chunk_line_ids)
 
                     # 收集预测结果
                     for line_id, pred_class in pred.line_classes.items():
