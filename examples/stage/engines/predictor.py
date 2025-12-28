@@ -475,7 +475,7 @@ class Predictor:
 
         # 复用训练代码的 tokenize 函数和图片加载函数
         from data.hrdoc_data_loader import tokenize_page_with_line_boundary
-        from layoutlmft.data.utils import load_image
+        from layoutlmft.data.utils import load_image, normalize_bbox
 
         # 标签映射
         try:
@@ -552,9 +552,10 @@ class Predictor:
                 image, img_size = load_image(img_path)
                 image_tensor = torch.tensor(image, device=self.device).unsqueeze(0).float()
 
-                # 提取文本和 bbox
+                # 提取文本和 bbox（归一化到 [0, 1000]，和训练时一致）
                 tokens = [item.get("text", "") for item in input_data]
-                bboxes = [item.get("box", [0, 0, 0, 0]) for item in input_data]
+                raw_bboxes = [item.get("box", [0, 0, 0, 0]) for item in input_data]
+                bboxes = [normalize_bbox(box, img_size) for box in raw_bboxes]
                 # 推理时没有真实标签，用 0 填充
                 labels = [0] * len(tokens)
                 line_ids = list(range(len(tokens)))
