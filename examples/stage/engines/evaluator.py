@@ -262,6 +262,19 @@ class Evaluator:
 
         # 打印调试信息
         if debug or verbose:
+            # 预测类别统计（title/section 等）
+            from collections import Counter
+            pred_class_counter = Counter(all_pred_classes)
+            gt_class_counter = Counter(all_gt_classes)
+            print(f"\n[Evaluator Debug] Prediction class distribution:")
+            for cls_id in sorted(set(pred_class_counter.keys()) | set(gt_class_counter.keys())):
+                cls_name = self.id2label.get(cls_id, f"cls_{cls_id}")
+                gt_cnt = gt_class_counter.get(cls_id, 0)
+                pred_cnt = pred_class_counter.get(cls_id, 0)
+                diff = pred_cnt - gt_cnt
+                diff_str = f"+{diff}" if diff > 0 else str(diff)
+                print(f"  {cls_name}: GT={gt_cnt}, Pred={pred_cnt} ({diff_str})")
+
             print(f"\n[Evaluator Debug] Parent: evaluated={len(all_gt_parents)}, skipped_padding={debug_parent_skipped_padding}, skipped_invalid={debug_parent_skipped_invalid}")
 
             # Parent 按类别统计
