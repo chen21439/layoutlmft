@@ -355,3 +355,199 @@ class Predictor:
             image = image.to(self.device)
 
         return self._run_inference(input_ids, bbox, attention_mask, image, line_ids)
+
+    # ==================== 推理并保存 ====================
+
+    def predict_and_save(
+        self,
+        dataloader,
+        output_dir: str,
+        verbose: bool = True,
+    ) -> str:
+        """
+        对 dataloader 进行推理并保存结果
+
+        Args:
+            dataloader: DataLoader
+            output_dir: 输出目录
+            verbose: 是否显示进度条
+
+        Returns:
+            predictions_file: 保存的文件路径
+        """
+        import json
+        import os
+        from tqdm import tqdm
+        from data.batch import wrap_batch
+
+        # 标签映射
+        try:
+            from layoutlmft.data.labels import ID2LABEL
+        except ImportError:
+            ID2LABEL = {i: f"cls_{i}" for i in range(14)}
+
+        RELATION_LABELS = {0: "connect", 1: "contain", 2: "equality"}
+
+        os.makedirs(output_dir, exist_ok=True)
+        self.model.eval()
+
+        all_predictions = []
+        iterator = tqdm(dataloader, desc="Inference") if verbose else dataloader
+
+        with torch.no_grad():
+            for batch_idx, raw_batch in enumerate(iterator):
+                batch = wrap_batch(raw_batch)
+                batch = batch.to(self.device)
+
+                for sample_idx, sample in enumerate(batch):
+                    pred = self.predict(sample)
+
+                    # 构建结果
+                    sample_pred = {
+                        "batch_idx": batch_idx,
+                        "sample_idx": sample_idx,
+                        "num_lines": pred.num_lines,
+                        "lines": []
+                    }
+
+                    sorted_line_ids = sorted(pred.line_classes.keys())
+                    for idx, line_id in enumerate(sorted_line_ids):
+                        pred_class = pred.line_classes.get(line_id, 0)
+                        pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                        pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+
+                        sample_pred["lines"].append({
+                            "line_id": line_id,
+                            "pred_class": ID2LABEL.get(pred_class, f"cls_{pred_class}"),
+                            "pred_class_id": pred_class,
+                            "pred_parent": pred_parent,
+                            "pred_relation": RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}"),
+                            "pred_relation_id": pred_relation,
+                        })
+
+                    all_predictions.append(sample_pred)
+
+        # 保存结果
+        predictions_file = os.path.join(output_dir, "predictions.json")
+        with open(predictions_file, "w", encoding="utf-8") as f:
+            json.dump(all_predictions, f, ensure_ascii=False, indent=2)
+
+        # 保存元信息
+        meta_file = os.path.join(output_dir, "meta.json")
+        import datetime
+        meta = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "num_samples": len(all_predictions),
+            "total_lines": sum(p["num_lines"] for p in all_predictions),
+        }
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        print(f"\n[Predictor] Saved {len(all_predictions)} predictions to: {predictions_file}")
+        self.model.train()
+        return predictions_file
+
+    def predict_from_dir(
+        self,
+        input_dir: str,
+        output_dir: str,
+        tokenizer,
+        verbose: bool = True,
+    ) -> str:
+        """
+        从输入目录读取 JSON 文件进行推理（纯推理，无 GT）
+
+        Args:
+            input_dir: 输入目录（包含 JSON 文件）
+            output_dir: 输出目录
+            tokenizer: Tokenizer
+            verbose: 是否显示进度条
+
+        Returns:
+            output_dir: 输出目录路径
+        """
+        import json
+        import os
+        from glob import glob
+        from tqdm import tqdm
+
+        # 标签映射
+        try:
+            from layoutlmft.data.labels import ID2LABEL
+        except ImportError:
+            ID2LABEL = {i: f"cls_{i}" for i in range(14)}
+
+        RELATION_LABELS = {0: "connect", 1: "contain", 2: "equality"}
+
+        os.makedirs(output_dir, exist_ok=True)
+        self.model.eval()
+
+        # 找到所有 JSON 文件
+        json_files = glob(os.path.join(input_dir, "*.json"))
+        if not json_files:
+            print(f"[Predictor] No JSON files found in {input_dir}")
+            return output_dir
+
+        iterator = tqdm(json_files, desc="Inference") if verbose else json_files
+
+        with torch.no_grad():
+            for json_file in iterator:
+                filename = os.path.basename(json_file)
+
+                # 读取输入
+                with open(json_file, "r", encoding="utf-8") as f:
+                    input_data = json.load(f)
+
+                if not input_data:
+                    continue
+
+                # 提取文本和 bbox
+                tokens = [item.get("text", "") for item in input_data]
+                bboxes = [item.get("box", [0, 0, 0, 0]) for item in input_data]
+
+                # Tokenize
+                encoding = tokenizer(
+                    tokens,
+                    boxes=bboxes,
+                    is_split_into_words=True,
+                    return_tensors="pt",
+                    padding="max_length",
+                    truncation=True,
+                    max_length=512,
+                )
+
+                input_ids = encoding["input_ids"].to(self.device)
+                bbox = encoding["bbox"].to(self.device)
+                attention_mask = encoding["attention_mask"].to(self.device)
+
+                # 构建 line_ids tensor
+                word_ids = encoding.word_ids(batch_index=0)
+                line_ids_tensor = torch.full((1, input_ids.shape[1]), -1, dtype=torch.long, device=self.device)
+                for token_idx, word_id in enumerate(word_ids):
+                    if word_id is not None and word_id < len(tokens):
+                        line_ids_tensor[0, token_idx] = word_id
+
+                # 推理
+                pred = self._run_inference(input_ids, bbox, attention_mask, None, line_ids_tensor)
+
+                # 构建输出（保持原始格式，添加预测字段）
+                output_data = []
+                for idx, item in enumerate(input_data):
+                    pred_class = pred.line_classes.get(idx, 0)
+                    pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                    pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+
+                    output_item = item.copy()
+                    output_item["pred_class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
+                    output_item["pred_parent"] = pred_parent
+                    output_item["pred_relation"] = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
+                    output_data.append(output_item)
+
+                # 保存到输出目录
+                output_file = os.path.join(output_dir, filename)
+                with open(output_file, "w", encoding="utf-8") as f:
+                    json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+        print(f"\n[Predictor] Processed {len(json_files)} files, saved to: {output_dir}")
+        self.model.train()
+        return output_dir
