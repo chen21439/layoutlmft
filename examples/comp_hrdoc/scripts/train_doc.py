@@ -34,6 +34,7 @@ from examples.comp_hrdoc.data.comp_hrdoc_loader import (
     CompHRDocConfig,
     CompHRDocDataset,
     CompHRDocCollator,
+    CompHRDocDocumentCollator,
 )
 from examples.comp_hrdoc.models import (
     DOCModel,
@@ -91,6 +92,8 @@ def parse_args():
     # Data
     parser.add_argument("--max-regions", type=int, default=128)
     parser.add_argument("--val-split-ratio", type=float, default=0.1)
+    parser.add_argument("--document-level", action="store_true", default=False,
+                        help="Enable document-level training (supports cross-page parent)")
 
     # Training
     parser.add_argument("--batch-size", type=int, default=4)
@@ -426,13 +429,15 @@ def main():
         args.num_epochs = min(args.num_epochs, 2)
 
     # Create datasets
-    logger.info("Creating datasets...")
+    mode = "document-level" if args.document_level else "page-level"
+    logger.info(f"Creating datasets in {mode} mode...")
     data_config = CompHRDocConfig(
         env=args.env,
         max_train_samples=args.max_train_samples,
         max_val_samples=args.max_val_samples,
         val_split_ratio=args.val_split_ratio,
         use_images=False,
+        document_level=args.document_level,
     )
 
     train_dataset = CompHRDocDataset(data_config, split="train")
@@ -442,7 +447,15 @@ def main():
     logger.info(f"Validation dataset: {len(val_dataset)} samples")
 
     # Create dataloaders
-    collator = CompHRDocCollator(max_regions=args.max_regions)
+    # 文档级别使用更大的 max_regions (默认 512)，页面级别使用 args.max_regions
+    if args.document_level:
+        max_regions = args.max_regions if args.max_regions > 128 else 512
+        collator = CompHRDocDocumentCollator(max_regions=max_regions)
+        logger.info(f"Using document-level collator with max_regions={max_regions}")
+    else:
+        collator = CompHRDocCollator(max_regions=args.max_regions)
+        logger.info(f"Using page-level collator with max_regions={args.max_regions}")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,

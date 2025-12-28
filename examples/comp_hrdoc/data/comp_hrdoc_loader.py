@@ -131,12 +131,16 @@ class CompHRDocConfig:
     use_images: bool = True
     # 验证集比例（从训练集划分）
     val_split_ratio: float = 0.1
+    # 文档级别模式：将同一文档的所有页面聚合，支持跨页 parent 关系
+    document_level: bool = False
 
 
 class CompHRDocDataset(Dataset):
     """Comp_HRDoc 数据集
 
-    用于 Order 模块训练，每个样本是一个页面。
+    支持两种模式:
+    - 页面级别 (document_level=False): 每个样本是一个页面，跨页 parent 设为 -1
+    - 文档级别 (document_level=True): 每个样本是一个文档，支持跨页 parent 关系
     """
 
     def __init__(
@@ -159,9 +163,13 @@ class CompHRDocDataset(Dataset):
         self.paths = CompHRDocPaths.get_paths(config.env)
 
         # 加载数据
-        self.samples = self._load_data()
+        if config.document_level:
+            self.samples = self._load_document_level_data()
+        else:
+            self.samples = self._load_data()
 
-        logger.info(f"Loaded {len(self.samples)} samples for {split}")
+        mode = "document-level" if config.document_level else "page-level"
+        logger.info(f"Loaded {len(self.samples)} {mode} samples for {split}")
 
     def _load_data(self) -> List[Dict]:
         """加载并处理数据"""
@@ -313,37 +321,216 @@ class CompHRDocDataset(Dataset):
 
         return samples
 
+    def _load_document_level_data(self) -> List[Dict]:
+        """加载文档级别数据（支持跨页 parent 关系）
+
+        每个样本是一个完整文档，包含所有页面的区域。
+        parent_id 在文档范围内映射，支持跨页引用。
+        """
+
+        # 确定使用哪个文件
+        if self.split in ["train", "validation"]:
+            json_path = self.paths["train_unified"]
+            images_dir = self.paths["train_images"]
+        else:
+            json_path = self.paths.get("test_unified")
+            if json_path is None or not os.path.exists(json_path):
+                json_path = self.paths["train_unified"]
+            images_dir = self.paths.get("test_images", self.paths["train_images"])
+
+        logger.info(f"Loading document-level data from: {json_path}")
+
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        images = {img['id']: img for img in data['images']}
+
+        # 按文档名分组 annotations（从 image file_name 提取文档名）
+        doc_annotations = defaultdict(list)
+        doc_images = defaultdict(list)
+
+        for image_id, img_info in images.items():
+            file_name = img_info['file_name']
+            # 1511.06408_0.png -> 1511.06408
+            doc_name = '_'.join(file_name.split('_')[:-1])
+            doc_images[doc_name].append((image_id, img_info))
+
+        for ann in data['annotations']:
+            image_id = ann['image_id']
+            img_info = images.get(image_id)
+            if img_info is None:
+                continue
+            file_name = img_info['file_name']
+            doc_name = '_'.join(file_name.split('_')[:-1])
+            doc_annotations[doc_name].append(ann)
+
+        # 构建文档级别样本
+        samples = []
+        for doc_name in doc_annotations.keys():
+            anns = doc_annotations[doc_name]
+            doc_imgs = doc_images[doc_name]
+
+            # 按 annotation id 排序（全局顺序）
+            anns_sorted = sorted(anns, key=lambda x: x['id'])
+
+            # 构建文档内 annotation id -> 本地索引的映射
+            id_to_idx = {ann['id']: idx for idx, ann in enumerate(anns_sorted)}
+
+            # 提取所有数据
+            texts = []
+            bboxes = []
+            categories = []
+            reading_orders = []
+            reading_labels = []
+            parent_ids = []
+            relations = []
+            page_indices = []  # 记录每个区域所属的页面
+
+            for idx, ann in enumerate(anns_sorted):
+                # 文本
+                text = ' '.join(ann.get('textline_contents', []))
+                texts.append(text)
+
+                # Bbox
+                bbox = ann.get('AxisAlignedBBox', [0, 0, 0, 0])
+                if len(bbox) == 4:
+                    x, y, w, h = bbox
+                    bboxes.append([x, y, x + w, y + h])
+                else:
+                    bboxes.append([0, 0, 0, 0])
+
+                # 类别
+                categories.append(ann.get('category_id', 3))
+
+                # 阅读顺序
+                reading_orders.append(ann.get('reading_order_id', idx))
+                reading_labels.append(ann.get('reading_order_label', 0))
+                relations.append(ann.get('relation', 0))
+
+                # Parent ID（文档内全局映射）
+                pid = ann.get('parent_id', -1)
+                if pid == -1:
+                    parent_ids.append(-1)
+                elif pid in id_to_idx:
+                    parent_ids.append(id_to_idx[pid])
+                else:
+                    parent_ids.append(-1)  # parent 不在文档内（异常情况）
+
+                # 页面索引
+                page_indices.append(ann['image_id'])
+
+            # 构建 successor_labels
+            num_regions = len(anns_sorted)
+            if num_regions > 0:
+                sorted_indices = sorted(range(num_regions), key=lambda x: reading_orders[x])
+                successor_labels = [-1] * num_regions
+                for pos, idx in enumerate(sorted_indices):
+                    if pos < num_regions - 1:
+                        successor_labels[idx] = sorted_indices[pos + 1]
+                    else:
+                        successor_labels[idx] = idx
+            else:
+                successor_labels = []
+
+            sample = {
+                'doc_name': doc_name,
+                'num_regions': num_regions,
+                'num_pages': len(doc_imgs),
+                'texts': texts,
+                'bboxes': bboxes,
+                'categories': categories,
+                'reading_orders': reading_orders,
+                'reading_labels': reading_labels,
+                'parent_ids': parent_ids,
+                'relations': relations,
+                'successor_labels': successor_labels,
+                'page_indices': page_indices,
+                'images_dir': images_dir,
+                'image_files': [img['file_name'] for _, img in sorted(doc_imgs, key=lambda x: x[1]['file_name'])],
+            }
+
+            samples.append(sample)
+
+        # 划分 train/validation
+        if self.split in ["train", "validation"]:
+            doc_names = list(doc_annotations.keys())
+            num_docs = len(doc_names)
+            val_size = int(num_docs * self.config.val_split_ratio)
+
+            if self.split == "train":
+                selected_docs = set(doc_names[val_size:])
+            else:
+                selected_docs = set(doc_names[:val_size])
+
+            samples = [s for s in samples if s['doc_name'] in selected_docs]
+
+        # 限制样本数
+        max_samples = None
+        if self.split == "train":
+            max_samples = self.config.max_train_samples
+        elif self.split == "validation":
+            max_samples = self.config.max_val_samples
+
+        if max_samples is not None and len(samples) > max_samples:
+            samples = samples[:max_samples]
+
+        # 统计 parent 分布
+        total_regions = sum(s['num_regions'] for s in samples)
+        has_parent = sum(sum(1 for p in s['parent_ids'] if p >= 0) for s in samples)
+        logger.info(f"Document-level: {has_parent}/{total_regions} ({100*has_parent/total_regions:.1f}%) regions have valid parent")
+
+        return samples
+
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict:
         sample = self.samples[idx]
 
-        result = {
-            'image_id': sample['image_id'],
-            'image_file': sample['image_file'],
-            'num_regions': sample['num_regions'],
-            'texts': sample['texts'],
-            'bboxes': sample['bboxes'],
-            'categories': sample['categories'],
-            'reading_orders': sample['reading_orders'],
-            'reading_labels': sample['reading_labels'],
-            'parent_ids': sample['parent_ids'],
-            'relations': sample['relations'],
-            'successor_labels': sample['successor_labels'],  # 论文4.2.3格式：后继索引
-        }
-
-        # 加载图像（可选）
-        if self.config.use_images and os.path.exists(sample['image_path']):
-            try:
-                image = Image.open(sample['image_path']).convert('RGB')
-                image = image.resize(self.config.image_size)
-                result['image'] = image
-            except Exception as e:
-                logger.warning(f"Failed to load image {sample['image_path']}: {e}")
-                result['image'] = None
+        if self.config.document_level:
+            # 文档级别模式
+            result = {
+                'doc_name': sample['doc_name'],
+                'num_regions': sample['num_regions'],
+                'num_pages': sample['num_pages'],
+                'texts': sample['texts'],
+                'bboxes': sample['bboxes'],
+                'categories': sample['categories'],
+                'reading_orders': sample['reading_orders'],
+                'reading_labels': sample['reading_labels'],
+                'parent_ids': sample['parent_ids'],
+                'relations': sample['relations'],
+                'successor_labels': sample['successor_labels'],
+                'page_indices': sample['page_indices'],
+                'image_files': sample['image_files'],
+            }
         else:
-            result['image'] = None
+            # 页面级别模式
+            result = {
+                'image_id': sample['image_id'],
+                'image_file': sample['image_file'],
+                'num_regions': sample['num_regions'],
+                'texts': sample['texts'],
+                'bboxes': sample['bboxes'],
+                'categories': sample['categories'],
+                'reading_orders': sample['reading_orders'],
+                'reading_labels': sample['reading_labels'],
+                'parent_ids': sample['parent_ids'],
+                'relations': sample['relations'],
+                'successor_labels': sample['successor_labels'],
+            }
+
+            # 加载图像（可选，仅页面级别）
+            if self.config.use_images and os.path.exists(sample['image_path']):
+                try:
+                    image = Image.open(sample['image_path']).convert('RGB')
+                    image = image.resize(self.config.image_size)
+                    result['image'] = image
+                except Exception as e:
+                    logger.warning(f"Failed to load image {sample['image_path']}: {e}")
+                    result['image'] = None
+            else:
+                result['image'] = None
 
         # Tokenize（可选）
         if self.tokenizer is not None:
@@ -506,6 +693,107 @@ class CompHRDocCollator:
             import torchvision.transforms as T
             transform = T.ToTensor()
             batch['images'] = torch.stack([transform(img) for img in images if img is not None])
+
+        return batch
+
+
+class CompHRDocDocumentCollator:
+    """Comp_HRDoc 文档级别 Data Collator
+
+    用于文档级别训练，每个样本是一个完整文档（包含所有页面的区域）。
+    支持跨页 parent 关系。
+    """
+
+    def __init__(self, tokenizer=None, max_regions: int = 512):
+        """
+        Args:
+            tokenizer: Tokenizer（可选）
+            max_regions: 每个文档最大区域数（比页面级别大）
+        """
+        self.tokenizer = tokenizer
+        self.max_regions = max_regions
+
+    def __call__(self, features: List[Dict]) -> Dict[str, torch.Tensor]:
+        batch_size = len(features)
+
+        # 找出最大区域数
+        max_regions = min(
+            max(f['num_regions'] for f in features),
+            self.max_regions
+        )
+
+        # 初始化 batch tensors
+        batch = {
+            'batch_size': batch_size,
+            'num_regions': [min(f['num_regions'], max_regions) for f in features],
+            'doc_names': [f['doc_name'] for f in features],
+            'num_pages': [f['num_pages'] for f in features],
+        }
+
+        # 区域级别数据
+        reading_orders = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+        successor_labels = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+        reading_labels = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+        parent_ids = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+        relations = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+        categories = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+        region_mask = torch.zeros(batch_size, max_regions, dtype=torch.bool)
+        sibling_labels = torch.zeros(batch_size, max_regions, max_regions, dtype=torch.long)
+        page_indices = torch.full((batch_size, max_regions), -1, dtype=torch.long)
+
+        # Bboxes
+        bboxes = torch.zeros(batch_size, max_regions, 4, dtype=torch.float)
+
+        for i, f in enumerate(features):
+            num_regions = min(f['num_regions'], max_regions)
+
+            reading_orders[i, :num_regions] = torch.tensor(f['reading_orders'][:num_regions])
+
+            # 处理 successor_labels，需要修正超出范围的索引
+            succ_labels = list(f['successor_labels'][:num_regions])
+            for j, succ in enumerate(succ_labels):
+                if succ >= num_regions:
+                    succ_labels[j] = j  # 指向自己
+            successor_labels[i, :num_regions] = torch.tensor(succ_labels)
+
+            reading_labels[i, :num_regions] = torch.tensor(f['reading_labels'][:num_regions])
+
+            # parent_ids 已经是文档内全局索引，但需要修正超出范围的
+            sample_parent_ids = list(f['parent_ids'][:num_regions])
+            for j, pid in enumerate(sample_parent_ids):
+                if pid >= num_regions:
+                    sample_parent_ids[j] = -1  # parent 被截断，视为根节点
+            parent_ids[i, :num_regions] = torch.tensor(sample_parent_ids)
+
+            relations[i, :num_regions] = torch.tensor(f['relations'][:num_regions])
+            categories[i, :num_regions] = torch.tensor(f['categories'][:num_regions])
+            region_mask[i, :num_regions] = True
+
+            # page_indices
+            if 'page_indices' in f:
+                page_indices[i, :num_regions] = torch.tensor(f['page_indices'][:num_regions])
+
+            # 从 parent_ids 推导 sibling_labels（同一父节点的区域互为兄弟）
+            for j in range(num_regions):
+                for k in range(j + 1, num_regions):
+                    if (sample_parent_ids[j] >= 0 and
+                        sample_parent_ids[j] == sample_parent_ids[k]):
+                        sibling_labels[i, j, k] = 1
+                        sibling_labels[i, k, j] = 1
+
+            for j, bbox in enumerate(f['bboxes'][:num_regions]):
+                bboxes[i, j] = torch.tensor(bbox, dtype=torch.float)
+
+        batch['reading_orders'] = reading_orders
+        batch['successor_labels'] = successor_labels
+        batch['reading_labels'] = reading_labels
+        batch['parent_ids'] = parent_ids
+        batch['relations'] = relations
+        batch['categories'] = categories
+        batch['region_mask'] = region_mask
+        batch['bboxes'] = bboxes
+        batch['sibling_labels'] = sibling_labels
+        batch['page_indices'] = page_indices
 
         return batch
 

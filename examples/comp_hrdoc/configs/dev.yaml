@@ -18,3 +18,8 @@ gpu:
 # 输出路径
 output:
   root: "outputs"
+
+# 推理配置 (FastAPI 服务使用)
+inference:
+  checkpoint_path: null
+  data_dir_base: "/mnt/e/programFile/AIProgram/tender_ontology/static/upload"

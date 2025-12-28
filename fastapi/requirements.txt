@@ -1,0 +1,10 @@
+# FastAPI and server
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# HTTP client (for testing)
+httpx>=0.24.0
+
+# Note: PyTorch, transformers, and other ML dependencies
+# are already installed in the main project environment

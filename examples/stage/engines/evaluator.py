@@ -316,6 +316,9 @@ class Evaluator:
                 # 按 (child_class, gt_parent_class) 分组统计误判情况
                 self._print_parent_confusion_matrix(stats)
 
+                # 打印 Section 详细统计表格
+                self._print_section_stats(stats, gt_class_counter, pred_class_counter)
+
             # Relation 统计
             if all_gt_relations:
                 from collections import Counter
@@ -461,6 +464,114 @@ class Evaluator:
 
         # 下边框
         print('+' + '-' * (col_widths['child'] + 1) + '+' + '-' * (col_widths['gt'] + 1) + '+' + '-' * (col_widths['acc'] + 1) + '+' + '-' * (col_widths['errors'] + 1) + '+')
+
+    def _print_section_stats(self, stats: List[Dict], gt_class_counter: Dict, pred_class_counter: Dict) -> None:
+        """
+        打印 Section 类别的详细统计表格
+
+        包括：
+        1. Section 分类统计
+        2. Section Parent 准确率
+        3. Section 错误详情
+        """
+        SECTION_ID = LABEL2ID.get("section", 2)
+
+        # 筛选 section 相关的统计
+        section_stats = [s for s in stats if s["child_class"] == SECTION_ID]
+        if not section_stats:
+            return
+
+        # 计算统计数据
+        section_total = len(section_stats)
+        section_correct = sum(1 for s in section_stats if s["is_correct"])
+        section_acc = 100 * section_correct / section_total if section_total > 0 else 0
+
+        # 错误分析
+        section_errors = [s for s in section_stats if not s["is_correct"]]
+        error_by_pred_class = defaultdict(int)
+        for e in section_errors:
+            pred_cls = e["pred_parent_class"]
+            pred_name = self.id2label.get(pred_cls, "ROOT") if pred_cls is not None else "ROOT"
+            error_by_pred_class[pred_name] += 1
+
+        # GT/Pred 类别统计
+        gt_section_count = gt_class_counter.get(SECTION_ID, 0)
+        pred_section_count = pred_class_counter.get(SECTION_ID, 0)
+
+        # 按 gt_parent_class 分组统计
+        parent_class_stats = defaultdict(lambda: {"correct": 0, "total": 0, "errors": defaultdict(int)})
+        for s in section_stats:
+            gt_p_cls = s["gt_parent_class"]
+            gt_p_name = self.id2label.get(gt_p_cls, "ROOT") if gt_p_cls is not None else "ROOT"
+            parent_class_stats[gt_p_name]["total"] += 1
+            if s["is_correct"]:
+                parent_class_stats[gt_p_name]["correct"] += 1
+            else:
+                pred_p_cls = s["pred_parent_class"]
+                pred_p_name = self.id2label.get(pred_p_cls, "ROOT") if pred_p_cls is not None else "ROOT"
+                parent_class_stats[gt_p_name]["errors"][pred_p_name] += 1
+
+        # 打印表格
+        print("\n" + "=" * 70)
+        print("  📊 SECTION 类别详细统计")
+        print("=" * 70)
+
+        # 1. 分类统计
+        print("\n┌─────────────────────────────────────────────────────────────────────┐")
+        print("│ 1. Section 分类统计                                                 │")
+        print("├─────────────────────────────────────────────────────────────────────┤")
+        diff = pred_section_count - gt_section_count
+        diff_str = f"+{diff}" if diff > 0 else str(diff) if diff < 0 else "0"
+        print(f"│   GT Section 数量:    {gt_section_count:<6}                                       │")
+        print(f"│   Pred Section 数量:  {pred_section_count:<6} ({diff_str})                                     │")
+        print("└─────────────────────────────────────────────────────────────────────┘")
+
+        # 2. Parent 准确率
+        print("\n┌─────────────────────────────────────────────────────────────────────┐")
+        print("│ 2. Section Parent 预测准确率                                        │")
+        print("├─────────────────────────────────────────────────────────────────────┤")
+        bar_len = 30
+        filled = int(bar_len * section_acc / 100)
+        bar = "█" * filled + "░" * (bar_len - filled)
+        print(f"│   准确率: {section_acc:5.1f}%  [{bar}]  {section_correct}/{section_total}    │")
+        print("└─────────────────────────────────────────────────────────────────────┘")
+
+        # 3. 按 GT Parent 类型分组统计
+        print("\n┌─────────────────────────────────────────────────────────────────────┐")
+        print("│ 3. Section Parent 按 GT Parent 类型分组                             │")
+        print("├───────────────┬──────────┬───────────┬───────────────────────────────┤")
+        print("│ GT Parent     │ 正确/总数 │ 准确率    │ 误判分布                      │")
+        print("├───────────────┼──────────┼───────────┼───────────────────────────────┤")
+
+        for gt_p_name in sorted(parent_class_stats.keys()):
+            pstat = parent_class_stats[gt_p_name]
+            p_acc = 100 * pstat["correct"] / pstat["total"] if pstat["total"] > 0 else 0
+            count_str = f"{pstat['correct']}/{pstat['total']}"
+
+            # 错误分布
+            if pstat["errors"]:
+                err_list = [f"{k}:{v}" for k, v in sorted(pstat["errors"].items(), key=lambda x: -x[1])]
+                err_str = ", ".join(err_list)
+            else:
+                err_str = "-"
+
+            print(f"│ {gt_p_name:<13} │ {count_str:<8} │ {p_acc:>6.1f}%   │ {err_str:<29} │")
+
+        print("└───────────────┴──────────┴───────────┴───────────────────────────────┘")
+
+        # 4. 错误汇总
+        if section_errors:
+            print("\n┌─────────────────────────────────────────────────────────────────────┐")
+            print("│ 4. Section Parent 错误汇总                                          │")
+            print("├─────────────────────────────────────────────────────────────────────┤")
+            print(f"│   总错误数: {len(section_errors):<6}                                              │")
+            print("│   误判为:                                                           │")
+            for pred_name, cnt in sorted(error_by_pred_class.items(), key=lambda x: -x[1]):
+                pct = 100 * cnt / len(section_errors)
+                print(f"│     - {pred_name:<10}: {cnt:>3} ({pct:>5.1f}%)                                    │")
+            print("└─────────────────────────────────────────────────────────────────────┘")
+
+        print("=" * 70 + "\n")
 
     def _extract_gt(self, sample: Sample) -> Dict[str, Any]:
         """
