@@ -471,6 +471,9 @@ class Predictor:
         from glob import glob
         from tqdm import tqdm
 
+        # 复用训练代码的 tokenize 函数
+        from data.hrdoc_data_loader import tokenize_page_with_line_boundary
+
         # 标签映射
         try:
             from layoutlmft.data.labels import ID2LABEL
@@ -504,38 +507,56 @@ class Predictor:
                 # 提取文本和 bbox
                 tokens = [item.get("text", "") for item in input_data]
                 bboxes = [item.get("box", [0, 0, 0, 0]) for item in input_data]
+                # 推理时没有真实标签，用 0 填充
+                labels = [0] * len(tokens)
+                line_ids = list(range(len(tokens)))
 
-                # Tokenize
-                encoding = tokenizer(
-                    tokens,
-                    boxes=bboxes,
-                    is_split_into_words=True,
-                    return_tensors="pt",
-                    padding="max_length",
-                    truncation=True,
+                # 复用训练代码的 tokenize 函数
+                chunks = tokenize_page_with_line_boundary(
+                    tokenizer=tokenizer,
+                    tokens=tokens,
+                    bboxes=bboxes,
+                    labels=labels,
+                    line_ids=line_ids,
                     max_length=512,
                 )
 
-                input_ids = encoding["input_ids"].to(self.device)
-                bbox = encoding["bbox"].to(self.device)
-                attention_mask = encoding["attention_mask"].to(self.device)
+                if not chunks:
+                    continue
 
-                # 构建 line_ids tensor
-                word_ids = encoding.word_ids(batch_index=0)
-                line_ids_tensor = torch.full((1, input_ids.shape[1]), -1, dtype=torch.long, device=self.device)
-                for token_idx, word_id in enumerate(word_ids):
-                    if word_id is not None and word_id < len(tokens):
-                        line_ids_tensor[0, token_idx] = word_id
+                # 合并所有 chunks 的预测结果
+                all_pred_classes = {}
+                all_pred_parents = []
+                all_pred_relations = []
 
-                # 推理
-                pred = self._run_inference(input_ids, bbox, attention_mask, None, line_ids_tensor)
+                for chunk in chunks:
+                    input_ids = torch.tensor([chunk["input_ids"]], device=self.device)
+                    bbox = torch.tensor([chunk["bbox"]], device=self.device)
+                    attention_mask = torch.tensor([chunk["attention_mask"]], device=self.device)
+                    chunk_line_ids = torch.tensor([chunk["line_ids"]], device=self.device)
+
+                    # 推理
+                    pred = self._run_inference(input_ids, bbox, attention_mask, None, chunk_line_ids)
+
+                    # 收集预测结果
+                    for line_id, pred_class in pred.line_classes.items():
+                        # 使用 global_line_ids_in_chunk 映射回原始 line_id
+                        global_line_ids = chunk.get("global_line_ids_in_chunk", list(range(len(tokens))))
+                        if line_id < len(global_line_ids):
+                            orig_line_id = global_line_ids[line_id]
+                            all_pred_classes[orig_line_id] = pred_class
+
+                    # parent 和 relation 需要特殊处理（跨 chunk 合并）
+                    for idx, (parent, rel) in enumerate(zip(pred.line_parents, pred.line_relations)):
+                        all_pred_parents.append(parent)
+                        all_pred_relations.append(rel)
 
                 # 构建输出（保持原始格式，添加预测字段）
                 output_data = []
                 for idx, item in enumerate(input_data):
-                    pred_class = pred.line_classes.get(idx, 0)
-                    pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
-                    pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+                    pred_class = all_pred_classes.get(idx, 0)
+                    pred_parent = all_pred_parents[idx] if idx < len(all_pred_parents) else -1
+                    pred_relation = all_pred_relations[idx] if idx < len(all_pred_relations) else 0
 
                     output_item = item.copy()
                     output_item["pred_class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
