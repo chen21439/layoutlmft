@@ -457,7 +457,7 @@ class Predictor:
                     # 构建预测结果数组
                     sorted_line_ids = sorted(pred.line_classes.keys())
 
-                    # 创建 line_id -> prediction 映射
+                    # 创建 line_id -> prediction 映射（覆盖原字段）
                     pred_map = {}
                     for idx, line_id in enumerate(sorted_line_ids):
                         pred_class = pred.line_classes.get(line_id, 0)
@@ -465,11 +465,9 @@ class Predictor:
                         pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
 
                         pred_map[line_id] = {
-                            "pred_class": ID2LABEL.get(pred_class, f"cls_{pred_class}"),
-                            "pred_class_id": pred_class,
-                            "pred_parent": pred_parent,
-                            "pred_relation": RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}"),
-                            "pred_relation_id": pred_relation,
+                            "class": ID2LABEL.get(pred_class, f"cls_{pred_class}"),
+                            "parent_id": pred_parent,
+                            "relation": RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}"),
                         }
 
                     # 将预测结果添加到原始数据中
