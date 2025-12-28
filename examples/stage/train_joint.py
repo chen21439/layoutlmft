@@ -160,6 +160,7 @@ class JointModelArguments:
     lambda_cls: float = field(default=1.0, metadata={"help": "Classification loss weight"})
     lambda_parent: float = field(default=1.0, metadata={"help": "Parent loss weight"})
     lambda_rel: float = field(default=1.0, metadata={"help": "Relation loss weight"})
+    section_parent_weight: float = field(default=1.0, metadata={"help": "Weight for section type in parent loss (>1 emphasizes section parent finding)"})
     stage1_micro_batch_size: int = field(default=1, metadata={"help": "Stage1 micro-batch size (can be larger when Stage1 is frozen)"})
     stage1_no_grad: bool = field(default=True, metadata={"help": "Freeze Stage1 (saves memory, only train Stage3/4)"})
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Enable gradient checkpointing for Stage1 (saves ~50-70% GPU memory, slower training)"})
@@ -473,9 +474,13 @@ class JointLoggingCallback(TrainerCallback):
         filled = int(bar_width * progress)
         bar = "█" * filled + "░" * (bar_width - filled)
 
-        # 学习率
-        lr = logs.get("learning_rate", 0)
-        lr_str = f"{lr:.2e}" if lr > 0 else "N/A"
+        # 学习率（从 logs 或 state 获取）
+        lr = logs.get("learning_rate")
+        if lr is None and hasattr(state, 'last_lr') and state.last_lr is not None:
+            lr = state.last_lr
+        if lr is None:
+            lr = args.learning_rate  # 回退到初始学习率
+        lr_str = f"{lr:.2e}" if lr and lr > 0 else "N/A"
 
         # 各任务指标
         cls_loss = logs.get("cls_loss", 0)
@@ -916,6 +921,7 @@ def main():
     logger.info(f"  lambda_cls:    {model_args.lambda_cls}")
     logger.info(f"  lambda_parent: {model_args.lambda_parent}")
     logger.info(f"  lambda_rel:    {model_args.lambda_rel}")
+    logger.info(f"  section_parent_weight: {model_args.section_parent_weight}")
     logger.info("-" * 60)
     logger.info("Training Parameters:")
     logger.info(f"  max_steps:     {training_args.max_steps}")
@@ -1110,6 +1116,7 @@ def main():
         lambda_cls=model_args.lambda_cls,
         lambda_parent=model_args.lambda_parent if not training_args.disable_stage34 else 0.0,
         lambda_rel=model_args.lambda_rel if not training_args.disable_stage34 else 0.0,
+        section_parent_weight=model_args.section_parent_weight,
         use_focal_loss=model_args.use_focal_loss,
         use_gru=model_args.use_gru,
         stage1_micro_batch_size=model_args.stage1_micro_batch_size,

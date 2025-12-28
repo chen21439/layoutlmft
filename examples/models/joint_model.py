@@ -98,6 +98,7 @@ class JointModel(nn.Module):
         lambda_cls: float = 1.0,  # Stage 1 分类损失权重
         lambda_parent: float = 1.0,
         lambda_rel: float = 1.0,
+        section_parent_weight: float = 1.0,  # section 类型的 parent loss 权重
         use_line_level_cls: bool = True,  # True=使用line-level mean pool (推荐), False=使用原有token-level+投票
         use_focal_loss: bool = True,
         use_gru: bool = True,
@@ -133,6 +134,7 @@ class JointModel(nn.Module):
         self.lambda_cls = lambda_cls
         self.lambda_parent = lambda_parent
         self.lambda_rel = lambda_rel
+        self.section_parent_weight = section_parent_weight
         self.use_gru = use_gru
         self.use_line_level_cls = use_line_level_cls  # 新增：控制分类方式
         self.stage1_micro_batch_size = stage1_micro_batch_size
@@ -581,7 +583,14 @@ class JointModel(nn.Module):
         parent_total = 0
         gru_hidden = None  # GRU 隐状态，用于 Stage 4
 
+        # section 类型 ID（用于加权）
+        SECTION_ID = 4
+
         if self.lambda_parent > 0:
+            # 加权 parent loss 相关变量
+            weighted_parent_loss = torch.tensor(0.0, device=device)
+            total_weight = 0.0
+
             if self.use_gru:
                 # 准备传入 Stage 3 的 cls_logits
                 stage1_cls_logits = None
@@ -664,7 +673,14 @@ class JointModel(nn.Module):
                         loss = F.cross_entropy(child_logits.unsqueeze(0), target)
 
                         if not torch.isnan(loss):
-                            parent_loss = parent_loss + loss
+                            # 获取 child 类型，计算权重
+                            child_type = -1
+                            if line_labels is not None and b < line_labels.shape[0] and child_idx < line_labels.shape[1]:
+                                child_type = line_labels[b, child_idx].item()
+                            weight = self.section_parent_weight if child_type == SECTION_ID else 1.0
+
+                            weighted_parent_loss = weighted_parent_loss + loss * weight
+                            total_weight += weight
                             parent_total += 1
 
                         pred_parent = child_logits.argmax().item()
@@ -693,14 +709,26 @@ class JointModel(nn.Module):
 
                         target = torch.tensor([gt_parent], device=device)
                         loss = F.cross_entropy(scores.unsqueeze(0), target)
-                        parent_loss = parent_loss + loss
+
+                        # 获取 child 类型，计算权重
+                        child_type = -1
+                        if line_labels is not None and b < line_labels.shape[0] and child_idx < line_labels.shape[1]:
+                            child_type = line_labels[b, child_idx].item()
+                        weight = self.section_parent_weight if child_type == SECTION_ID else 1.0
+
+                        weighted_parent_loss = weighted_parent_loss + loss * weight
+                        total_weight += weight
 
                         pred_parent = scores.argmax().item()
                         if pred_parent == gt_parent:
                             parent_correct += 1
                         parent_total += 1
 
-            if parent_total > 0:
+            # 计算加权平均的 parent loss
+            if total_weight > 0:
+                parent_loss = weighted_parent_loss / total_weight
+                self._parent_acc = parent_correct / parent_total
+            elif parent_total > 0:
                 parent_loss = parent_loss / parent_total
                 self._parent_acc = parent_correct / parent_total
 
