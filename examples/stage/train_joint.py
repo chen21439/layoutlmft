@@ -552,6 +552,8 @@ class E2EEvaluationCallback(TrainerCallback):
             self.eval_dataloader,
             compute_teds=self.compute_teds,
             verbose=True,
+            save_predictions=self.save_predictions,
+            output_dir=self.output_dir,
         )
 
         # 打印结果
@@ -1152,10 +1154,14 @@ def main():
     callbacks = [JointLoggingCallback(), AMPDiagnosticCallback()]
     if eval_dataloader is not None:
         # 添加端到端评估 callback（评估 Parent 和 Relation 准确率）
+        # save_predictions 时保存到 runs/ 目录
+        runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs") if training_args.save_predictions else None
         callbacks.append(E2EEvaluationCallback(
             eval_dataloader=eval_dataloader,
             data_collator=data_collator,
             compute_teds=not training_args.quick,
+            save_predictions=training_args.save_predictions,
+            output_dir=runs_dir,
         ))
 
     # 创建 Trainer

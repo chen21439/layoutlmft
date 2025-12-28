@@ -156,26 +156,25 @@ class Evaluator:
                     # 预测
                     pred = self.predictor.predict(sample)
 
-                    # 收集预测结果用于保存
+                    # 收集预测结果用于保存（按文档分组）
                     if save_predictions:
-                        sample_pred = {
-                            "sample_id": num_samples,
-                            "lines": []
-                        }
+                        doc_name = sample.document_name or f"doc_{num_samples}"
                         sorted_line_ids = sorted(pred.line_classes.keys())
+                        doc_lines = []
                         for idx, line_id in enumerate(sorted_line_ids):
                             pred_class = pred.line_classes.get(line_id, 0)
                             pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
                             pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
-                            sample_pred["lines"].append({
+                            doc_lines.append({
                                 "line_id": line_id,
-                                "pred_class": self.id2label.get(pred_class, f"cls_{pred_class}"),
-                                "pred_class_id": pred_class,
-                                "pred_parent": pred_parent,
-                                "pred_relation": ID2RELATION.get(pred_relation, f"rel_{pred_relation}"),
-                                "pred_relation_id": pred_relation,
+                                "class": self.id2label.get(pred_class, f"cls_{pred_class}"),
+                                "parent_id": pred_parent,
+                                "relation": ID2RELATION.get(pred_relation, f"rel_{pred_relation}"),
                             })
-                        all_predictions.append(sample_pred)
+                        all_predictions.append({
+                            "document_name": doc_name,
+                            "lines": doc_lines,
+                        })
 
                     # 收集分类结果
                     for line_id, gt_class in gt["classes"].items():
@@ -339,15 +338,26 @@ class Evaluator:
         output.num_parent_pairs = len(all_gt_parents)
         output.num_relation_pairs = len(all_gt_relations)
 
-        # 保存预测结果
-        if save_predictions and output_dir:
+        # 保存预测结果（按文档保存到时间戳目录）
+        if save_predictions and all_predictions:
             import json
-            import os
-            os.makedirs(output_dir, exist_ok=True)
-            pred_file = os.path.join(output_dir, "predictions.json")
-            with open(pred_file, "w", encoding="utf-8") as f:
-                json.dump(all_predictions, f, ensure_ascii=False, indent=2)
-            print(f"\n[Evaluator] Predictions saved to: {pred_file}")
+            from datetime import datetime
+
+            # 创建时间戳目录: runs/{timestamp}/
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            runs_dir = output_dir or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "runs")
+            save_dir = os.path.join(runs_dir, timestamp)
+            os.makedirs(save_dir, exist_ok=True)
+
+            # 按文档保存
+            for doc_pred in all_predictions:
+                doc_name = doc_pred["document_name"]
+                doc_lines = doc_pred["lines"]
+                output_file = os.path.join(save_dir, f"{doc_name}_infer.json")
+                with open(output_file, "w", encoding="utf-8") as f:
+                    json.dump(doc_lines, f, ensure_ascii=False, indent=2)
+
+            print(f"\n[Evaluator] Predictions saved to: {save_dir}/ ({len(all_predictions)} documents)")
 
         self.predictor.model.train()
         return output
