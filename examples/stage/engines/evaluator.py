@@ -138,6 +138,7 @@ class Evaluator:
         debug_parent_total = 0
         debug_first_samples = []
         self._parent_class_stats = []  # 重置 parent 类别统计
+        self._doc_json_paths = {}  # 文档名 -> json_path 映射
 
         iterator = tqdm(dataloader, desc="Evaluating") if verbose else dataloader
 
@@ -149,6 +150,10 @@ class Evaluator:
 
                 for sample in batch:
                     num_samples += 1
+
+                    # 保存 json_path 映射
+                    if sample.document_name and sample.json_path:
+                        self._doc_json_paths[sample.document_name] = sample.json_path
 
                     # 提取 GT
                     gt = self._extract_gt(sample)
@@ -229,14 +234,23 @@ class Evaluator:
                         pred_parent_line_id = gt_line_ids[pred_parent] if pred_parent >= 0 and pred_parent < len(gt_line_ids) else None
                         pred_parent_class = gt["classes"].get(pred_parent_line_id, None) if pred_parent_line_id is not None else None
 
+                        # 获取实际的 line_id（不是索引）
+                        child_line_id = gt_line_ids[idx] if idx < len(gt_line_ids) else idx
+                        gt_parent_line_id = gt_line_ids[gt_parent] if gt_parent >= 0 and gt_parent < len(gt_line_ids) else -1
+                        pred_parent_line_id_val = gt_line_ids[pred_parent] if pred_parent >= 0 and pred_parent < len(gt_line_ids) else -1
+
                         self._parent_class_stats.append({
                             "child_idx": idx,
                             "child_class": child_class,
+                            "child_line_id": child_line_id,
                             "gt_parent": gt_parent,
                             "gt_parent_class": gt_parent_class,
+                            "gt_parent_line_id": gt_parent_line_id,
                             "pred_parent": pred_parent,
                             "pred_parent_class": pred_parent_class,
+                            "pred_parent_line_id": pred_parent_line_id_val,
                             "is_correct": gt_parent == pred_parent,
+                            "document_name": sample.document_name,
                         })
 
                         # 调试：收集前几个样本的详情
@@ -571,7 +585,96 @@ class Evaluator:
                 print(f"│     - {pred_name:<10}: {cnt:>3} ({pct:>5.1f}%)                                    │")
             print("└─────────────────────────────────────────────────────────────────────┘")
 
+            # 5. 错误详情（带文本）
+            self._print_section_error_details(section_errors)
+
         print("=" * 70 + "\n")
+
+    def _print_section_error_details(self, section_errors: List[Dict]) -> None:
+        """
+        打印 Section 错误详情（带文本信息）
+        """
+        import json
+
+        # 加载原始数据缓存
+        doc_line_texts = {}  # {doc_name: {line_id: text}}
+
+        def load_doc_texts(doc_name: str) -> Dict[int, str]:
+            """从原始 JSON 加载文档的行文本"""
+            if doc_name in doc_line_texts:
+                return doc_line_texts[doc_name]
+
+            line_texts = {}
+            json_path = self._doc_json_paths.get(doc_name)
+
+            if json_path and os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+
+                    # 处理多页面格式（pages 数组）
+                    if "pages" in data:
+                        for page in data["pages"]:
+                            items = page.get("items", page.get("lines", []))
+                            for item in items:
+                                line_id = item.get("line_id", item.get("id"))
+                                if line_id is not None:
+                                    words = item.get("words", [])
+                                    if words:
+                                        text = " ".join(w.get("text", "") for w in words)
+                                    else:
+                                        text = item.get("text", "")
+                                    line_texts[line_id] = text[:50]  # 截断
+                    else:
+                        # 单页面格式
+                        items = data.get("items", data.get("lines", []))
+                        for item in items:
+                            line_id = item.get("line_id", item.get("id"))
+                            if line_id is not None:
+                                words = item.get("words", [])
+                                if words:
+                                    text = " ".join(w.get("text", "") for w in words)
+                                else:
+                                    text = item.get("text", "")
+                                line_texts[line_id] = text[:50]
+                except Exception as e:
+                    pass  # 忽略加载错误
+
+            doc_line_texts[doc_name] = line_texts
+            return line_texts
+
+        print("\n┌─────────────────────────────────────────────────────────────────────────────────────────────────┐")
+        print("│ 5. Section Parent 错误详情                                                                      │")
+        print("├─────────────────────────────────────────────────────────────────────────────────────────────────┤")
+
+        for i, err in enumerate(section_errors[:10]):  # 只显示前 10 个
+            doc_name = err.get("document_name", "unknown")
+            line_texts = load_doc_texts(doc_name)
+
+            child_line_id = err.get("child_line_id", -1)
+            gt_parent_line_id = err.get("gt_parent_line_id", -1)
+            pred_parent_line_id = err.get("pred_parent_line_id", -1)
+
+            child_text = line_texts.get(child_line_id, "N/A")
+            gt_parent_text = line_texts.get(gt_parent_line_id, "ROOT" if gt_parent_line_id == -1 else "N/A")
+            pred_parent_text = line_texts.get(pred_parent_line_id, "ROOT" if pred_parent_line_id == -1 else "N/A")
+
+            gt_p_cls = err.get("gt_parent_class")
+            pred_p_cls = err.get("pred_parent_class")
+            gt_p_name = self.id2label.get(gt_p_cls, "ROOT") if gt_p_cls is not None else "ROOT"
+            pred_p_name = self.id2label.get(pred_p_cls, "ROOT") if pred_p_cls is not None else "ROOT"
+
+            print(f"│ [{i+1}] 文档: {doc_name:<30}                                                    │")
+            print(f"│     当前行 (id={child_line_id}): \"{child_text}\"")
+            print(f"│     ✓ GT Parent   (id={gt_parent_line_id}, {gt_p_name}): \"{gt_parent_text}\"")
+            print(f"│     ✗ Pred Parent (id={pred_parent_line_id}, {pred_p_name}): \"{pred_parent_text}\"")
+            if i < len(section_errors) - 1 and i < 9:
+                print("│" + "─" * 97 + "│")
+
+        if len(section_errors) > 10:
+            print(f"│     ... 还有 {len(section_errors) - 10} 个错误未显示                                                        │")
+
+        print("└─────────────────────────────────────────────────────────────────────────────────────────────────┘")
 
     def _extract_gt(self, sample: Sample) -> Dict[str, Any]:
         """

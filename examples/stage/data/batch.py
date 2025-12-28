@@ -41,6 +41,7 @@ class Sample:
 
     # 元信息
     document_name: Optional[str] = None
+    json_path: Optional[str] = None  # 原始 JSON 文件路径
     num_chunks: int = 1
     is_document_level: bool = False
 
@@ -60,6 +61,7 @@ class Sample:
             line_relations=move(self.line_relations),
             line_semantic_labels=move(self.line_semantic_labels),
             document_name=self.document_name,
+            json_path=self.json_path,
             num_chunks=self.num_chunks,
             is_document_level=self.is_document_level,
         )
@@ -166,6 +168,7 @@ class DocumentLevelBatch(BatchBase):
         self._num_docs = raw_batch.get("num_docs", 1)
         self._chunks_per_doc = raw_batch.get("chunks_per_doc", [raw_batch["input_ids"].shape[0]])
         self._document_names = raw_batch.get("document_names", [None] * self._num_docs)
+        self._json_paths = raw_batch.get("json_paths", [None] * self._num_docs)
 
     def __len__(self) -> int:
         return self._num_docs
@@ -232,6 +235,7 @@ class DocumentLevelBatch(BatchBase):
             line_relations=line_relations,
             line_semantic_labels=line_semantic_labels,
             document_name=self._document_names[idx] if idx < len(self._document_names) else None,
+            json_path=self._json_paths[idx] if idx < len(self._json_paths) else None,
             num_chunks=num_chunks,
             is_document_level=True,
         )
