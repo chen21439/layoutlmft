@@ -449,6 +449,11 @@ class Predictor:
                     # 调试：打印部分 line_classes
                     sample_classes = {k: v for i, (k, v) in enumerate(pred.line_classes.items()) if i < 10}
                     print(f"  line_classes sample (first 10): {sample_classes}")
+                    # 调试：统计各类别预测数量
+                    from collections import Counter
+                    class_counter = Counter(pred.line_classes.values())
+                    class_stats = {ID2LABEL.get(k, f"cls_{k}"): v for k, v in sorted(class_counter.items())}
+                    print(f"  class distribution: {class_stats}")
 
                     # 加载原始 JSON
                     original_data = []
