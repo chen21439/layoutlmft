@@ -599,7 +599,7 @@ class Predictor:
                         all_pred_parents.append(parent)
                         all_pred_relations.append(rel)
 
-                # 构建输出（保持原始格式，添加预测字段）
+                # 构建输出（直接覆盖 class, parent_id, relation 字段）
                 output_data = []
                 for idx, item in enumerate(input_data):
                     pred_class = all_pred_classes.get(idx, 0)
@@ -607,9 +607,9 @@ class Predictor:
                     pred_relation = all_pred_relations[idx] if idx < len(all_pred_relations) else 0
 
                     output_item = item.copy()
-                    output_item["pred_class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
-                    output_item["pred_parent"] = pred_parent
-                    output_item["pred_relation"] = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
+                    output_item["class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
+                    output_item["parent_id"] = pred_parent
+                    output_item["relation"] = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
                     output_data.append(output_item)
 
                 # 保存到输出目录
