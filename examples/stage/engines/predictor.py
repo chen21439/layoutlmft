@@ -637,8 +637,9 @@ class Predictor:
                 # 打印统计
                 print(f"  [{doc_name}] {len(all_predictions)} lines: {dict(class_counts.most_common())}")
 
-                # 保存
-                output_file = os.path.join(output_dir, filename)
+                # 保存（文件名添加 _infer 后缀）
+                base_name = filename.replace(".json", "")
+                output_file = os.path.join(output_dir, f"{base_name}_infer.json")
                 with open(output_file, "w", encoding="utf-8") as f:
                     json.dump(output_data, f, ensure_ascii=False, indent=2)
 
