@@ -588,6 +588,12 @@ class Predictor:
                 # 一次性推理所有 chunks（line_pooling 会自动聚合跨 chunk 的行）
                 pred = self._run_inference(input_ids, bbox, attention_mask, batch_image, chunk_line_ids)
 
+                # 调试：打印预测统计
+                from collections import Counter
+                class_id_counts = Counter(pred.line_classes.values())
+                class_name_counts = {ID2LABEL.get(k, f"cls_{k}"): v for k, v in class_id_counts.items()}
+                print(f"  [{doc_name}] {len(pred.line_classes)} lines predicted: {dict(class_name_counts)}")
+
                 # 构建输出（和 predict_and_save 保持一致）
                 # pred.line_classes 的 key 是全局 line_id
                 # pred.line_parents/line_relations 的索引是紧凑索引（0, 1, 2, ...）
