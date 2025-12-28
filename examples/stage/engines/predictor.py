@@ -572,39 +572,29 @@ class Predictor:
                 if not chunks:
                     continue
 
-                # 合并所有 chunks 的预测结果
-                all_pred_classes = {}
-                all_pred_parents = []
-                all_pred_relations = []
+                # 把所有 chunks 合并成一个 batch（和训练时一致）
+                num_chunks = len(chunks)
+                input_ids = torch.tensor([c["input_ids"] for c in chunks], device=self.device)
+                bbox = torch.tensor([c["bbox"] for c in chunks], device=self.device)
+                attention_mask = torch.tensor([c["attention_mask"] for c in chunks], device=self.device)
+                chunk_line_ids = torch.tensor([c["line_ids"] for c in chunks], device=self.device)
 
-                for chunk in chunks:
-                    input_ids = torch.tensor([chunk["input_ids"]], device=self.device)
-                    bbox = torch.tensor([chunk["bbox"]], device=self.device)
-                    attention_mask = torch.tensor([chunk["attention_mask"]], device=self.device)
-                    chunk_line_ids = torch.tensor([chunk["line_ids"]], device=self.device)
+                # 复制 image 到每个 chunk（和训练时一致）
+                if num_chunks > 1:
+                    batch_image = image_tensor.expand(num_chunks, -1, -1, -1)
+                else:
+                    batch_image = image_tensor
 
-                    # 推理
-                    pred = self._run_inference(input_ids, bbox, attention_mask, image_tensor, chunk_line_ids)
-
-                    # 收集预测结果
-                    for line_id, pred_class in pred.line_classes.items():
-                        # 使用 global_line_ids_in_chunk 映射回原始 line_id
-                        global_line_ids = chunk.get("global_line_ids_in_chunk", list(range(len(tokens))))
-                        if line_id < len(global_line_ids):
-                            orig_line_id = global_line_ids[line_id]
-                            all_pred_classes[orig_line_id] = pred_class
-
-                    # parent 和 relation 需要特殊处理（跨 chunk 合并）
-                    for idx, (parent, rel) in enumerate(zip(pred.line_parents, pred.line_relations)):
-                        all_pred_parents.append(parent)
-                        all_pred_relations.append(rel)
+                # 一次性推理所有 chunks（line_pooling 会自动聚合跨 chunk 的行）
+                pred = self._run_inference(input_ids, bbox, attention_mask, batch_image, chunk_line_ids)
 
                 # 构建输出（直接覆盖 class, parent_id, relation 字段）
                 output_data = []
                 for idx, item in enumerate(input_data):
-                    pred_class = all_pred_classes.get(idx, 0)
-                    pred_parent = all_pred_parents[idx] if idx < len(all_pred_parents) else -1
-                    pred_relation = all_pred_relations[idx] if idx < len(all_pred_relations) else 0
+                    # line_classes 的 key 是行索引（0, 1, 2, ...）
+                    pred_class = pred.line_classes.get(idx, 0)
+                    pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                    pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
 
                     output_item = item.copy()
                     output_item["class"] = ID2LABEL.get(pred_class, f"cls_{pred_class}")
