@@ -156,20 +156,28 @@ class Evaluator:
                     # 预测
                     pred = self.predictor.predict(sample)
 
-                    # 收集预测结果用于保存（按文档分组）
+                    # 收集预测结果用于保存（按文档分组，同时保存 GT 和预测）
                     if save_predictions:
                         doc_name = sample.document_name or f"doc_{num_samples}"
                         sorted_line_ids = sorted(pred.line_classes.keys())
                         doc_lines = []
                         for idx, line_id in enumerate(sorted_line_ids):
+                            # 预测结果
                             pred_class = pred.line_classes.get(line_id, 0)
                             pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
                             pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+                            # GT 结果
+                            gt_class = gt["classes"].get(line_id, -1)
+                            gt_parent = gt["parents"][idx] if idx < len(gt["parents"]) else -1
+                            gt_relation = gt["relations"][idx] if idx < len(gt["relations"]) else -1
                             doc_lines.append({
                                 "line_id": line_id,
-                                "class": self.id2label.get(pred_class, f"cls_{pred_class}"),
-                                "parent_id": pred_parent,
-                                "relation": ID2RELATION.get(pred_relation, f"rel_{pred_relation}"),
+                                "gt_class": self.id2label.get(gt_class, f"cls_{gt_class}"),
+                                "pred_class": self.id2label.get(pred_class, f"cls_{pred_class}"),
+                                "gt_parent_id": gt_parent,
+                                "pred_parent_id": pred_parent,
+                                "gt_relation": ID2RELATION.get(gt_relation, f"rel_{gt_relation}") if gt_relation >= 0 else "N/A",
+                                "pred_relation": ID2RELATION.get(pred_relation, f"rel_{pred_relation}"),
                             })
                         all_predictions.append({
                             "document_name": doc_name,
