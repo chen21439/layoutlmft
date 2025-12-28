@@ -183,15 +183,16 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     )
                 )
 
-        # 测试集（始终使用原始 test 目录）
-        test_path = os.path.join(data_dir, "test")
-        if os.path.exists(test_path):
-            splits.append(
-                datasets.SplitGenerator(
-                    name=datasets.Split.TEST,
-                    gen_kwargs={"filepath": test_path, "doc_ids": None, "max_samples": max_samples, "max_docs": max_docs}
+        # 测试集（仅在非 covmatch 模式下加载）
+        if train_doc_ids is None:
+            test_path = os.path.join(data_dir, "test")
+            if os.path.exists(test_path):
+                splits.append(
+                    datasets.SplitGenerator(
+                        name=datasets.Split.TEST,
+                        gen_kwargs={"filepath": test_path, "doc_ids": None, "max_samples": max_samples, "max_docs": max_docs}
+                    )
                 )
-            )
 
         return splits
 
