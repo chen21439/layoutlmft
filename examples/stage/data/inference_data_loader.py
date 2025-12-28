@@ -306,6 +306,16 @@ class InferenceDataLoader:
         if len(all_chunks) == 0:
             return None
 
+        # 调试日志
+        total_lines = sum(len(p["line_parent_ids"]) for p in pages)
+        print(f"[DEBUG] Document '{document_name}':")
+        print(f"  pages: {len(pages)}, total_lines: {total_lines}, chunks: {len(all_chunks)}")
+        print(f"  all_parent_ids length: {len(all_parent_ids)}")
+        # 打印每页的 line_ids 范围
+        for p in pages[:3]:  # 只打印前3页
+            unique_line_ids = sorted(set(p["line_ids"]))
+            print(f"  page {p['page_number']}: line_ids range [{min(unique_line_ids)}, {max(unique_line_ids)}], count={len(unique_line_ids)}")
+
         return {
             "document_name": document_name,
             "num_pages": len(pages),
