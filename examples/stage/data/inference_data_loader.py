@@ -78,6 +78,12 @@ def load_single_document(
         logger.warning(f"Unknown data format in {filepath}")
         return None
 
+    # 调试：打印第一个 item 的字段名
+    first_page_items = list(pages_data.values())[0]
+    if first_page_items:
+        print(f"[DEBUG] JSON item keys: {list(first_page_items[0].keys())}")
+        print(f"[DEBUG] First item: {first_page_items[0]}")
+
     # Process each page
     pages = []
     for page_num in sorted(pages_data.keys()):
