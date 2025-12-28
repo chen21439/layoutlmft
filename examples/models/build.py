@@ -112,32 +112,25 @@ def load_joint_model(
 
     logger.info(f"Loading joint model from: {model_path}")
 
-    # ==================== Stage 1: LayoutXLM ====================
+    # ==================== 加载配置和权重文件 ====================
     stage1_path = os.path.join(model_path, "stage1")
     if not os.path.exists(stage1_path):
-        raise ValueError(f"Stage 1 model not found: {stage1_path}")
+        raise ValueError(f"Stage 1 config not found: {stage1_path}")
 
+    root_model_file = os.path.join(model_path, "pytorch_model.bin")
+    if not os.path.exists(root_model_file):
+        raise ValueError(f"Model weights not found: {root_model_file}")
+
+    # ==================== 创建模型结构 ====================
     stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
     stage1_config.num_labels = NUM_LABELS
     stage1_config.id2label = get_id2label()
     stage1_config.label2id = get_label2id()
 
-    # 从根目录 pytorch_model.bin 加载完整模型，提取 stage1 权重
-    root_model_file = os.path.join(model_path, "pytorch_model.bin")
-    full_state = torch.load(root_model_file, map_location="cpu")
-    stage1_state = {k[7:]: v for k, v in full_state.items() if k.startswith("stage1.")}
-
     stage1_model = LayoutXLMForTokenClassification(config=stage1_config)
-    stage1_model.load_state_dict(stage1_state)
-    logger.info(f"Loaded Stage 1 from: {root_model_file}")
-
-    # ==================== Tokenizer ====================
-    tokenizer = _load_tokenizer(model_path, config)  # 从根目录加载
-
-    # ==================== Stage 2: Feature Extractor ====================
     feature_extractor = LineFeatureExtractor()
 
-    # ==================== Stage 3: ParentFinder ====================
+    # 从 stage3.pt 判断是否使用 GRU（只读取结构信息）
     stage3_path = os.path.join(model_path, "stage3.pt")
     stage3_state = torch.load(stage3_path, map_location="cpu")
     use_gru = any("gru" in k for k in stage3_state.keys())
@@ -153,19 +146,11 @@ def load_joint_model(
         stage3_model = SimpleParentFinder(hidden_size=768, dropout=0.0)
         logger.info("Using SimpleParentFinder")
 
-    stage3_model.load_state_dict(stage3_state, strict=False)
-    logger.info(f"Loaded Stage 3 from: {stage3_path}")
-
-    # ==================== Stage 4: RelationClassifier ====================
-    stage4_path = os.path.join(model_path, "stage4.pt")
-    stage4_state = torch.load(stage4_path, map_location="cpu")
-    hidden_size = stage4_state["fc.weight"].shape[1] // 2 if "fc.weight" in stage4_state else (512 if use_gru else 768)
-
+    # Stage 4 hidden_size 取决于是否使用 GRU
+    stage4_hidden_size = gru_hidden_size if use_gru else 768
     stage4_model = MultiClassRelationClassifier(
-        hidden_size=hidden_size, num_relations=3, use_geometry=False, dropout=0.0,
+        hidden_size=stage4_hidden_size, num_relations=3, use_geometry=False, dropout=0.0,
     )
-    stage4_model.load_state_dict(stage4_state)
-    logger.info(f"Loaded Stage 4 from: {stage4_path}")
 
     # ==================== 组装 JointModel ====================
     model = JointModel(
@@ -176,19 +161,19 @@ def load_joint_model(
         use_gru=use_gru,
     )
 
-    # ==================== 加载 cls_head 和 line_pooling 权重 ====================
-    # 这些模块保存在 pytorch_model.bin 中，键名为 cls_head.* 和 line_pooling.*
-    cls_head_state = {k[9:]: v for k, v in full_state.items() if k.startswith("cls_head.")}
-    if cls_head_state:
-        model.cls_head.load_state_dict(cls_head_state)
-        logger.info(f"Loaded cls_head ({len(cls_head_state)} keys)")
-    else:
-        logger.warning("cls_head weights not found in checkpoint, using random initialization!")
+    # ==================== 加载权重（复用训练代码逻辑） ====================
+    # 直接对整个 model 调用 load_state_dict，与 train_joint.py 一致
+    logger.info(f"Loading weights from: {root_model_file}")
+    state_dict = torch.load(root_model_file, map_location="cpu")
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    if missing_keys:
+        logger.warning(f"Missing keys: {missing_keys}")
+    if unexpected_keys:
+        logger.warning(f"Unexpected keys: {unexpected_keys}")
+    logger.info("Model weights loaded successfully")
 
-    line_pooling_state = {k[13:]: v for k, v in full_state.items() if k.startswith("line_pooling.")}
-    if line_pooling_state:
-        model.line_pooling.load_state_dict(line_pooling_state)
-        logger.info(f"Loaded line_pooling ({len(line_pooling_state)} keys)")
+    # ==================== Tokenizer ====================
+    tokenizer = _load_tokenizer(model_path, config)
 
     model = model.to(device)
     model.eval()
