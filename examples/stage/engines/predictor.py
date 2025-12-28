@@ -415,7 +415,9 @@ class Predictor:
         # 标签映射
         try:
             from layoutlmft.data.labels import ID2LABEL
-        except ImportError:
+            print(f"[DEBUG] ID2LABEL loaded successfully: {ID2LABEL}")
+        except ImportError as e:
+            print(f"[DEBUG] Failed to import ID2LABEL: {e}")
             ID2LABEL = {i: f"cls_{i}" for i in range(14)}
 
         RELATION_LABELS = {0: "connect", 1: "contain", 2: "equality"}
@@ -444,6 +446,9 @@ class Predictor:
 
                     print(f"\n[Predictor] Processing: {doc_name}")
                     print(f"  num_lines: {pred.num_lines}")
+                    # 调试：打印部分 line_classes
+                    sample_classes = {k: v for i, (k, v) in enumerate(pred.line_classes.items()) if i < 10}
+                    print(f"  line_classes sample (first 10): {sample_classes}")
 
                     # 加载原始 JSON
                     original_data = []
@@ -469,6 +474,10 @@ class Predictor:
                             "parent_id": pred_parent,
                             "relation": RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}"),
                         }
+
+                    # 调试：打印部分 pred_map
+                    sample_pred_map = {k: v for i, (k, v) in enumerate(pred_map.items()) if i < 5}
+                    print(f"  pred_map sample (first 5): {sample_pred_map}")
 
                     # 将预测结果添加到原始数据中
                     output_data = []
