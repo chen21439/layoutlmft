@@ -205,18 +205,31 @@ def setup_gpu(env: Optional[str] = None, gpu_id: Optional[str] = None) -> None:
 
     MUST be called before `import torch`.
 
+    Priority (highest to lowest):
+        1. gpu_id parameter (command line arg)
+        2. CUDA_VISIBLE_DEVICES environment variable
+        3. Config file (gpu.cuda_visible_devices)
+
     Args:
         env: Environment name (dev/test)
-        gpu_id: Explicit GPU ID (overrides config)
+        gpu_id: Explicit GPU ID (overrides all)
     """
+    # 1. Command line arg has highest priority
     if gpu_id is not None:
-        cuda_devices = str(gpu_id)
-    else:
-        cuda_devices = get_gpu_config(env)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        print(f"[GPU] CUDA_VISIBLE_DEVICES={gpu_id} (from argument)")
+        return
 
+    # 2. Environment variable takes precedence over config
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        print(f"[GPU] CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']} (from environment)")
+        return
+
+    # 3. Config file as fallback
+    cuda_devices = get_gpu_config(env)
     if cuda_devices:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices
-        print(f"[GPU] CUDA_VISIBLE_DEVICES={cuda_devices}")
+        print(f"[GPU] CUDA_VISIBLE_DEVICES={cuda_devices} (from config)")
 
 
 def setup_environment(env: Optional[str] = None, gpu_id: Optional[str] = None) -> str:
