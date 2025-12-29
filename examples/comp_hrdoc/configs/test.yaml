@@ -15,10 +15,6 @@ artifact:
 gpu:
   cuda_visible_devices: "1"
 
-# 模型配置
-model:
-  local_path: "/data/LLM_group/HuggingFace/Hub/models--microsoft--layoutxlm-base/snapshots/8e04ebc4d3ba0013cf943b697c0aedf19b06472a"
-
 # 输出路径
 output:
   root: "outputs"
