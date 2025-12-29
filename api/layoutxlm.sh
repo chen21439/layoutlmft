@@ -2,9 +2,11 @@
 APP_NAME="layoutxlm"
 PORT=9197
 
-PROJECT_DIR="/root/code/layoutlmft"
+# 自动检测项目目录（脚本所在目录的父目录）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-LOG_DIR="${PROJECT_DIR}/log"
+LOG_DIR="${PROJECT_DIR}/api/log"
 mkdir -p "$LOG_DIR"
 TODAY=$(date +%Y-%m-%d)
 LOG_FILE="${LOG_DIR}/uvicorn_${PORT}_${TODAY}.log"
