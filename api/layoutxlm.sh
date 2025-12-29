@@ -17,7 +17,7 @@ export HF_HUB_CACHE=/data/LLM_group/HuggingFace/Hub
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_VISIBLE_DEVICES=1
-export ENV=${2:-test}
+export ENV=test
 
 cd "$PROJECT_DIR" || {
     echo "[${APP_NAME}] 无法进入目录: $PROJECT_DIR"
@@ -25,7 +25,7 @@ cd "$PROJECT_DIR" || {
 }
 
 find_pid() {
-    ps aux | grep "api.app.main:app" | grep -v grep | awk '{print $2}'
+    ps aux | grep "api.app.main" | grep -v grep | awk '{print $2}'
 }
 
 stop_service() {
@@ -61,12 +61,18 @@ stop_service() {
 }
 
 start_service() {
-    echo "[${APP_NAME}] 启动服务..."
+    local RELOAD_FLAG=""
+    if [ "$1" = "--reload" ]; then
+        RELOAD_FLAG="--reload"
+        echo "[${APP_NAME}] 启动服务 (热重载模式)..."
+    else
+        echo "[${APP_NAME}] 启动服务..."
+    fi
     echo "[${APP_NAME}] 环境: $ENV"
     echo "[${APP_NAME}] 端口: $PORT"
     echo "[${APP_NAME}] 项目目录: $PROJECT_DIR"
 
-    nohup python -m api.app.main --env "$ENV" \
+    nohup python -m api.app.main --env "$ENV" $RELOAD_FLAG \
         >> "$LOG_FILE" 2>&1 &
 
     NEW_PID=$!
@@ -94,7 +100,30 @@ status_service() {
     fi
 }
 
-case "${1:-start}" in
+# 解析参数
+ACTION=""
+RELOAD_FLAG=""
+
+for arg in "$@"; do
+    case $arg in
+        stop)
+            ACTION="stop"
+            ;;
+        status)
+            ACTION="status"
+            ;;
+        --reload)
+            RELOAD_FLAG="--reload"
+            ;;
+    esac
+done
+
+# 默认动作是启动
+if [ -z "$ACTION" ]; then
+    ACTION="start"
+fi
+
+case "$ACTION" in
     start)
         PID=$(find_pid)
         if [ -n "$PID" ]; then
@@ -104,16 +133,12 @@ case "${1:-start}" in
         else
             echo "[${APP_NAME}] 服务未运行，直接启动..."
         fi
-        start_service
+        start_service $RELOAD_FLAG
         ;;
     stop)
         stop_service
         ;;
     status)
         status_service
-        ;;
-    *)
-        echo "用法: $0 {start|stop|status} [dev|test]"
-        exit 1
         ;;
 esac
