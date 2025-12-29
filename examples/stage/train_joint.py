@@ -295,23 +295,51 @@ class JointTrainer(Trainer):
 
         try:
             outputs = model(**inputs)
-        except Exception as e:
-            # 记录出错时的文档信息
-            logger.error(f"[ERROR] Forward pass failed at step {self.state.global_step}")
-            logger.error(f"[ERROR] Input keys: {inputs.keys()}")
-            if "doc_id" in inputs:
-                logger.error(f"[ERROR] doc_id: {inputs['doc_id']}")
+        except RuntimeError as e:
+            # 检查是否是 CUDA OOM 错误
+            is_oom = "out of memory" in str(e).lower()
+            error_type = "OOM" if is_oom else "RuntimeError"
+
+            doc_name = inputs.get('doc_id', ['unknown'])[0] if 'doc_id' in inputs else 'unknown'
+            logger.error(f"[{error_type}] Forward pass failed at step {self.state.global_step}")
+            logger.error(f"[{error_type}] 文档名称: {doc_name}")
             if "input_ids" in inputs:
-                logger.error(f"[ERROR] input_ids shape: {inputs['input_ids'].shape}")
+                logger.error(f"[{error_type}] input_ids shape: {inputs['input_ids'].shape}")
+            if "chunks_per_doc" in inputs:
+                logger.error(f"[{error_type}] chunks_per_doc: {inputs['chunks_per_doc']}")
             if "image" in inputs:
                 img = inputs["image"]
-                logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
+                logger.error(f"[{error_type}] image shape: {img.shape}, dtype: {img.dtype}")
             if "line_ids" in inputs:
                 line_ids = inputs["line_ids"]
                 if hasattr(line_ids, 'shape'):
-                    logger.error(f"[ERROR] line_ids shape: {line_ids.shape}, max: {line_ids.max()}")
-                else:
-                    logger.error(f"[ERROR] line_ids type: {type(line_ids)}")
+                    max_line = line_ids.max().item() if line_ids.numel() > 0 else 0
+                    logger.error(f"[{error_type}] line_ids shape: {line_ids.shape}, max_line_id: {max_line}")
+
+            if is_oom:
+                # 打印 GPU 显存使用情况
+                if torch.cuda.is_available():
+                    for i in range(torch.cuda.device_count()):
+                        allocated = torch.cuda.memory_allocated(i) / 1024**3
+                        reserved = torch.cuda.memory_reserved(i) / 1024**3
+                        logger.error(f"[OOM] GPU {i}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
+
+                # OOM 时清理缓存并跳过这个 batch
+                logger.warning(f"[OOM] 跳过文档: {doc_name}，清理 GPU 缓存...")
+                torch.cuda.empty_cache()
+
+                # 返回一个 dummy loss，让训练继续
+                dummy_loss = torch.tensor(0.0, device=next(model.parameters()).device, requires_grad=True)
+                self._current_loss_dict = {"cls_loss": 0.0, "skipped": 1.0}
+                return (dummy_loss, None) if return_outputs else dummy_loss
+
+            raise e
+        except Exception as e:
+            # 其他异常
+            logger.error(f"[ERROR] Forward pass failed at step {self.state.global_step}")
+            logger.error(f"[ERROR] Exception type: {type(e).__name__}")
+            if "doc_id" in inputs:
+                logger.error(f"[ERROR] 文档名称: {inputs['doc_id']}")
             raise e
         loss = outputs.loss  # TokenClassifierOutput 使用属性访问
 

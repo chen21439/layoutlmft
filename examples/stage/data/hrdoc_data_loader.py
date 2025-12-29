@@ -374,7 +374,8 @@ def tokenize_with_line_boundary(
 
     for line_idx, token_count in enumerate(line_token_counts):
         if token_count > effective_max_length:
-            logger.warning(f"Line {line_idx} has {token_count} tokens, exceeding max_length. Will be truncated.")
+            doc_info = f" [doc: {document_name}]" if document_name else ""
+            logger.warning(f"Line {line_idx} has {token_count} tokens, exceeding max_length. Will be truncated.{doc_info}")
             if current_chunk_lines:
                 chunks.append(current_chunk_lines)
                 current_chunk_lines = []
@@ -514,6 +515,7 @@ def tokenize_page_with_line_boundary(
     image: Optional[Any] = None,
     page_number: Optional[int] = None,
     label_all_tokens: bool = True,
+    document_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     文档级别 tokenization（保持全局 line_id，用于跨页关系）
@@ -534,7 +536,8 @@ def tokenize_page_with_line_boundary(
 
     for line_idx, token_count in enumerate(line_token_counts):
         if token_count > effective_max_length:
-            logger.warning(f"Line {line_idx} has {token_count} tokens, exceeding max_length. Will be truncated.")
+            doc_info = f" [doc: {document_name}]" if document_name else ""
+            logger.warning(f"Line {line_idx} has {token_count} tokens, exceeding max_length. Will be truncated.{doc_info}")
             if current_chunk_lines:
                 chunks.append(current_chunk_lines)
                 current_chunk_lines = []
@@ -987,6 +990,7 @@ class HRDocDataLoader:
                 image=image,
                 page_number=page_number,
                 label_all_tokens=self.config.label_all_tokens,
+                document_name=document_name,
             )
 
             all_chunks.extend(chunks)
