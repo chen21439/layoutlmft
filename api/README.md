@@ -46,7 +46,7 @@ inference:
 cd /root/code/layoutlmft
 
 # 使用 test 环境配置启动（默认端口 9197）
-python -m api.app.main --env test
+python -m api.app.main --env dev --reload
 
 # 或
 ENV=test uvicorn api.app.main:app --host 0.0.0.0 --port 9197
