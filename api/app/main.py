@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
             from .service.model_loader import load_model
             from .service.infer_service import get_infer_service
 
-            load_model(checkpoint_path)
+            load_model(checkpoint_path, config=_config)
             if data_dir_base:
                 get_infer_service(data_dir_base=data_dir_base)
                 logger.info(f"Default data_dir_base: {data_dir_base}")

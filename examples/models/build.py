@@ -191,9 +191,15 @@ def _load_tokenizer(stage1_path: str, config: Any = None):
 
     tokenizer_sources = [stage1_path]
 
-    # 从 config 获取本地路径
-    if config and hasattr(config, 'model') and hasattr(config.model, 'local_path') and config.model.local_path:
-        tokenizer_sources.append(config.model.local_path)
+    # 从 config 获取本地路径（支持对象属性或 dict）
+    if config:
+        local_path = None
+        if hasattr(config, 'model') and hasattr(config.model, 'local_path'):
+            local_path = config.model.local_path
+        elif isinstance(config, dict) and 'model' in config:
+            local_path = config.get('model', {}).get('local_path')
+        if local_path:
+            tokenizer_sources.append(local_path)
 
     # 远程模型作为最后 fallback
     tokenizer_sources.append("microsoft/layoutxlm-base")
