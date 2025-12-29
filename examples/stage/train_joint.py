@@ -971,10 +971,14 @@ def main():
         training_args.logging_steps = 5
 
     # Document-level 模式：调整 eval/save steps（文档级别训练较慢）
+    # 只在用户没有显式指定时（使用默认值 500）才覆盖
     if data_args.document_level and not training_args.quick:
-        training_args.eval_steps = 25
-        training_args.save_steps = 25
-        training_args.logging_steps = 10
+        if training_args.eval_steps == 500:  # 默认值
+            training_args.eval_steps = 25
+        if training_args.save_steps == 500:  # 默认值
+            training_args.save_steps = 25
+        if training_args.logging_steps == 500:  # 默认值
+            training_args.logging_steps = 10
 
     # 设置随机种子
     set_seed(training_args.seed)
