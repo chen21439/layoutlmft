@@ -384,10 +384,11 @@ class JointTrainer(Trainer):
         # 保存完整模型状态（标准格式，供 Trainer resume 使用）
         torch.save(self.model.state_dict(), os.path.join(output_dir, "pytorch_model.bin"))
 
-        # 保存 tokenizer 到根目录
+        # 保存 tokenizer 到根目录（两种格式：legacy + tokenizer.json）
         if self.tokenizer is not None:
             try:
-                self.tokenizer.save_pretrained(output_dir)
+                self.tokenizer.save_pretrained(output_dir, legacy_format=True)   # sentencepiece.bpe.model
+                self.tokenizer.save_pretrained(output_dir, legacy_format=False)  # tokenizer.json
                 logger.info(f"Tokenizer saved to {output_dir}")
             except Exception as e:
                 logger.warning(f"Failed to save tokenizer: {e}")
@@ -948,12 +949,10 @@ def main():
     # 标记 stage 开始
     exp_manager.mark_stage_started(training_args.exp, "joint", data_args.dataset)
 
-    # 加载 tokenizer
-    # 优先从配置文件的 base model 加载（确保完整），而不是从 joint checkpoint
+    # 加载 tokenizer（从 checkpoint 加载，checkpoint 应保证完整）
     logger.info("Loading tokenizer...")
-    tokenizer_path = config.model.local_path or config.model.name_or_path
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
-    logger.info(f"Tokenizer loaded from: {tokenizer_path}")
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
+    logger.info(f"Tokenizer loaded from: {model_args.model_name_or_path}")
     assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集

@@ -996,12 +996,26 @@ class HRDocDataLoader:
         if len(all_chunks) == 0:
             return None
 
+        # 构建 json_path（用于错误详情显示文本）
+        json_path = None
+        if self.config.data_dir:
+            # 尝试 train 目录
+            candidate = os.path.join(self.config.data_dir, "train", f"{document_name}.json")
+            if os.path.exists(candidate):
+                json_path = candidate
+            else:
+                # 尝试 test 目录
+                candidate = os.path.join(self.config.data_dir, "test", f"{document_name}.json")
+                if os.path.exists(candidate):
+                    json_path = candidate
+
         return {
             "document_name": document_name,
             "num_pages": len(pages),
             "chunks": all_chunks,
             "line_parent_ids": all_parent_ids,
             "line_relations": all_relations,
+            "json_path": json_path,
         }
 
     def get_train_dataset(self):
