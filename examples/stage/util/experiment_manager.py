@@ -120,6 +120,7 @@ class ExperimentManager:
         config: Any,  # Config object from config_loader
         name: str = "",
         description: str = "",
+        exp_dirname: str = "",
     ) -> str:
         """
         Create a new experiment directory with config snapshot.
@@ -128,12 +129,14 @@ class ExperimentManager:
             config: Config object containing all training parameters
             name: Human-readable experiment name
             description: Experiment description
+            exp_dirname: Custom experiment directory name (if empty, auto-generate with timestamp)
 
         Returns:
             Path to the experiment directory
         """
         # Generate experiment directory
-        exp_dirname = self._generate_exp_dirname()
+        if not exp_dirname:
+            exp_dirname = self._generate_exp_dirname()
         exp_dir = os.path.join(self.output_root, exp_dirname)
         os.makedirs(exp_dir, exist_ok=True)
 
@@ -471,7 +474,7 @@ def get_experiment_manager(config: Any) -> ExperimentManager:
 def ensure_experiment(
     config: Any,
     exp: Optional[str] = None,
-    new_exp: bool = False,
+    new_exp: str = "",
     name: str = "",
     description: str = "",
 ) -> tuple:
@@ -481,7 +484,9 @@ def ensure_experiment(
     Args:
         config: Config object
         exp: Experiment identifier (None for current/latest)
-        new_exp: Force create new experiment
+        new_exp: Create new experiment. If non-empty string, use as directory name.
+                 If empty string or False-like, don't create new experiment.
+                 If True (bool), create with auto-generated name.
         name: Experiment name (for new experiments)
         description: Experiment description
 
@@ -490,8 +495,12 @@ def ensure_experiment(
     """
     manager = get_experiment_manager(config)
 
+    # Handle new_exp: can be bool (legacy) or str (new: custom dirname)
     if new_exp:
-        exp_dir = manager.create_experiment(config, name=name, description=description)
+        # new_exp is truthy: create new experiment
+        # If it's a non-empty string, use it as dirname; otherwise auto-generate
+        exp_dirname = new_exp if isinstance(new_exp, str) and new_exp not in ("True", "true", "1") else ""
+        exp_dir = manager.create_experiment(config, name=name, description=description, exp_dirname=exp_dirname)
     else:
         exp_dir = manager.get_experiment_dir(exp)
         if not exp_dir:
