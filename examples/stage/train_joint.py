@@ -202,8 +202,8 @@ class JointTrainingArguments(TrainingArguments):
 
     # 实验管理
     exp: str = field(default=None, metadata={"help": "Experiment ID"})
-    new_exp: bool = field(default=False, metadata={"help": "Create a new experiment"})
-    exp_name: str = field(default="", metadata={"help": "Name for new experiment"})
+    new_exp: str = field(default="", metadata={"help": "Create new experiment. Optionally specify directory name (e.g. --new_exp exp_custom_name)"})
+    exp_name: str = field(default="", metadata={"help": "Human-readable name for experiment (saved in config.yml)"})
 
     # 快速测试
     quick: bool = field(default=False, metadata={"help": "Quick test mode"})
@@ -949,10 +949,16 @@ def main():
     # 标记 stage 开始
     exp_manager.mark_stage_started(training_args.exp, "joint", data_args.dataset)
 
-    # 加载 tokenizer（从 checkpoint 加载，checkpoint 应保证完整）
+    # 加载 tokenizer（优先从 checkpoint，fallback 到 base model）
     logger.info("Loading tokenizer...")
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(model_args.model_name_or_path)
-    logger.info(f"Tokenizer loaded from: {model_args.model_name_or_path}")
+    tokenizer_path = model_args.model_name_or_path
+    tokenizer_json = os.path.join(tokenizer_path, "tokenizer.json")
+    if not os.path.exists(tokenizer_json):
+        # 旧 checkpoint 没有 tokenizer.json，fallback 到 base model
+        tokenizer_path = config.model.local_path or config.model.name_or_path
+        logger.warning(f"tokenizer.json not found in checkpoint, using base model: {tokenizer_path}")
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
+    logger.info(f"Tokenizer loaded from: {tokenizer_path}")
     assert tokenizer.is_fast, "LayoutXLM requires fast tokenizer"
 
     # 准备数据集
