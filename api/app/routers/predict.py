@@ -50,12 +50,16 @@ async def predict(request: PredictRequest):
         )
 
     try:
+        logger.info(f"[Predict] task_id={request.task_id}, document={request.document_name}")
+
         service = get_infer_service()
         result = service.predict_single(
             task_id=request.task_id,
             document_name=request.document_name,
             return_original=True,
         )
+
+        logger.info(f"[Predict] Done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
 
         return PredictResponse(
             document_name=result["document_name"],
