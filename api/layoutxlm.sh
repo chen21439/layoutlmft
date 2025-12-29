@@ -61,18 +61,12 @@ stop_service() {
 }
 
 start_service() {
-    local RELOAD_FLAG=""
-    if [ "$1" = "--reload" ]; then
-        RELOAD_FLAG="--reload"
-        echo "[${APP_NAME}] 启动服务 (热重载模式)..."
-    else
-        echo "[${APP_NAME}] 启动服务..."
-    fi
+    echo "[${APP_NAME}] 启动服务 (热重载模式)..."
     echo "[${APP_NAME}] 环境: $ENV"
     echo "[${APP_NAME}] 端口: $PORT"
     echo "[${APP_NAME}] 项目目录: $PROJECT_DIR"
 
-    nohup python -m api.app.main --env "$ENV" $RELOAD_FLAG \
+    nohup python -m api.app.main --env "$ENV" --reload \
         >> "$LOG_FILE" 2>&1 &
 
     NEW_PID=$!
@@ -100,30 +94,8 @@ status_service() {
     fi
 }
 
-# 解析参数
-ACTION=""
-RELOAD_FLAG=""
-
-for arg in "$@"; do
-    case $arg in
-        stop)
-            ACTION="stop"
-            ;;
-        status)
-            ACTION="status"
-            ;;
-        --reload)
-            RELOAD_FLAG="--reload"
-            ;;
-    esac
-done
-
-# 默认动作是启动
-if [ -z "$ACTION" ]; then
-    ACTION="start"
-fi
-
-case "$ACTION" in
+# 默认启动，stop/status 为可选参数
+case "${1:-start}" in
     start)
         PID=$(find_pid)
         if [ -n "$PID" ]; then
@@ -133,12 +105,16 @@ case "$ACTION" in
         else
             echo "[${APP_NAME}] 服务未运行，直接启动..."
         fi
-        start_service $RELOAD_FLAG
+        start_service
         ;;
     stop)
         stop_service
         ;;
     status)
         status_service
+        ;;
+    *)
+        echo "用法: $0 [stop|status]"
+        exit 1
         ;;
 esac
