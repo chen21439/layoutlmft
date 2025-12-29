@@ -18,8 +18,3 @@ gpu:
 # 输出路径
 output:
   root: "outputs"
-
-# 推理配置 (FastAPI 服务使用)
-inference:
-  checkpoint_path: "/mnt/e/models/layoutlmft/exp_20251227_161829/joint_tender/checkpoint-375"
-  data_dir_base: "/mnt/e/programFile/AIProgram/tender_ontology/static/upload"

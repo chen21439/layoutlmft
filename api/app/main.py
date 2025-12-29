@@ -5,18 +5,18 @@ FastAPI Application - Document Structure Analysis Service
 
 Usage:
     # Start server with config file
-    python -m fastapi.app.main --env test
+    python -m api.app.main --env test
 
     # Or with uvicorn directly
-    ENV=test uvicorn fastapi.app.main:app --host 0.0.0.0 --port 8000
+    ENV=test uvicorn api.app.main:app --host 0.0.0.0 --port 8000
 
     # Development mode with auto-reload
-    ENV=test uvicorn fastapi.app.main:app --host 0.0.0.0 --port 8000 --reload
+    ENV=test uvicorn api.app.main:app --host 0.0.0.0 --port 8000 --reload
 
 Configuration:
-    Config is loaded from examples/comp_hrdoc/configs/{env}.yaml
+    Config is loaded from configs/{env}.yml
     - inference.checkpoint_path: Path to model checkpoint
-    - inference.data_dir: Default data directory
+    - inference.data_dir_base: Default data directory
     - gpu.cuda_visible_devices: GPU to use
 """
 
@@ -29,18 +29,21 @@ sys.path.insert(0, PROJECT_ROOT)
 EXAMPLES_ROOT = os.path.join(PROJECT_ROOT, "examples")
 sys.path.insert(0, EXAMPLES_ROOT)
 
-# 复用现有的 setup_environment 方法
-from comp_hrdoc.utils.config import setup_environment, load_config
+# GPU 设置
+from comp_hrdoc.utils.config import setup_environment
 setup_environment()
 # ==================== GPU 设置结束 ====================
 
 import logging
 import argparse
 from contextlib import asynccontextmanager
-from typing import Dict, Any
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# 使用统一配置加载器
+from configs.config_loader import get_config, Config
 
 # Setup logging
 logging.basicConfig(
@@ -51,7 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_inference_config(config: Dict[str, Any]) -> tuple:
+def get_inference_config(config: Config) -> tuple:
     """
     Get inference configuration.
 
@@ -60,18 +63,18 @@ def get_inference_config(config: Dict[str, Any]) -> tuple:
     # Checkpoint path
     checkpoint_path = os.environ.get("CHECKPOINT_PATH")
     if not checkpoint_path:
-        checkpoint_path = config.get("inference", {}).get("checkpoint_path")
+        checkpoint_path = config.inference.checkpoint_path
 
     # Data directory base
     data_dir_base = os.environ.get("DATA_DIR_BASE")
     if not data_dir_base:
-        data_dir_base = config.get("inference", {}).get("data_dir_base")
+        data_dir_base = config.inference.data_dir_base
 
     return checkpoint_path, data_dir_base
 
 
 # Global config
-_config: Dict[str, Any] = {}
+_config: Optional[Config] = None
 
 
 @asynccontextmanager
@@ -85,7 +88,7 @@ async def lifespan(app: FastAPI):
 
     # Load config (GPU already set by setup_environment)
     env = os.environ.get("ENV") or os.environ.get("COMP_HRDOC_ENV", "test")
-    _config = load_config(env)
+    _config = get_config(env)
     logger.info(f"Loaded config for env: {env}")
 
     # Get inference config
@@ -128,13 +131,11 @@ API for document structure analysis using LayoutXLM-based model.
 
 ## Endpoints
 - `POST /predict`: Predict document structure
-- `POST /predict/with-original`: Predict and merge with original data
-- `GET /predict/{document_name}`: Convenience GET endpoint
 - `GET /health`: Health check
 - `GET /ready`: Readiness check
 
 ## Configuration
-Config is loaded from `examples/comp_hrdoc/configs/{env}.yaml`
+Config is loaded from `configs/{env}.yml`
 
 Set `ENV` environment variable to specify environment (default: test)
     """,
@@ -174,7 +175,7 @@ async def load_model_endpoint(
         from .service.model_loader import load_model
         from .service.infer_service import get_infer_service
 
-        load_model(checkpoint_path)
+        load_model(checkpoint_path, config=_config)
         if data_dir:
             get_infer_service(data_dir=data_dir)
 
@@ -204,14 +205,19 @@ async def root():
 @app.get("/config", tags=["admin"])
 async def get_current_config():
     """Get current configuration (for debugging)."""
+    if _config is None:
+        return {"error": "Config not loaded"}
+
     checkpoint_path, data_dir_base = get_inference_config(_config)
     return {
-        "env": _config.get("_env", "unknown"),
+        "env": _config.env,
         "inference": {
             "checkpoint_path": checkpoint_path,
             "data_dir_base": data_dir_base,
         },
-        "gpu": _config.get("gpu", {}),
+        "gpu": {
+            "cuda_visible_devices": _config.gpu.cuda_visible_devices,
+        },
     }
 
 

@@ -142,6 +142,13 @@ class QuickTestConfig:
     relation_max_steps: int = 50
 
 
+@dataclass
+class InferenceConfig:
+    """Inference configuration (FastAPI service)"""
+    checkpoint_path: Optional[str] = None
+    data_dir_base: Optional[str] = None
+
+
 # Import dataset configuration from examples/dataset_config
 from examples.dataset_config.dataset_config import DATASET_DIR_MAP, DatasetConfig
 
@@ -161,6 +168,7 @@ class Config:
     parent_finder: ParentFinderConfig = field(default_factory=ParentFinderConfig)
     relation_classifier: RelationClassifierConfig = field(default_factory=RelationClassifierConfig)
     quick_test: QuickTestConfig = field(default_factory=QuickTestConfig)
+    inference: InferenceConfig = field(default_factory=InferenceConfig)
 
     def get_effective_config(self) -> 'Config':
         """Apply quick_test overrides if enabled"""
@@ -254,6 +262,7 @@ def load_config(env: str = "dev") -> Config:
         parent_finder=_dict_to_dataclass(data.get('parent_finder'), ParentFinderConfig),
         relation_classifier=_dict_to_dataclass(data.get('relation_classifier'), RelationClassifierConfig),
         quick_test=_dict_to_dataclass(data.get('quick_test'), QuickTestConfig),
+        inference=_dict_to_dataclass(data.get('inference'), InferenceConfig),
     )
 
     return config

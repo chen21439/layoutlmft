@@ -18,8 +18,3 @@ gpu:
 # 输出路径
 output:
   root: "outputs"
-
-# 推理配置 (FastAPI 服务使用)
-inference:
-  checkpoint_path: "/data/LLM_group/layoutlmft/artifact/exp_20251228_213352/joint_tender/checkpoint-1000"
-  data_dir_base: "/data/LLM_group/ontology/static/upload"
