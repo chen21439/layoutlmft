@@ -241,6 +241,7 @@ def main():
         host=args.host,
         port=args.port,
         reload=args.reload,
+        reload_dirs=["api"] if args.reload else None,
     )
 
 
