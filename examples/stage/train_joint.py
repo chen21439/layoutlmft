@@ -204,6 +204,7 @@ class JointTrainingArguments(TrainingArguments):
     exp: str = field(default=None, metadata={"help": "Experiment ID"})
     new_exp: str = field(default="", metadata={"help": "Create new experiment. Optionally specify directory name (e.g. --new_exp exp_custom_name)"})
     exp_name: str = field(default="", metadata={"help": "Human-readable name for experiment (saved in config.yml)"})
+    resume_from: str = field(default=None, metadata={"help": "Resume training from checkpoint path (restores optimizer, scheduler, step)"})
 
     # 快速测试
     quick: bool = field(default=False, metadata={"help": "Quick test mode"})
@@ -938,6 +939,8 @@ def main():
     logger.info(f"  doc_level:     {data_args.document_level}")
     logger.info(f"  stage1_no_grad:       {model_args.stage1_no_grad}")
     logger.info(f"  gradient_checkpoint:  {model_args.gradient_checkpointing}")
+    if training_args.resume_from:
+        logger.info(f"  resume_from:          {training_args.resume_from}")
     logger.info("=" * 60)
 
     if training_args.dry_run:
@@ -1210,11 +1213,14 @@ def main():
         logger.info("=" * 60)
 
     logger.info("Starting training...")
-    # 解法1：只加载模型权重，不恢复 optimizer state
-    # - 模型权重已在上面通过 load_state_dict() 加载
-    # - 不使用 resume_from_checkpoint，避免 optimizer 参数组不匹配
-    # - 创建新的 optimizer，支持 stage1_no_grad 改变冻结策略
-    train_result = trainer.train()
+    # 训练模式：
+    # - 默认：只加载模型权重，不恢复 optimizer state（支持改变 stage1_no_grad 等冻结策略）
+    # - --resume_from：使用 HF Trainer 的 resume_from_checkpoint，完整恢复训练状态
+    if training_args.resume_from:
+        logger.info(f"Resuming from checkpoint: {training_args.resume_from}")
+        train_result = trainer.train(resume_from_checkpoint=training_args.resume_from)
+    else:
+        train_result = trainer.train()
 
     # 保存最终模型
     trainer.save_model()
