@@ -362,57 +362,6 @@ class JointTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
 
-    def training_step(self, model, inputs):
-        """
-        重写 training_step 以捕获 backward 阶段的 OOM
-        """
-        model.train()
-        inputs = self._prepare_inputs(inputs)
-
-        # 记录当前处理的文档，用于 OOM 时打印
-        self._current_doc_id = inputs.get('doc_id', ['unknown'])
-
-        # 兼容新旧版本 transformers
-        if hasattr(self, 'compute_loss_context_manager'):
-            ctx = self.compute_loss_context_manager()
-        else:
-            import contextlib
-            ctx = contextlib.nullcontext()
-
-        with ctx:
-            loss = self.compute_loss(model, inputs)
-
-        if self.args.n_gpu > 1:
-            loss = loss.mean()
-
-        # 尝试 backward，捕获 OOM
-        try:
-            # 兼容旧版 transformers（没有 do_grad_scaling 属性）
-            do_grad_scaling = getattr(self, 'do_grad_scaling', False)
-            if do_grad_scaling:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                doc_name = self._current_doc_id[0] if isinstance(self._current_doc_id, list) else self._current_doc_id
-                logger.error(f"[OOM-Backward] 文档名称: {doc_name}")
-                logger.error(f"[OOM-Backward] step: {self.state.global_step}")
-                if torch.cuda.is_available():
-                    for i in range(torch.cuda.device_count()):
-                        allocated = torch.cuda.memory_allocated(i) / 1024**3
-                        reserved = torch.cuda.memory_reserved(i) / 1024**3
-                        logger.error(f"[OOM-Backward] GPU {i}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
-
-                logger.warning(f"[OOM-Backward] 跳过文档: {doc_name}，清理 GPU 缓存...")
-                torch.cuda.empty_cache()
-
-                # 返回 0 loss，跳过这个 batch
-                return torch.tensor(0.0, device=loss.device)
-            raise e
-
-        return loss.detach()
-
     def log(self, logs: Dict[str, float]) -> None:
         """扩展日志，添加各阶段 loss"""
 
