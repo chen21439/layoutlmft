@@ -387,7 +387,9 @@ class JointTrainer(Trainer):
 
         # 尝试 backward，捕获 OOM
         try:
-            if self.do_grad_scaling:
+            # 兼容旧版 transformers（没有 do_grad_scaling 属性）
+            do_grad_scaling = getattr(self, 'do_grad_scaling', False)
+            if do_grad_scaling:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
