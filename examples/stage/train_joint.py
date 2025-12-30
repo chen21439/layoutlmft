@@ -372,7 +372,14 @@ class JointTrainer(Trainer):
         # 记录当前处理的文档，用于 OOM 时打印
         self._current_doc_id = inputs.get('doc_id', ['unknown'])
 
-        with self.compute_loss_context_manager():
+        # 兼容新旧版本 transformers
+        if hasattr(self, 'compute_loss_context_manager'):
+            ctx = self.compute_loss_context_manager()
+        else:
+            import contextlib
+            ctx = contextlib.nullcontext()
+
+        with ctx:
             loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
