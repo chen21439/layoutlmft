@@ -192,8 +192,9 @@ class JointTrainingArguments(TrainingArguments):
     # 禁用 TensorBoard（Python 3.12 移除了 distutils，TensorBoard 初始化会报错）
     report_to: str = field(default="none", metadata={"help": "Disable TensorBoard to avoid distutils.version issue in Python 3.12+"})
 
-    # 默认开启混合精度训练（减少显存使用）
-    fp16: bool = field(default=True, metadata={"help": "Enable fp16 mixed precision training"})
+    # 混合精度训练（transformers 4.5.1 有兼容性问题，默认关闭）
+    # 如需开启，建议升级 transformers 到 4.20+ 版本
+    fp16: bool = field(default=False, metadata={"help": "Enable fp16 mixed precision training"})
 
     # 评估设置（覆盖默认值）
     evaluation_strategy: str = field(default="steps", metadata={"help": "Evaluation strategy"})
