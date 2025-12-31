@@ -302,12 +302,12 @@ class JointModel(nn.Module):
             )
 
         def _slice_imagelist(img_list, start, end):
-            """切片 ImageList，返回新的 ImageList"""
+            """切片 ImageList，返回新的 ImageList（保持在同一设备）"""
             # detectron2 的 ImageList 使用 .tensor，shim 版本使用 .tensors
             if hasattr(img_list, 'tensor'):
-                sliced_tensor = img_list.tensor[start:end]
+                sliced_tensor = img_list.tensor[start:end].to(device)
             else:
-                sliced_tensor = img_list.tensors[start:end]
+                sliced_tensor = img_list.tensors[start:end].to(device)
             sliced_sizes = img_list.image_sizes[start:end]
             return ImageList(sliced_tensor, sliced_sizes)
 

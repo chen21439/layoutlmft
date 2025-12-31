@@ -338,7 +338,12 @@ def build_model(model_args, config, raw_train_dataset, device):
         use_gt_class=model_args.use_gt_class,
     )
 
-    logger.info(f"Mode: {model_args.mode} | stage1_no_grad={stage1_no_grad} | disable_stage34={disable_stage34}")
+    if model_args.mode == "stage1":
+        logger.info(f"Mode: stage1 (Stage 3/4 disabled)")
+    elif model_args.mode == "stage34":
+        logger.info(f"Mode: stage34 (Stage 1 frozen, no_grad=True)")
+    else:
+        logger.info(f"Mode: joint (all stages enabled)")
 
     # 加载 joint checkpoint 权重
     if joint_model_path:
