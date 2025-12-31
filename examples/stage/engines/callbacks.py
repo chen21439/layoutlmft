@@ -159,7 +159,7 @@ class E2EEvaluationCallback(TrainerCallback):
         self.compute_teds = compute_teds
         self.save_predictions = save_predictions
         self.output_dir = output_dir
-        # 历史评估记录：[(step, line_f1, line_acc, parent_acc, rel_f1, rel_acc), ...]
+        # 历史评估记录：[(step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds), ...]
         self.history = []
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
@@ -189,10 +189,13 @@ class E2EEvaluationCallback(TrainerCallback):
 
         # 打印结果
         line_macro = output.line_macro_f1 * 100
+        line_micro = output.line_micro_f1 * 100
         line_acc = output.line_accuracy * 100
         parent_acc = output.parent_accuracy * 100
         rel_acc = output.relation_accuracy * 100
         rel_macro = output.relation_macro_f1 * 100
+        rel_micro = output.relation_micro_f1 * 100
+        teds = output.teds_score * 100 if output.teds_score is not None else None
         num_lines = output.num_lines
 
         def fmt_delta(d, threshold=0.5):
@@ -206,49 +209,63 @@ class E2EEvaluationCallback(TrainerCallback):
         avg_n = min(3, len(self.history))
 
         logger.info("")
-        logger.info("╔══════════════════════════════════════════════════════════════╗")
-        logger.info(f"║           Evaluation Results @ Step {global_step:<6}                  ║")
-        logger.info("╠══════════════════════════════════════════════════════════════╣")
+        logger.info("╔════════════════════════════════════════════════════════════════════════╗")
+        logger.info(f"║              Evaluation Results @ Step {global_step:<6}                        ║")
+        logger.info("╠════════════════════════════════════════════════════════════════════════╣")
 
         if avg_n > 0:
             recent = self.history[-avg_n:]
-            avg_line_f1 = sum(h[1] for h in recent) / avg_n
-            avg_line_acc = sum(h[2] for h in recent) / avg_n
-            avg_parent = sum(h[3] for h in recent) / avg_n
-            avg_rel_f1 = sum(h[4] for h in recent) / avg_n
-            avg_rel_acc = sum(h[5] for h in recent) / avg_n
+            avg_line_macro = sum(h[1] for h in recent) / avg_n
+            avg_line_micro = sum(h[2] for h in recent) / avg_n
+            avg_line_acc = sum(h[3] for h in recent) / avg_n
+            avg_parent = sum(h[4] for h in recent) / avg_n
+            avg_rel_macro = sum(h[5] for h in recent) / avg_n
+            avg_rel_micro = sum(h[6] for h in recent) / avg_n
+            avg_rel_acc = sum(h[7] for h in recent) / avg_n
 
-            delta_line_f1 = line_macro - avg_line_f1
+            delta_line_macro = line_macro - avg_line_macro
+            delta_line_micro = line_micro - avg_line_micro
             delta_line_acc = line_acc - avg_line_acc
             delta_parent = parent_acc - avg_parent
-            delta_rel_f1 = rel_macro - avg_rel_f1
+            delta_rel_macro = rel_macro - avg_rel_macro
+            delta_rel_micro = rel_micro - avg_rel_micro
             delta_rel_acc = rel_acc - avg_rel_acc
 
-            logger.info(f"║  Metric       │ Current  │  Avg({avg_n})  │  Delta       ║")
-            logger.info("║───────────────┼──────────┼──────────┼──────────────║")
-            logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │  {avg_line_f1:>5.1f}%  │  {fmt_delta(delta_line_f1):>6}      ║")
-            logger.info(f"║  Line(Acc)    │  {line_acc:>5.1f}%  │  {avg_line_acc:>5.1f}%  │  {fmt_delta(delta_line_acc):>6}      ║")
-            logger.info(f"║  Parent(Acc)  │  {parent_acc:>5.1f}%  │  {avg_parent:>5.1f}%  │  {fmt_delta(delta_parent):>6}      ║")
-            logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │  {avg_rel_f1:>5.1f}%  │  {fmt_delta(delta_rel_f1):>6}      ║")
-            logger.info(f"║  Rel(Acc)     │  {rel_acc:>5.1f}%  │  {avg_rel_acc:>5.1f}%  │  {fmt_delta(delta_rel_acc):>6}      ║")
+            logger.info(f"║  Metric          │ Current  │  Avg({avg_n})  │  Delta       ║")
+            logger.info("║──────────────────┼──────────┼──────────┼──────────────║")
+            logger.info(f"║  Line(MacroF1)   │  {line_macro:>5.1f}%  │  {avg_line_macro:>5.1f}%  │  {fmt_delta(delta_line_macro):>6}      ║")
+            logger.info(f"║  Line(MicroF1)   │  {line_micro:>5.1f}%  │  {avg_line_micro:>5.1f}%  │  {fmt_delta(delta_line_micro):>6}      ║")
+            logger.info(f"║  Line(Acc)       │  {line_acc:>5.1f}%  │  {avg_line_acc:>5.1f}%  │  {fmt_delta(delta_line_acc):>6}      ║")
+            logger.info(f"║  Parent(Acc)     │  {parent_acc:>5.1f}%  │  {avg_parent:>5.1f}%  │  {fmt_delta(delta_parent):>6}      ║")
+            logger.info(f"║  Rel(MacroF1)    │  {rel_macro:>5.1f}%  │  {avg_rel_macro:>5.1f}%  │  {fmt_delta(delta_rel_macro):>6}      ║")
+            logger.info(f"║  Rel(MicroF1)    │  {rel_micro:>5.1f}%  │  {avg_rel_micro:>5.1f}%  │  {fmt_delta(delta_rel_micro):>6}      ║")
+            logger.info(f"║  Rel(Acc)        │  {rel_acc:>5.1f}%  │  {avg_rel_acc:>5.1f}%  │  {fmt_delta(delta_rel_acc):>6}      ║")
 
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel_f1)})"
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel_macro)})"
         else:
-            logger.info(f"║  Metric       │ Current  │                           ║")
-            logger.info("║───────────────┼──────────┼───────────────────────────║")
-            logger.info(f"║  Line(F1)     │  {line_macro:>5.1f}%  │                           ║")
-            logger.info(f"║  Line(Acc)    │  {line_acc:>5.1f}%  │                           ║")
-            logger.info(f"║  Parent(Acc)  │  {parent_acc:>5.1f}%  │                           ║")
-            logger.info(f"║  Rel(F1)      │  {rel_macro:>5.1f}%  │                           ║")
-            logger.info(f"║  Rel(Acc)     │  {rel_acc:>5.1f}%  │                           ║")
+            logger.info(f"║  Metric          │ Current  │                           ║")
+            logger.info("║──────────────────┼──────────┼───────────────────────────║")
+            logger.info(f"║  Line(MacroF1)   │  {line_macro:>5.1f}%  │                           ║")
+            logger.info(f"║  Line(MicroF1)   │  {line_micro:>5.1f}%  │                           ║")
+            logger.info(f"║  Line(Acc)       │  {line_acc:>5.1f}%  │                           ║")
+            logger.info(f"║  Parent(Acc)     │  {parent_acc:>5.1f}%  │                           ║")
+            logger.info(f"║  Rel(MacroF1)    │  {rel_macro:>5.1f}%  │                           ║")
+            logger.info(f"║  Rel(MicroF1)    │  {rel_micro:>5.1f}%  │                           ║")
+            logger.info(f"║  Rel(Acc)        │  {rel_acc:>5.1f}%  │                           ║")
             summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
 
-        logger.info("╠══════════════════════════════════════════════════════════════╣")
-        logger.info(f"║  Lines evaluated: {num_lines:<43} ║")
-        logger.info("╚══════════════════════════════════════════════════════════════╝")
+        # TEDS 分数（如果计算了）
+        if teds is not None:
+            logger.info("║──────────────────┼──────────┼───────────────────────────║")
+            logger.info(f"║  TEDS Score      │  {teds:>5.1f}%  │                           ║")
+            summary += f" | TEDS={teds:.1f}%"
+
+        logger.info("╠════════════════════════════════════════════════════════════════════════╣")
+        logger.info(f"║  Lines evaluated: {num_lines:<53} ║")
+        logger.info("╚════════════════════════════════════════════════════════════════════════╝")
         logger.info(summary)
 
-        self.history.append((global_step, line_macro, line_acc, parent_acc, rel_macro, rel_acc))
+        self.history.append((global_step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds))
 
 
 class Stage1EvaluationCallback(TrainerCallback):

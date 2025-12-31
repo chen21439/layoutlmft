@@ -24,6 +24,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.batch import Sample, BatchBase, wrap_batch
 from .predictor import Predictor, PredictionOutput
 
+# 导入 TEDS 计算函数
+try:
+    from util.hrdoc_eval import compute_teds_score
+    TEDS_AVAILABLE = True
+except ImportError:
+    TEDS_AVAILABLE = False
+
 
 # 标签映射（从 layoutlmft.data.labels 导入或定义）
 try:
@@ -56,6 +63,10 @@ class EvaluationOutput:
     # Stage 4: Relation 指标
     relation_accuracy: float = 0.0
     relation_macro_f1: float = 0.0
+    relation_micro_f1: float = 0.0
+
+    # TEDS 指标
+    teds_score: Optional[float] = None
 
     # 统计信息
     num_samples: int = 0
@@ -129,6 +140,10 @@ class Evaluator:
 
         # 收集预测结果用于保存
         all_predictions = []
+
+        # 收集用于 TEDS 计算的文档级数据
+        teds_gt_docs = []
+        teds_pred_docs = []
 
         num_samples = 0
 
@@ -281,6 +296,35 @@ class Evaluator:
                         all_gt_relations.append(gt_rel)
                         all_pred_relations.append(pred_rel)
 
+                    # 收集用于 TEDS 计算的文档级数据
+                    if compute_teds and TEDS_AVAILABLE:
+                        sorted_line_ids = sorted(gt["classes"].keys())
+                        gt_doc = []
+                        pred_doc = []
+                        for idx, line_id in enumerate(sorted_line_ids):
+                            gt_class_id = gt["classes"].get(line_id, 0)
+                            pred_class_id = pred.line_classes.get(line_id, 0)
+                            gt_parent_idx = gt["parents"][idx] if idx < len(gt["parents"]) else -1
+                            pred_parent_idx = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                            gt_rel_id = gt["relations"][idx] if idx < len(gt["relations"]) else -100
+                            pred_rel_id = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
+
+                            gt_doc.append({
+                                "class": self.id2label.get(gt_class_id, f"cls_{gt_class_id}"),
+                                "text": f"line_{line_id}",
+                                "parent_id": gt_parent_idx,
+                                "relation": ID2RELATION.get(gt_rel_id, "none") if gt_rel_id >= 0 else "none",
+                            })
+                            pred_doc.append({
+                                "class": self.id2label.get(pred_class_id, f"cls_{pred_class_id}"),
+                                "text": f"line_{line_id}",
+                                "parent_id": pred_parent_idx,
+                                "relation": ID2RELATION.get(pred_rel_id, "none"),
+                            })
+                        if gt_doc and pred_doc:
+                            teds_gt_docs.append(gt_doc)
+                            teds_pred_docs.append(pred_doc)
+
         # 打印调试信息
         if debug or verbose:
             # 预测类别统计（title/section 等）
@@ -362,6 +406,19 @@ class Evaluator:
         output.num_lines = len(all_gt_classes)
         output.num_parent_pairs = len(all_gt_parents)
         output.num_relation_pairs = len(all_gt_relations)
+
+        # 计算 TEDS 分数
+        if compute_teds and TEDS_AVAILABLE and teds_gt_docs and teds_pred_docs:
+            try:
+                print(f"\n[Evaluator] Computing TEDS for {len(teds_gt_docs)} documents...")
+                teds_score = compute_teds_score(teds_gt_docs, teds_pred_docs)
+                if teds_score is not None:
+                    output.teds_score = teds_score
+                    print(f"[Evaluator] TEDS Score: {teds_score:.4f}")
+            except Exception as e:
+                print(f"[Evaluator] TEDS computation failed: {e}")
+        elif compute_teds and not TEDS_AVAILABLE:
+            print("[Evaluator] TEDS computation skipped: util/hrdoc_eval.py not available")
 
         # 保存预测结果（按文档保存到时间戳目录）
         if save_predictions and all_predictions:
@@ -797,6 +854,7 @@ class Evaluator:
             output.relation_macro_f1 = self._macro_f1(
                 gt_relations, pred_relations, num_classes=3
             )
+            output.relation_micro_f1 = self._micro_f1(gt_relations, pred_relations)
 
         return output
 
