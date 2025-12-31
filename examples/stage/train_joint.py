@@ -289,6 +289,31 @@ class JointTrainer(Trainer):
         self.optimizer = AdamW(optimizer_grouped_parameters)
         return self.optimizer
 
+    def training_step(self, model, inputs):
+        """覆盖 training_step 以捕获 OOM 时的文档信息"""
+        # 只记录轻量信息，避免引用 GPU tensor
+        self._current_doc_name = inputs.get("doc_name", None)
+        self._current_doc_id = inputs.get("doc_id", None)
+
+        try:
+            return super().training_step(model, inputs)
+        except torch.cuda.OutOfMemoryError:
+            if self.is_world_process_zero():
+                self.log({
+                    "oom_doc_name": str(self._current_doc_name),
+                    "oom_doc_id": str(self._current_doc_id),
+                })
+            raise
+        except RuntimeError as e:
+            msg = str(e).lower()
+            if "out of memory" in msg:
+                if self.is_world_process_zero():
+                    self.log({
+                        "oom_doc_name": str(self._current_doc_name),
+                        "oom_doc_id": str(self._current_doc_id),
+                    })
+            raise
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
 
