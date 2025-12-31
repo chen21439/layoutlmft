@@ -46,6 +46,12 @@ import torch.nn.functional as F
 from typing import Dict, Optional
 from transformers.modeling_outputs import TokenClassifierOutput
 
+# ImageList 支持（detectron2 或 shim）
+try:
+    from detectron2.structures import ImageList
+except ImportError:
+    ImageList = None
+
 # 导入共享模块
 import sys
 import os
@@ -282,7 +288,9 @@ class JointModel(nn.Module):
         micro_bs = micro_batch_size if micro_batch_size is not None else self.stage1_micro_batch_size
         use_no_grad = no_grad if no_grad is not None else self.stage1_no_grad
 
+        # 检测 image 类型
         image_is_list = isinstance(image, list) if image is not None else False
+        image_is_imagelist = (ImageList is not None and isinstance(image, ImageList)) if image is not None else False
 
         def _run_backbone(ids, bb, mask, img):
             return self.backbone(
@@ -292,6 +300,16 @@ class JointModel(nn.Module):
                 image=img,
                 output_hidden_states=True,
             )
+
+        def _slice_imagelist(img_list, start, end):
+            """切片 ImageList，返回新的 ImageList"""
+            # detectron2 的 ImageList 使用 .tensor，shim 版本使用 .tensors
+            if hasattr(img_list, 'tensor'):
+                sliced_tensor = img_list.tensor[start:end]
+            else:
+                sliced_tensor = img_list.tensors[start:end]
+            sliced_sizes = img_list.image_sizes[start:end]
+            return ImageList(sliced_tensor, sliced_sizes)
 
         if total_chunks <= micro_bs:
             # 小 batch，直接处理
@@ -323,6 +341,8 @@ class JointModel(nn.Module):
                     torch.tensor(img) if not isinstance(img, torch.Tensor) else img
                     for img in mb_images
                 ]).to(device)
+            elif image_is_imagelist:
+                mb_image = _slice_imagelist(image, start_idx, end_idx)
             elif image is not None:
                 mb_image = image[start_idx:end_idx]
             else:
