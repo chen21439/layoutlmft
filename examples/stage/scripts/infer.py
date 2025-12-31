@@ -37,8 +37,6 @@ PROJECT_ROOT = os.getcwd()
 sys.path.insert(0, PROJECT_ROOT)
 STAGE_ROOT = os.path.join(PROJECT_ROOT, "examples", "stage")
 sys.path.insert(0, STAGE_ROOT)
-EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)
-sys.path.insert(0, EXAMPLES_ROOT)
 
 from configs.config_loader import load_config
 

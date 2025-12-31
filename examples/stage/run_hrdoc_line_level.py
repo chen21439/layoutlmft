@@ -57,9 +57,7 @@ from transformers.utils import check_min_version
 
 # 添加项目路径
 STAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
-EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)
 sys.path.insert(0, STAGE_ROOT)
-sys.path.insert(0, EXAMPLES_ROOT)
 
 # 导入 line-level 模型和数据加载器
 from data import HRDocDataLoader, HRDocDataLoaderConfig, load_hrdoc_raw_datasets

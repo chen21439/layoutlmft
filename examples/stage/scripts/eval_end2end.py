@@ -47,10 +47,6 @@ sys.path.insert(0, STAGE_ROOT)
 from util.checkpoint_utils import get_latest_checkpoint, get_best_model
 from util.experiment_manager import ensure_experiment
 from tasks.parent_finding import ParentFindingTask
-
-# 添加 examples/ 到路径（用于导入 models.build）
-EXAMPLES_ROOT = os.path.dirname(STAGE_ROOT)
-sys.path.insert(0, EXAMPLES_ROOT)
 from models.build import load_joint_model
 
 logger = logging.getLogger(__name__)

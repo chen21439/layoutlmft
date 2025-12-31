@@ -26,14 +26,9 @@ from types import SimpleNamespace
 # Add project paths (before GPU setup)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 STAGE_DIR = PROJECT_ROOT / "examples" / "stage"
-EXAMPLES_ROOT = PROJECT_ROOT / "examples"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "configs"))
-sys.path.insert(0, str(STAGE_DIR / "util"))
-sys.path.insert(0, str(STAGE_DIR / "data"))
 sys.path.insert(0, str(STAGE_DIR))
-# EXAMPLES_ROOT 放最后，确保 examples/models/ 优先于 examples/stage/models/
-sys.path.insert(0, str(EXAMPLES_ROOT))
 
 # ==================== GPU 设置（必须在 import torch 之前）====================
 from utils.gpu import setup_gpu_early
@@ -45,7 +40,7 @@ from tqdm import tqdm
 from layoutlmft.data.labels import LABEL_LIST, NUM_LABELS, id2label, get_id2label, get_label2id
 from layoutlmft.models.layoutxlm import LayoutXLMTokenizerFast
 
-# 从共享模块导入（examples/models/build.py）
+# 从 stage/models 导入
 from models.build import load_joint_model, get_latest_joint_checkpoint
 
 # 从 stage 目录导入（examples/stage/）
