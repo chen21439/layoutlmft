@@ -80,9 +80,9 @@ def load_config_and_setup(
                 model_args.model_name_or_path = config.model.local_path or config.model.name_or_path
                 logger.warning(f"No Stage 1 model found, using pretrained: {model_args.model_name_or_path}")
 
-    # 设置输出目录
-    default_output_dir = "./output/joint" if stage_name == "joint" else f"./output/{stage_name}"
-    if training_args.output_dir == default_output_dir:
+    # 设置输出目录（如果使用默认值，则替换为实验目录）
+    default_output_dirs = ["./output/joint", "./output/stage1", "./output/stage34"]
+    if training_args.output_dir in default_output_dirs:
         training_args.output_dir = exp_manager.get_stage_dir(training_args.exp, stage_name, data_args.dataset)
 
     # 数据目录
