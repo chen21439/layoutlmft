@@ -315,9 +315,18 @@ def build_model(model_args, config, raw_train_dataset, device):
     disable_stage34 = model_args.mode == "stage1"
 
     if disable_stage34:
+        # stage1 模式：只训练 Stage1，禁用 Stage3/4
+        lambda_cls = model_args.lambda_cls
         lambda_parent = 0.0
         lambda_rel = 0.0
+    elif stage1_no_grad:
+        # stage34 模式：冻结 Stage1，只训练 Stage3/4
+        lambda_cls = 0.0  # 不计算分类 loss
+        lambda_parent = model_args.lambda_parent
+        lambda_rel = model_args.lambda_rel
     else:
+        # joint 模式：全部训练
+        lambda_cls = model_args.lambda_cls
         lambda_parent = model_args.lambda_parent
         lambda_rel = model_args.lambda_rel
 
@@ -327,7 +336,7 @@ def build_model(model_args, config, raw_train_dataset, device):
         stage3_model=stage3_model,
         stage4_model=stage4_model,
         feature_extractor=feature_extractor,
-        lambda_cls=model_args.lambda_cls,
+        lambda_cls=lambda_cls,
         lambda_parent=lambda_parent,
         lambda_rel=lambda_rel,
         section_parent_weight=model_args.section_parent_weight,
@@ -425,7 +434,11 @@ def main():
     logger.info(f"Dataset:        {data_args.dataset}")
     logger.info(f"Model Path:     {model_args.model_name_or_path}")
     logger.info(f"Output Dir:     {training_args.output_dir}")
-    if model_args.mode != "stage1":
+    if model_args.mode == "stage1":
+        logger.info(f"Loss Weights:   cls={model_args.lambda_cls} (Stage3/4 disabled)")
+    elif model_args.mode == "stage34":
+        logger.info(f"Loss Weights:   cls=0.0 (frozen), parent={model_args.lambda_parent}, rel={model_args.lambda_rel}")
+    else:
         logger.info(f"Loss Weights:   cls={model_args.lambda_cls}, parent={model_args.lambda_parent}, rel={model_args.lambda_rel}")
     logger.info("=" * 60)
 
