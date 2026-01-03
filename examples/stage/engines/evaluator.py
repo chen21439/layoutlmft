@@ -769,20 +769,17 @@ class Evaluator:
             all_labels = sample.labels.cpu().tolist()
             all_line_ids = sample.line_ids.cpu().tolist()
 
-        # 提取 ordered_line_ids（保持顺序）
-        seen_line_ids = set()
-        ordered_line_ids = []
-        for line_id in all_line_ids:
-            if line_id >= 0 and line_id not in seen_line_ids:
-                seen_line_ids.add(line_id)
-                ordered_line_ids.append(line_id)
+        # 提取 sorted_line_ids（与 predictor 一致）
+        # 使用 sorted 顺序，与 LinePooling.get_line_ids_mapping 保持一致
+        unique_line_ids = sorted(set(lid for lid in all_line_ids if lid >= 0))
 
         # 优先使用 line_semantic_labels（与训练一致）
+        # 注意：line_semantic_labels[i] 是 line_id=i 的标签
         if sample.line_semantic_labels is not None:
             labels = sample.line_semantic_labels.cpu().tolist()
-            for idx, label in enumerate(labels):
-                if label >= 0 and idx < len(ordered_line_ids):
-                    gt["classes"][ordered_line_ids[idx]] = label
+            for line_id, label in enumerate(labels):
+                if label >= 0:
+                    gt["classes"][line_id] = label
         else:
             # Fallback: 使用 extract_line_labels（复用 data/ 的函数，"首次出现"策略）
             line_label_map = extract_line_labels(all_labels, all_line_ids)
@@ -794,13 +791,13 @@ class Evaluator:
         # 2. sample.line_parent_ids 的值是 parent 的 line_id，需要转换为行序号
         # 3. pred.line_parents 是行序号，所以 GT 也要用行序号表示
 
-        # 建立 line_id -> 行序号 的映射
-        line_id_to_row = {lid: row for row, lid in enumerate(ordered_line_ids)}
+        # 建立 line_id -> 行序号 的映射（使用 sorted 顺序，与 predictor 一致）
+        line_id_to_row = {lid: row for row, lid in enumerate(unique_line_ids)}
 
         if sample.line_parent_ids is not None:
             raw_parents = sample.line_parent_ids.cpu().tolist()
             # 按行序号顺序提取，并将 parent_line_id 转换为行序号
-            for row in range(len(ordered_line_ids)):
+            for row in range(len(unique_line_ids)):
                 if row < len(raw_parents):
                     parent_line_id = raw_parents[row]
                     if parent_line_id == -1:
@@ -818,14 +815,14 @@ class Evaluator:
         if sample.line_relations is not None:
             raw_relations = sample.line_relations.cpu().tolist()
             # 按行序号顺序提取
-            for row in range(len(ordered_line_ids)):
+            for row in range(len(unique_line_ids)):
                 if row < len(raw_relations):
                     gt["relations"].append(raw_relations[row])
                 else:
                     gt["relations"].append(-100)
 
-        # 存储按顺序出现的 line_ids
-        gt["line_ids"] = ordered_line_ids
+        # 存储排序后的 line_ids（与 predictor 一致）
+        gt["line_ids"] = unique_line_ids
 
         return gt
 
