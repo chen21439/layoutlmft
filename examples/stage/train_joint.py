@@ -159,6 +159,7 @@ class JointTrainingArguments(TrainingArguments):
     exp: str = field(default=None, metadata={"help": "Experiment ID"})
     new_exp: str = field(default="", metadata={"help": "Create new experiment"})
     exp_name: str = field(default="", metadata={"help": "Experiment name"})
+    artifact_dir: str = field(default="", metadata={"help": "Artifact root directory (overrides config.paths.output_dir)"})
 
     # 快速测试
     quick: bool = field(default=False, metadata={"help": "Quick test mode"})

@@ -49,6 +49,12 @@ def load_config_and_setup(
         os.environ["TRANSFORMERS_CACHE"] = config.paths.hf_cache_dir
         os.environ["HF_DATASETS_CACHE"] = os.path.join(config.paths.hf_cache_dir, "datasets")
 
+    # 命令行 artifact_dir 优先于配置文件
+    artifact_dir = getattr(training_args, 'artifact_dir', '') or ''
+    if artifact_dir:
+        config.paths.output_dir = artifact_dir
+        logger.info(f"Using artifact directory from command line: {artifact_dir}")
+
     # 初始化实验管理器
     exp_manager, exp_dir = ensure_experiment(
         config,
