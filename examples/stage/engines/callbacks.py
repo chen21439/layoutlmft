@@ -275,21 +275,20 @@ class Stage1EvaluationCallback(TrainerCallback):
     只评估 Stage1 的分类指标（Line-level Macro/Micro F1），
     不运行 Stage 3/4 的 Parent/Relation 评估。
 
+    使用 Evaluator 类进行 Line-level 评估（和 E2EEvaluationCallback 相同的评估逻辑）。
+
     用于 --mode stage1 训练时。
     """
 
     def __init__(self, eval_dataloader, id2label: Dict[int, str] = None):
         self.eval_dataloader = eval_dataloader
         self.id2label = id2label
-        self.history = []  # [(step, line_f1, line_acc), ...]
+        self.history = []  # [(step, line_macro, line_micro, line_acc), ...]
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
-        """运行 Stage1 分类评估"""
+        """运行 Stage1 分类评估（Line-level）"""
         if model is None:
             return
-
-        import numpy as np
-        from sklearn.metrics import accuracy_score, f1_score
 
         device = next(model.parameters()).device
         global_step = state.global_step
@@ -299,50 +298,23 @@ class Stage1EvaluationCallback(TrainerCallback):
         logger.info(f"Stage1 Classification Evaluation at Step {global_step}")
         logger.info("=" * 60)
 
-        model.eval()
-        all_preds = []
-        all_labels = []
+        # 使用 Evaluator 进行 Line-level 评估（与联合训练评估一致）
+        from .evaluator import Evaluator
 
-        with torch.no_grad():
-            for batch in self.eval_dataloader:
-                # 移动到设备
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                bbox = batch["bbox"].to(device)
-                image = batch["image"].to(device)
-                labels = batch["labels"]
+        evaluator = Evaluator(model, device)
+        output = evaluator.evaluate(
+            self.eval_dataloader,
+            compute_teds=False,  # Stage1 不计算 TEDS
+            verbose=True,
+            save_predictions=False,
+            output_dir=None,
+        )
 
-                # Stage1 forward
-                outputs = model.stage1(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    bbox=bbox,
-                    image=image,
-                )
-                logits = outputs.logits  # [batch, seq_len, num_labels]
-                preds = torch.argmax(logits, dim=-1).cpu().numpy()
-
-                # 收集预测和标签（过滤 -100）
-                for pred, label in zip(preds, labels.numpy()):
-                    for p, l in zip(pred, label):
-                        if l != -100:
-                            all_preds.append(p)
-                            all_labels.append(l)
-
-        model.train()
-
-        if not all_labels:
-            logger.warning("No valid labels found for evaluation")
-            return
-
-        # 计算指标
-        accuracy = accuracy_score(all_labels, all_preds)
-        macro_f1 = f1_score(all_labels, all_preds, average="macro", zero_division=0)
-        micro_f1 = f1_score(all_labels, all_preds, average="micro", zero_division=0)
-
-        line_acc = accuracy * 100
-        line_macro = macro_f1 * 100
-        line_micro = micro_f1 * 100
+        # 提取 Line-level 指标
+        line_macro = output.line_macro_f1 * 100
+        line_micro = output.line_micro_f1 * 100
+        line_acc = output.line_accuracy * 100
+        num_lines = output.num_lines
 
         def fmt_delta(d, threshold=0.5):
             if d >= threshold:
@@ -361,15 +333,17 @@ class Stage1EvaluationCallback(TrainerCallback):
 
         if avg_n > 0:
             recent = self.history[-avg_n:]
-            avg_f1 = sum(h[1] for h in recent) / avg_n
-            avg_acc = sum(h[2] for h in recent) / avg_n
-            delta_f1 = line_macro - avg_f1
+            avg_macro = sum(h[1] for h in recent) / avg_n
+            avg_micro = sum(h[2] for h in recent) / avg_n
+            avg_acc = sum(h[3] for h in recent) / avg_n
+            delta_macro = line_macro - avg_macro
+            delta_micro = line_micro - avg_micro
             delta_acc = line_acc - avg_acc
 
             logger.info(f"║  Metric       │ Current  │  Avg({avg_n})  │  Delta       ║")
             logger.info("║───────────────┼──────────┼──────────┼──────────────║")
-            logger.info(f"║  Macro F1     │  {line_macro:>5.1f}%  │  {avg_f1:>5.1f}%  │  {fmt_delta(delta_f1):>6}      ║")
-            logger.info(f"║  Micro F1     │  {line_micro:>5.1f}%  │         │              ║")
+            logger.info(f"║  Macro F1     │  {line_macro:>5.1f}%  │  {avg_macro:>5.1f}%  │  {fmt_delta(delta_macro):>6}      ║")
+            logger.info(f"║  Micro F1     │  {line_micro:>5.1f}%  │  {avg_micro:>5.1f}%  │  {fmt_delta(delta_micro):>6}      ║")
             logger.info(f"║  Accuracy     │  {line_acc:>5.1f}%  │  {avg_acc:>5.1f}%  │  {fmt_delta(delta_acc):>6}      ║")
         else:
             logger.info(f"║  Metric       │ Current  │                           ║")
@@ -379,7 +353,7 @@ class Stage1EvaluationCallback(TrainerCallback):
             logger.info(f"║  Accuracy     │  {line_acc:>5.1f}%  │                           ║")
 
         logger.info("╠══════════════════════════════════════════════════════════════╣")
-        logger.info(f"║  Tokens evaluated: {len(all_labels):<42} ║")
+        logger.info(f"║  Lines evaluated: {num_lines:<43} ║")
         logger.info("╚══════════════════════════════════════════════════════════════╝")
 
-        self.history.append((global_step, line_macro, line_acc))
+        self.history.append((global_step, line_macro, line_micro, line_acc))
