@@ -49,17 +49,18 @@ def load_config_and_setup(
         os.environ["TRANSFORMERS_CACHE"] = config.paths.hf_cache_dir
         os.environ["HF_DATASETS_CACHE"] = os.path.join(config.paths.hf_cache_dir, "datasets")
 
-    # 命令行 artifact_dir 优先于配置文件
+    # 命令行 artifact_dir：直接作为输出目录，跳过实验管理的自动目录创建
     artifact_dir = getattr(training_args, 'artifact_dir', '') or ''
     if artifact_dir:
-        config.paths.output_dir = artifact_dir
-        logger.info(f"Using artifact directory from command line: {artifact_dir}")
+        # 直接使用 artifact_dir 作为 output_dir
+        training_args.output_dir = artifact_dir
+        logger.info(f"Using artifact_dir as output_dir: {artifact_dir}")
 
-    # 初始化实验管理器
+    # 初始化实验管理器（即使指定了 artifact_dir，其他功能可能仍需要）
     exp_manager, exp_dir = ensure_experiment(
         config,
         exp=training_args.exp,
-        new_exp=training_args.new_exp,
+        new_exp=training_args.new_exp if not artifact_dir else "",  # artifact_dir 模式下不创建新实验
         name=training_args.exp_name or f"{stage_name.capitalize()} {data_args.dataset.upper()}",
     )
 
@@ -86,10 +87,11 @@ def load_config_and_setup(
                 model_args.model_name_or_path = config.model.local_path or config.model.name_or_path
                 logger.warning(f"No Stage 1 model found, using pretrained: {model_args.model_name_or_path}")
 
-    # 设置输出目录（如果使用默认值，则替换为实验目录）
-    default_output_dirs = ["./output/joint", "./output/stage1", "./output/stage34"]
-    if training_args.output_dir in default_output_dirs:
-        training_args.output_dir = exp_manager.get_stage_dir(training_args.exp, stage_name, data_args.dataset)
+    # 设置输出目录（仅当未指定 artifact_dir 且使用默认值时，才替换为实验目录）
+    if not artifact_dir:
+        default_output_dirs = ["./output/joint", "./output/stage1", "./output/stage34"]
+        if training_args.output_dir in default_output_dirs:
+            training_args.output_dir = exp_manager.get_stage_dir(training_args.exp, stage_name, data_args.dataset)
 
     # 数据目录
     data_dir = config.dataset.get_data_dir(data_args.dataset)
