@@ -464,17 +464,8 @@ def main():
             logger.info(f"Auto-adjusting epochs: {int(training_args.num_train_epochs)} -> {required_epochs}")
             training_args.num_train_epochs = float(required_epochs)
 
-    # Data collator
-    if model_args.mode == "stage1":
-        # Stage1 模式使用标准 collator（不需要 line info）
-        from layoutlmft.data import DataCollatorForKeyValueExtraction
-        data_collator = DataCollatorForKeyValueExtraction(
-            tokenizer=tokenizer,
-            padding=True,
-            max_length=512,
-        )
-        logger.info("Using standard DataCollator (stage1 mode)")
-    elif data_args.document_level:
+    # Data collator（所有模式都使用 HRDocJointDataCollator 以支持 line_ids）
+    if data_args.document_level:
         data_collator = HRDocDocumentLevelCollator(tokenizer=tokenizer, padding=True, max_length=512)
         logger.info("Using DOCUMENT-LEVEL collator")
     else:
