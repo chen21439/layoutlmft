@@ -337,7 +337,8 @@ class FocalLoss(nn.Module):
         # 应用类别权重 α_t
         if self.alpha is not None:
             if isinstance(self.alpha, torch.Tensor):
-                alpha_t = self.alpha[targets]
+                # 确保 alpha 在正确的设备上
+                alpha_t = self.alpha.to(inputs.device)[targets]
             else:
                 alpha_t = torch.tensor(self.alpha, device=inputs.device)[targets]
             loss = alpha_t * loss

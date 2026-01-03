@@ -113,6 +113,7 @@ class JointModel(nn.Module):
         freeze_visual: bool = False,
         cls_dropout: float = 0.1,  # 分类头 dropout
         use_gt_class: bool = False,  # 使用 GT class 而不是 Stage1 预测（用于 Stage2 训练）
+        relation_class_weights: list = None,  # 关系分类的类别权重 [connect, contain, equality]
     ):
         super().__init__()
 
@@ -120,6 +121,7 @@ class JointModel(nn.Module):
         # 使用 LayoutXLM 的 backbone（不使用其内置分类头）
         # stage1_model 是 LayoutXLMForTokenClassification，其 backbone 在 .layoutlmv2
         self.backbone = stage1_model
+        self.relation_class_weights = relation_class_weights
 
         # ========== 共享模块 ==========
         # LinePooling: Token-level → Line-level 特征聚合
@@ -163,11 +165,18 @@ class JointModel(nn.Module):
             self.freeze_visual_encoder()
 
         # 关系分类损失
+        # 默认权重：基于类别分布（connect:75%, contain:5%, equality:15%）
+        if relation_class_weights is None:
+            # connect=1.0, contain=15.0, equality=5.0（inverse frequency normalized）
+            relation_class_weights = [1.0, 15.0, 5.0]
+        weight_tensor = torch.tensor(relation_class_weights, dtype=torch.float32)
+
         if use_focal_loss:
             from layoutlmft.models.relation_classifier import FocalLoss
-            self.relation_criterion = FocalLoss(gamma=2.0)
+            # FocalLoss 使用 alpha 参数作为类别权重
+            self.relation_criterion = FocalLoss(alpha=weight_tensor, gamma=2.0)
         else:
-            self.relation_criterion = nn.CrossEntropyLoss(ignore_index=-100)
+            self.relation_criterion = nn.CrossEntropyLoss(weight=weight_tensor, ignore_index=-100)
 
     def freeze_stage1(self):
         """
@@ -822,7 +831,8 @@ class JointModel(nn.Module):
                     )
 
                     target = torch.tensor([rel_label], device=device)
-                    loss = F.cross_entropy(rel_logits, target)
+                    # 使用 self.relation_criterion（FocalLoss 或带权重的 CrossEntropyLoss）
+                    loss = self.relation_criterion(rel_logits, target)
                     rel_loss = rel_loss + loss
 
                     pred_rel = rel_logits.argmax(dim=1).item()
