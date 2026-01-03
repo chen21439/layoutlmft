@@ -302,6 +302,7 @@ class InferenceDataLoader:
                 label2id=self.label2id,
                 image=image,
                 page_number=page_number,
+                document_name=document_name,
                 label_all_tokens=self.label_all_tokens,
             )
 
