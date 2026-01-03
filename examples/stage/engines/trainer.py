@@ -119,7 +119,12 @@ class JointTrainer(Trainer):
                 logger.error(f"[ERROR] input_ids shape: {inputs['input_ids'].shape}")
             if "image" in inputs:
                 img = inputs["image"]
-                logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
+                if hasattr(img, 'shape'):
+                    logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
+                elif hasattr(img, 'tensor'):
+                    logger.error(f"[ERROR] image (ImageList) tensor shape: {img.tensor.shape}")
+                else:
+                    logger.error(f"[ERROR] image type: {type(img)}")
             if "line_ids" in inputs:
                 line_ids = inputs["line_ids"]
                 if hasattr(line_ids, 'shape'):

@@ -184,8 +184,8 @@ def prepare_datasets(tokenizer, data_args, training_args, model_args):
     """准备训练和评估数据集"""
     num_workers = 1 if data_args.max_train_samples and data_args.max_train_samples < 100 else 4
 
-    # 根据 mode 决定是否需要 line info
-    include_line_info = model_args.mode != "stage1"
+    # 所有模式都需要 line info（line-level 分类）
+    include_line_info = True
 
     loader_config = HRDocDataLoaderConfig(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
