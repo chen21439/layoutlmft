@@ -309,16 +309,23 @@ class Evaluator:
                             gt_rel_id = gt["relations"][idx] if idx < len(gt["relations"]) else -100
                             pred_rel_id = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
 
+                            # 转换 parent_idx 到 TEDS 期望的格式：
+                            # 我们的格式: -1=ROOT, 0=第0行, n=第n行 (0-indexed)
+                            # TEDS 格式: 0=ROOT, 1=第0行, n+1=第n行 (1-indexed)
+                            # 转换: 所有值 +1（-1+1=0=ROOT, 0+1=1=第0行, n+1=第n行）
+                            teds_gt_parent = gt_parent_idx + 1
+                            teds_pred_parent = pred_parent_idx + 1
+
                             gt_doc.append({
                                 "class": self.id2label.get(gt_class_id, f"cls_{gt_class_id}"),
                                 "text": f"line_{line_id}",
-                                "parent_id": gt_parent_idx,
+                                "parent_id": teds_gt_parent,
                                 "relation": ID2RELATION.get(gt_rel_id, "none") if gt_rel_id >= 0 else "none",
                             })
                             pred_doc.append({
                                 "class": self.id2label.get(pred_class_id, f"cls_{pred_class_id}"),
                                 "text": f"line_{line_id}",
-                                "parent_id": pred_parent_idx,
+                                "parent_id": teds_pred_parent,
                                 "relation": ID2RELATION.get(pred_rel_id, "none"),
                             })
                         if gt_doc and pred_doc:
