@@ -22,6 +22,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.batch import Sample, BatchBase, wrap_batch
+from data.line_level_collator import extract_line_labels
 from .predictor import Predictor, PredictionOutput
 
 # 导入 TEDS 计算函数
@@ -768,22 +769,24 @@ class Evaluator:
             all_labels = sample.labels.cpu().tolist()
             all_line_ids = sample.line_ids.cpu().tolist()
 
-        # Token -> Line 聚合，同时保持 line_id 顺序
-        line_label_votes = defaultdict(list)
+        # 提取 ordered_line_ids（保持顺序）
         seen_line_ids = set()
         ordered_line_ids = []
-        for label, line_id in zip(all_labels, all_line_ids):
-            if line_id >= 0:
-                if line_id not in seen_line_ids:
-                    seen_line_ids.add(line_id)
-                    ordered_line_ids.append(line_id)
-                if label >= 0:
-                    line_label_votes[line_id].append(label)
+        for line_id in all_line_ids:
+            if line_id >= 0 and line_id not in seen_line_ids:
+                seen_line_ids.add(line_id)
+                ordered_line_ids.append(line_id)
 
-        for line_id, votes in line_label_votes.items():
-            # 多数投票
-            from collections import Counter
-            gt["classes"][line_id] = Counter(votes).most_common(1)[0][0]
+        # 优先使用 line_semantic_labels（与训练一致）
+        if sample.line_semantic_labels is not None:
+            labels = sample.line_semantic_labels.cpu().tolist()
+            for idx, label in enumerate(labels):
+                if label >= 0 and idx < len(ordered_line_ids):
+                    gt["classes"][ordered_line_ids[idx]] = label
+        else:
+            # Fallback: 使用 extract_line_labels（复用 data/ 的函数，"首次出现"策略）
+            line_label_map = extract_line_labels(all_labels, all_line_ids)
+            gt["classes"] = line_label_map
 
         # 处理 parent_ids 和 relations
         # 重要：
