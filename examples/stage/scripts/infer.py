@@ -59,6 +59,16 @@ def parse_args():
     parser.add_argument("--max_samples", type=int, default=-1,
                         help="Max samples (-1 for all)")
 
+    # P0 约束解码参数
+    parser.add_argument("--use_parent_constraint", action="store_true",
+                        help="Enable M_cp parent constraint filtering (P0)")
+    parser.add_argument("--use_relation_gating", action="store_true",
+                        help="Enable label-pair relation gating (P0)")
+    parser.add_argument("--mcp_threshold", type=float, default=0.02,
+                        help="M_cp filtering threshold")
+    parser.add_argument("--confidence_threshold", type=float, default=0.7,
+                        help="Only enable hard filtering when cls confidence >= this value")
+
     return parser.parse_args()
 
 
@@ -125,7 +135,23 @@ def main():
     # 3. Run inference
     logger.info("Running inference...")
     from engines.predictor import Predictor
-    predictor = Predictor(model, device)
+
+    # P0: 打印约束解码配置
+    if args.use_parent_constraint or args.use_relation_gating:
+        logger.info("P0 Constrained Decoding enabled:")
+        logger.info(f"  use_parent_constraint: {args.use_parent_constraint}")
+        logger.info(f"  use_relation_gating: {args.use_relation_gating}")
+        logger.info(f"  mcp_threshold: {args.mcp_threshold}")
+        logger.info(f"  confidence_threshold: {args.confidence_threshold}")
+
+    predictor = Predictor(
+        model,
+        device,
+        use_parent_constraint=args.use_parent_constraint,
+        use_relation_gating=args.use_relation_gating,
+        mcp_threshold=args.mcp_threshold,
+        confidence_threshold=args.confidence_threshold,
+    )
 
     predictor.predict_and_save(
         dataloader=eval_dataloader,
