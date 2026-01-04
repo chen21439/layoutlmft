@@ -22,7 +22,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.batch import Sample, BatchBase, wrap_batch
-from data.line_level_collator import extract_line_labels
 from .predictor import Predictor, PredictionOutput
 
 # 导入 TEDS 计算函数
@@ -756,34 +755,25 @@ class Evaluator:
             "line_ids": [],  # 用于正确比较 parent_id 和 child_id
         }
 
-        if sample.line_ids is None or sample.labels is None:
+        if sample.line_ids is None:
             return gt
 
-        # 处理分类标签
+        # 提取 line_ids（展平处理多 chunk 情况）
         if sample.is_document_level:
-            # 多 chunk：展平处理
-            all_labels = sample.labels.reshape(-1).cpu().tolist()
             all_line_ids = sample.line_ids.reshape(-1).cpu().tolist()
         else:
-            # 单 chunk
-            all_labels = sample.labels.cpu().tolist()
             all_line_ids = sample.line_ids.cpu().tolist()
 
-        # 提取 sorted_line_ids（与 predictor 一致）
-        # 使用 sorted 顺序，与 LinePooling.get_line_ids_mapping 保持一致
+        # 提取 sorted_line_ids（与 predictor 的 LinePooling.get_line_ids_mapping 一致）
         unique_line_ids = sorted(set(lid for lid in all_line_ids if lid >= 0))
 
-        # 优先使用 line_semantic_labels（与训练一致）
-        # 注意：line_semantic_labels[i] 是 line_id=i 的标签
+        # 使用 line_semantic_labels 提取分类 GT
+        # line_semantic_labels[line_id] = label（与训练时一致）
         if sample.line_semantic_labels is not None:
             labels = sample.line_semantic_labels.cpu().tolist()
             for line_id, label in enumerate(labels):
                 if label >= 0:
                     gt["classes"][line_id] = label
-        else:
-            # Fallback: 使用 extract_line_labels（复用 data/ 的函数，"首次出现"策略）
-            line_label_map = extract_line_labels(all_labels, all_line_ids)
-            gt["classes"] = line_label_map
 
         # 处理 parent_ids 和 relations
         # 重要：
