@@ -22,12 +22,6 @@ from .experiment_manager import (
     get_artifact_path as get_artifact_path_legacy,
 )
 
-def get_stage_feature_extractor(*args, **kwargs):
-    """延迟导入 StageFeatureExtractor，避免启动时加载 stage 依赖"""
-    from .stage_feature_extractor import get_stage_feature_extractor as _get
-    return _get(*args, **kwargs)
-
-
 def StageFeatureExtractor(*args, **kwargs):
     """延迟导入 StageFeatureExtractor 类"""
     from .stage_feature_extractor import StageFeatureExtractor as _cls
@@ -47,6 +41,5 @@ __all__ = [
     'ExperimentManager',
     'ensure_experiment',
     # stage 特征提取
-    'get_stage_feature_extractor',
     'StageFeatureExtractor',
 ]

@@ -682,20 +682,14 @@ def main():
         # Load StageFeatureExtractor
         from examples.comp_hrdoc.utils.stage_feature_extractor import StageFeatureExtractor
 
-        if args.stage_checkpoint:
-            stage_feature_extractor = StageFeatureExtractor(
-                checkpoint_path=args.stage_checkpoint,
-                device=str(device),
-            )
-        else:
-            # Auto-find latest checkpoint
-            from examples.comp_hrdoc.utils.stage_feature_extractor import get_stage_feature_extractor
-            stage_feature_extractor = get_stage_feature_extractor(
-                env=args.env,
-                exp=args.exp,
-                device=str(device),
-            )
-        logger.info(f"Loaded StageFeatureExtractor from checkpoint")
+        if not args.stage_checkpoint:
+            raise ValueError("--stage-checkpoint is required when using --use-stage-features")
+
+        stage_feature_extractor = StageFeatureExtractor(
+            checkpoint_path=args.stage_checkpoint,
+            device=str(device),
+        )
+        logger.info(f"Loaded StageFeatureExtractor from: {args.stage_checkpoint}")
 
         # Load HRDoc DataLoader (from stage directory)
         sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
