@@ -2,10 +2,14 @@
 """Training script for DOC (Detect-Order-Construct) model
 
 Usage:
+    # 基础训练（使用 CompHRDoc 数据）
     python examples/comp_hrdoc/scripts/train_doc.py --env test
     python examples/comp_hrdoc/scripts/train_doc.py --env test --quick
     python examples/comp_hrdoc/scripts/train_doc.py --env test --new-exp
-    python examples/comp_hrdoc/scripts/train_doc.py --env test --use-construct
+
+    # 使用 stage 模型特征训练 Construct（深度集成）
+    python examples/comp_hrdoc/scripts/train_doc.py --env test --use-stage-features --stage-checkpoint /path/to/joint/checkpoint
+    python examples/comp_hrdoc/scripts/train_doc.py --env test --use-stage-features --dataset hrds --quick
 """
 
 # ==================== GPU 设置（必须在 import torch 之前）====================
@@ -122,6 +126,14 @@ def parse_args():
     parser.add_argument("--quick", action="store_true", help="Quick test with small data")
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
+
+    # Stage feature integration
+    parser.add_argument("--use-stage-features", action="store_true", default=False,
+                        help="Use pre-trained stage model to extract line features for Construct training")
+    parser.add_argument("--stage-checkpoint", type=str, default=None,
+                        help="Path to stage joint model checkpoint (required if --use-stage-features)")
+    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
+                        help="Dataset to use when --use-stage-features is enabled")
 
     return parser.parse_args()
 
@@ -374,6 +386,238 @@ def evaluate(
     return metrics
 
 
+# ==================== Stage Feature Training ====================
+
+def train_epoch_with_stage_features(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    feature_extractor,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    device: torch.device,
+    args,
+    scaler=None,
+) -> Dict[str, float]:
+    """Train ConstructFromFeatures model using stage features.
+
+    Args:
+        model: ConstructFromFeatures model
+        dataloader: HRDocDataLoader
+        feature_extractor: StageFeatureExtractor instance
+        optimizer: Optimizer
+        scheduler: LR scheduler
+        device: Device
+        args: Arguments
+        scaler: GradScaler for FP16
+    """
+    model.train()
+
+    total_loss = 0.0
+    total_parent_loss = 0.0
+    total_sibling_loss = 0.0
+    total_root_loss = 0.0
+    num_batches = 0
+
+    progress_bar = tqdm(dataloader, desc="Training (stage features)")
+
+    for step, batch in enumerate(progress_bar):
+        # Extract line features using stage model
+        with torch.no_grad():
+            line_features, line_mask = feature_extractor.extract_features(
+                input_ids=batch["input_ids"],
+                bbox=batch["bbox"],
+                attention_mask=batch["attention_mask"],
+                line_ids=batch.get("line_ids"),
+                image=batch.get("image"),
+                num_docs=batch.get("num_docs"),
+                chunks_per_doc=batch.get("chunks_per_doc"),
+            )
+
+        # Get labels from HRDoc data
+        # line_parent_ids: [num_docs, max_lines]
+        # line_relations: [num_docs, max_lines]
+        line_parent_ids = batch.get("line_parent_ids")
+        line_labels = batch.get("line_labels")  # Category labels
+
+        if line_parent_ids is not None:
+            line_parent_ids = line_parent_ids.to(device)
+        if line_labels is not None:
+            line_labels = line_labels.to(device)
+
+        # Generate sibling labels from parent_ids
+        sibling_labels = None
+        if line_parent_ids is not None:
+            from examples.comp_hrdoc.models.construct_only import generate_sibling_labels
+            sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
+
+        # Get reading order (use line index as reading order for now)
+        # TODO: Get actual reading order from stage model predictions
+        batch_size, max_lines = line_mask.shape
+        reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+
+        # Forward pass
+        if args.fp16 and scaler is not None:
+            with torch.cuda.amp.autocast():
+                outputs = model(
+                    region_features=line_features,
+                    categories=line_labels if line_labels is not None else torch.zeros_like(line_mask, dtype=torch.long),
+                    region_mask=line_mask,
+                    reading_orders=reading_orders,
+                    parent_labels=line_parent_ids,
+                    sibling_labels=sibling_labels,
+                )
+                loss = outputs["loss"] / args.gradient_accumulation_steps
+        else:
+            outputs = model(
+                region_features=line_features,
+                categories=line_labels if line_labels is not None else torch.zeros_like(line_mask, dtype=torch.long),
+                region_mask=line_mask,
+                reading_orders=reading_orders,
+                parent_labels=line_parent_ids,
+                sibling_labels=sibling_labels,
+            )
+            loss = outputs["loss"] / args.gradient_accumulation_steps
+
+        # Backward pass
+        if args.fp16 and scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        # Gradient accumulation
+        if (step + 1) % args.gradient_accumulation_steps == 0:
+            if args.fp16 and scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+        # Record losses
+        total_loss += outputs["loss"].item()
+        total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
+        total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
+        total_root_loss += outputs.get("root_loss", torch.tensor(0.0)).item()
+        num_batches += 1
+
+        # Update progress bar
+        progress_bar.set_postfix({
+            "loss": f"{outputs['loss'].item():.4f}",
+            "parent": f"{outputs.get('parent_loss', torch.tensor(0.0)).item():.4f}",
+        })
+
+    return {
+        "loss": total_loss / max(num_batches, 1),
+        "parent_loss": total_parent_loss / max(num_batches, 1),
+        "sibling_loss": total_sibling_loss / max(num_batches, 1),
+        "root_loss": total_root_loss / max(num_batches, 1),
+    }
+
+
+@torch.no_grad()
+def evaluate_with_stage_features(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    feature_extractor,
+    device: torch.device,
+) -> Dict[str, float]:
+    """Evaluate ConstructFromFeatures model using stage features."""
+    from examples.comp_hrdoc.models.construct_only import (
+        compute_construct_metrics,
+        generate_sibling_labels,
+    )
+
+    model.eval()
+
+    total_loss = 0.0
+    total_parent_loss = 0.0
+    total_sibling_loss = 0.0
+    total_root_loss = 0.0
+    num_batches = 0
+
+    # Aggregate metrics
+    all_parent_correct = 0
+    all_parent_total = 0
+    all_root_correct = 0
+    all_root_total = 0
+
+    for batch in tqdm(dataloader, desc="Evaluating (stage features)"):
+        # Extract line features
+        line_features, line_mask = feature_extractor.extract_features(
+            input_ids=batch["input_ids"],
+            bbox=batch["bbox"],
+            attention_mask=batch["attention_mask"],
+            line_ids=batch.get("line_ids"),
+            image=batch.get("image"),
+            num_docs=batch.get("num_docs"),
+            chunks_per_doc=batch.get("chunks_per_doc"),
+        )
+
+        line_parent_ids = batch.get("line_parent_ids")
+        line_labels = batch.get("line_labels")
+
+        if line_parent_ids is not None:
+            line_parent_ids = line_parent_ids.to(device)
+        if line_labels is not None:
+            line_labels = line_labels.to(device)
+
+        sibling_labels = None
+        if line_parent_ids is not None:
+            sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
+
+        batch_size, max_lines = line_mask.shape
+        reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+
+        outputs = model(
+            region_features=line_features,
+            categories=line_labels if line_labels is not None else torch.zeros_like(line_mask, dtype=torch.long),
+            region_mask=line_mask,
+            reading_orders=reading_orders,
+            parent_labels=line_parent_ids,
+            sibling_labels=sibling_labels,
+        )
+
+        # Accumulate losses
+        total_loss += outputs["loss"].item()
+        total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
+        total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
+        total_root_loss += outputs.get("root_loss", torch.tensor(0.0)).item()
+
+        # Compute metrics
+        if line_parent_ids is not None:
+            metrics = compute_construct_metrics(
+                parent_logits=outputs["parent_logits"],
+                root_logits=outputs["root_logits"],
+                parent_labels=line_parent_ids,
+                region_mask=line_mask,
+            )
+
+            # Aggregate
+            has_parent = (line_parent_ids >= 0) & line_mask
+            pred_parents = outputs["parent_logits"].argmax(dim=-1)
+            correct = (pred_parents == line_parent_ids) & has_parent
+            all_parent_correct += correct.sum().item()
+            all_parent_total += has_parent.sum().item()
+
+            is_root_gt = (line_parent_ids == -1) & line_mask
+            is_root_pred = (outputs["root_logits"] > 0) & line_mask
+            root_correct = ((is_root_pred == is_root_gt) & line_mask).sum().item()
+            all_root_correct += root_correct
+            all_root_total += line_mask.sum().item()
+
+        num_batches += 1
+
+    return {
+        "loss": total_loss / max(num_batches, 1),
+        "parent_loss": total_parent_loss / max(num_batches, 1),
+        "sibling_loss": total_sibling_loss / max(num_batches, 1),
+        "root_loss": total_root_loss / max(num_batches, 1),
+        "parent_accuracy": all_parent_correct / max(all_parent_total, 1),
+        "root_accuracy": all_root_correct / max(all_root_total, 1),
+    }
+
+
 def main():
     args = parse_args()
 
@@ -428,51 +672,113 @@ def main():
         args.max_val_samples = args.max_val_samples or 20
         args.num_epochs = min(args.num_epochs, 2)
 
-    # Create datasets
-    mode = "document-level" if args.document_level else "page-level"
-    logger.info(f"Creating datasets in {mode} mode...")
-    data_config = CompHRDocConfig(
-        env=args.env,
-        max_train_samples=args.max_train_samples,
-        max_val_samples=args.max_val_samples,
-        val_split_ratio=args.val_split_ratio,
-        use_images=False,
-        document_level=args.document_level,
-    )
+    # ==================== Stage Feature Mode ====================
+    stage_feature_extractor = None
+    if args.use_stage_features:
+        logger.info("=" * 60)
+        logger.info("Stage Feature Mode: Using pre-trained stage model")
+        logger.info("=" * 60)
 
-    train_dataset = CompHRDocDataset(data_config, split="train")
-    val_dataset = CompHRDocDataset(data_config, split="validation")
+        # Load StageFeatureExtractor
+        from examples.comp_hrdoc.utils.stage_feature_extractor import StageFeatureExtractor
 
-    logger.info(f"Train dataset: {len(train_dataset)} samples")
-    logger.info(f"Validation dataset: {len(val_dataset)} samples")
+        if args.stage_checkpoint:
+            stage_feature_extractor = StageFeatureExtractor(
+                checkpoint_path=args.stage_checkpoint,
+                device=str(device),
+            )
+        else:
+            # Auto-find latest checkpoint
+            from examples.comp_hrdoc.utils.stage_feature_extractor import get_stage_feature_extractor
+            stage_feature_extractor = get_stage_feature_extractor(
+                env=args.env,
+                exp=args.exp,
+                device=str(device),
+            )
+        logger.info(f"Loaded StageFeatureExtractor from checkpoint")
 
-    # Create dataloaders
-    # 文档级别使用更大的 max_regions (默认 512)，页面级别使用 args.max_regions
-    if args.document_level:
-        max_regions = args.max_regions if args.max_regions > 128 else 512
-        collator = CompHRDocDocumentCollator(max_regions=max_regions)
-        logger.info(f"Using document-level collator with max_regions={max_regions}")
+        # Load HRDoc DataLoader (from stage directory)
+        sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
+        from data.hrdoc_dataloader import HRDocDataLoader
+
+        hrdoc_loader = HRDocDataLoader(
+            env=args.env,
+            dataset=args.dataset,
+            batch_size=args.batch_size,
+            document_level=args.document_level,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+        )
+
+        train_loader = hrdoc_loader.get_train_dataloader()
+        val_loader = hrdoc_loader.get_eval_dataloader()
+
+        logger.info(f"Using HRDocDataLoader with dataset={args.dataset}")
+        logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+
+    # ==================== Standard Mode ====================
     else:
-        collator = CompHRDocCollator(max_regions=args.max_regions)
-        logger.info(f"Using page-level collator with max_regions={args.max_regions}")
+        # Create datasets
+        mode = "document-level" if args.document_level else "page-level"
+        logger.info(f"Creating datasets in {mode} mode...")
+        data_config = CompHRDocConfig(
+            env=args.env,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            val_split_ratio=args.val_split_ratio,
+            use_images=False,
+            document_level=args.document_level,
+        )
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=collator,
-        num_workers=0,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collator,
-        num_workers=0,
-    )
+        train_dataset = CompHRDocDataset(data_config, split="train")
+        val_dataset = CompHRDocDataset(data_config, split="validation")
+
+        logger.info(f"Train dataset: {len(train_dataset)} samples")
+        logger.info(f"Validation dataset: {len(val_dataset)} samples")
+
+        # Create dataloaders
+        # 文档级别使用更大的 max_regions (默认 512)，页面级别使用 args.max_regions
+        if args.document_level:
+            max_regions = args.max_regions if args.max_regions > 128 else 512
+            collator = CompHRDocDocumentCollator(max_regions=max_regions)
+            logger.info(f"Using document-level collator with max_regions={max_regions}")
+        else:
+            collator = CompHRDocCollator(max_regions=args.max_regions)
+            logger.info(f"Using page-level collator with max_regions={args.max_regions}")
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            collate_fn=collator,
+            num_workers=0,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collator,
+            num_workers=0,
+        )
 
     # Build model
-    if args.model_type == "order-only":
+    if args.use_stage_features:
+        # Use ConstructFromFeatures when using stage features
+        from examples.comp_hrdoc.models.construct_only import (
+            ConstructFromFeatures,
+            build_construct_from_features,
+            save_construct_model,
+        )
+        logger.info("Building ConstructFromFeatures model (using stage features)...")
+        model = build_construct_from_features(
+            hidden_size=args.hidden_size,
+            num_categories=14,  # HRDoc has 14 classes
+            num_heads=args.num_heads,
+            num_layers=args.construct_num_layers,
+            dropout=args.dropout,
+        )
+        save_fn = lambda m, p: save_construct_model(m, p, save_order=False)
+    elif args.model_type == "order-only":
         logger.info("Building Order-only model...")
         model = build_order_only_model(
             hidden_size=args.hidden_size,
@@ -540,70 +846,111 @@ def main():
 
     # Training loop
     logger.info("Starting training...")
-    best_order_acc = 0.0
+    best_metric = 0.0
+    best_metric_name = "parent_accuracy" if args.use_stage_features else "order_accuracy"
 
     for epoch in range(args.num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{args.num_epochs} =====")
 
         # Train
-        train_metrics = train_epoch(
-            model=model,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            device=device,
-            args=args,
-            scaler=scaler,
-        )
-        train_log = (
-            f"Train - Loss: {train_metrics['loss']:.4f}, "
-            f"Order: {train_metrics['order_loss']:.4f}, "
-            f"Construct: {train_metrics['construct_loss']:.4f}"
-        )
-        if args.use_semantic:
-            train_log += f", Cls: {train_metrics['cls_loss']:.4f}"
+        if args.use_stage_features:
+            train_metrics = train_epoch_with_stage_features(
+                model=model,
+                dataloader=train_loader,
+                feature_extractor=stage_feature_extractor,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                args=args,
+                scaler=scaler,
+            )
+            train_log = (
+                f"Train - Loss: {train_metrics['loss']:.4f}, "
+                f"Parent: {train_metrics['parent_loss']:.4f}, "
+                f"Sibling: {train_metrics['sibling_loss']:.4f}, "
+                f"Root: {train_metrics['root_loss']:.4f}"
+            )
+        else:
+            train_metrics = train_epoch(
+                model=model,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                args=args,
+                scaler=scaler,
+            )
+            train_log = (
+                f"Train - Loss: {train_metrics['loss']:.4f}, "
+                f"Order: {train_metrics['order_loss']:.4f}, "
+                f"Construct: {train_metrics['construct_loss']:.4f}"
+            )
+            if args.use_semantic:
+                train_log += f", Cls: {train_metrics['cls_loss']:.4f}"
         logger.info(train_log)
 
         # Evaluate
-        val_metrics = evaluate(model, val_loader, device)
-        val_log = (
-            f"Val - Loss: {val_metrics['loss']:.4f}, "
-            f"Order: {val_metrics['order_loss']:.4f}, "
-            f"Construct: {val_metrics['construct_loss']:.4f}"
-        )
-        if args.use_semantic:
-            val_log += f", Cls: {val_metrics['cls_loss']:.4f}"
-        logger.info(val_log)
-
-        # Log metrics for each module
-        # 4.2 Detect
-        if args.use_semantic and 'cls_accuracy' in val_metrics:
-            logger.info(
-                f"[4.2 Detect] Accuracy: {val_metrics['cls_accuracy']:.4f}, "
-                f"Macro F1: {val_metrics.get('cls_macro_f1', 0):.4f}"
+        if args.use_stage_features:
+            val_metrics = evaluate_with_stage_features(
+                model, val_loader, stage_feature_extractor, device
             )
+        else:
+            val_metrics = evaluate(model, val_loader, device)
+        # Log validation metrics
+        if args.use_stage_features:
+            val_log = (
+                f"Val - Loss: {val_metrics['loss']:.4f}, "
+                f"Parent: {val_metrics['parent_loss']:.4f}, "
+                f"Sibling: {val_metrics['sibling_loss']:.4f}, "
+                f"Root: {val_metrics['root_loss']:.4f}"
+            )
+            logger.info(val_log)
 
-        # 4.3 Order
-        logger.info(
-            f"[4.3 Order] Accuracy: {val_metrics['order_accuracy']:.4f}, "
-            f"F1: {val_metrics['order_f1']:.4f}"
-        )
-
-        # 4.4 Construct
-        if args.use_construct and 'parent_accuracy' in val_metrics:
+            # 4.4 Construct metrics (stage feature mode)
             logger.info(
                 f"[4.4 Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
-                f"Parent F1: {val_metrics.get('parent_f1', 0):.4f}, "
-                f"Sibling Acc: {val_metrics.get('sibling_accuracy', 0):.4f}, "
-                f"Root Acc: {val_metrics.get('root_accuracy', 0):.4f}"
+                f"Root Acc: {val_metrics['root_accuracy']:.4f}"
+            )
+        else:
+            val_log = (
+                f"Val - Loss: {val_metrics['loss']:.4f}, "
+                f"Order: {val_metrics['order_loss']:.4f}, "
+                f"Construct: {val_metrics['construct_loss']:.4f}"
+            )
+            if args.use_semantic:
+                val_log += f", Cls: {val_metrics['cls_loss']:.4f}"
+            logger.info(val_log)
+
+            # Log metrics for each module
+            # 4.2 Detect
+            if args.use_semantic and 'cls_accuracy' in val_metrics:
+                logger.info(
+                    f"[4.2 Detect] Accuracy: {val_metrics['cls_accuracy']:.4f}, "
+                    f"Macro F1: {val_metrics.get('cls_macro_f1', 0):.4f}"
+                )
+
+            # 4.3 Order
+            logger.info(
+                f"[4.3 Order] Accuracy: {val_metrics['order_accuracy']:.4f}, "
+                f"F1: {val_metrics['order_f1']:.4f}"
             )
 
+            # 4.4 Construct
+            if args.use_construct and 'parent_accuracy' in val_metrics:
+                logger.info(
+                    f"[4.4 Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
+                    f"Parent F1: {val_metrics.get('parent_f1', 0):.4f}, "
+                    f"Sibling Acc: {val_metrics.get('sibling_accuracy', 0):.4f}, "
+                    f"Root Acc: {val_metrics.get('root_accuracy', 0):.4f}"
+                )
+
         # Save best model
-        if val_metrics['order_accuracy'] > best_order_acc:
-            best_order_acc = val_metrics['order_accuracy']
+        current_metric = val_metrics.get(best_metric_name, 0)
+        if current_metric > best_metric:
+            best_metric = current_metric
             best_path = output_dir / "best_model"
             save_fn(model, str(best_path))
-            logger.info(f"Saved best model to {best_path}")
+            logger.info(f"Saved best model to {best_path} ({best_metric_name}: {best_metric:.4f})")
 
     # Save final model
     final_path = output_dir / "final_model"
@@ -614,11 +961,11 @@ def main():
     exp_manager.mark_stage_completed(
         args.exp, stage_name, "comp_hrdoc",
         best_checkpoint=str(output_dir / "best_model"),
-        metrics={"best_order_accuracy": best_order_acc},
+        metrics={f"best_{best_metric_name}": best_metric},
     )
 
     logger.info("Training complete!")
-    logger.info(f"Best order accuracy: {best_order_acc:.4f}")
+    logger.info(f"Best {best_metric_name}: {best_metric:.4f}")
     logger.info(f"Model saved to: {output_dir}")
 
 

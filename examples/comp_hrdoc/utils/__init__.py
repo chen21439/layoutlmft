@@ -2,6 +2,7 @@
 #
 # config.py: 配置解析/GPU设置/环境检测
 # experiment_manager.py: 实验管理
+# stage_feature_extractor.py: 使用 stage 模型提取 line-level 特征
 
 from .config import (
     setup_environment,
@@ -21,6 +22,18 @@ from .experiment_manager import (
     get_artifact_path as get_artifact_path_legacy,
 )
 
+def get_stage_feature_extractor(*args, **kwargs):
+    """延迟导入 StageFeatureExtractor，避免启动时加载 stage 依赖"""
+    from .stage_feature_extractor import get_stage_feature_extractor as _get
+    return _get(*args, **kwargs)
+
+
+def StageFeatureExtractor(*args, **kwargs):
+    """延迟导入 StageFeatureExtractor 类"""
+    from .stage_feature_extractor import StageFeatureExtractor as _cls
+    return _cls(*args, **kwargs)
+
+
 __all__ = [
     'setup_environment',
     'setup_gpu',
@@ -33,4 +46,7 @@ __all__ = [
     'print_config',
     'ExperimentManager',
     'ensure_experiment',
+    # stage 特征提取
+    'get_stage_feature_extractor',
+    'StageFeatureExtractor',
 ]
