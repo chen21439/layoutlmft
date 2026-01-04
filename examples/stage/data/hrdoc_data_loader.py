@@ -406,6 +406,8 @@ def tokenize_with_line_boundary(
         chunk_tokens = [tokens[i] for i in chunk_line_indices]
         chunk_bboxes = [bboxes[i] for i in chunk_line_indices]
         chunk_labels = [labels[i] for i in chunk_line_indices]
+        # 提取当前 chunk 的原始 line_ids（与 document-level 一致）
+        chunk_line_ids = [line_ids[i] for i in chunk_line_indices] if line_ids else None
 
         tokenized = tokenizer(
             chunk_tokens,
@@ -420,7 +422,7 @@ def tokenize_with_line_boundary(
 
         aligned_labels = []
         aligned_bboxes = []
-        aligned_line_ids = []  # chunk 内本地索引
+        aligned_line_ids = []  # 使用原始 line_id（与 document-level 一致）
 
         prev_word_idx = None
         for token_idx, word_idx in enumerate(word_ids):
@@ -433,7 +435,8 @@ def tokenize_with_line_boundary(
                 label_id = lbl if isinstance(lbl, int) else label2id.get(lbl, 0)
                 aligned_labels.append(label_id)
                 aligned_bboxes.append(chunk_bboxes[word_idx])
-                aligned_line_ids.append(word_idx)  # 本地索引
+                # 使用原始 line_id（与 document-level 一致）
+                aligned_line_ids.append(chunk_line_ids[word_idx] if chunk_line_ids else word_idx)
             else:
                 if label_all_tokens:
                     lbl = chunk_labels[word_idx]
@@ -442,7 +445,7 @@ def tokenize_with_line_boundary(
                 else:
                     aligned_labels.append(-100)
                 aligned_bboxes.append(chunk_bboxes[word_idx])
-                aligned_line_ids.append(word_idx)
+                aligned_line_ids.append(chunk_line_ids[word_idx] if chunk_line_ids else word_idx)
 
             prev_word_idx = word_idx
 
