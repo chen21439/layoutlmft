@@ -430,14 +430,15 @@ def main():
     os.makedirs(training_args.output_dir, exist_ok=True)
     exp_manager.mark_stage_started(training_args.exp, stage_name, data_args.dataset)
 
-    # 加载 tokenizer
+    # 加载 tokenizer（始终从 base model 加载，不从 checkpoint 加载）
+    # 原因：
+    # 1. tokenizer 在训练过程中不会改变
+    # 2. checkpoint 可能被 save_total_limit 删除，导致 sentencepiece 文件丢失
+    # 3. 从 base model 加载确保文件完整，保存时不会出错
     logger.info("Loading tokenizer...")
-    tokenizer_path = model_args.model_name_or_path
-    tokenizer_json = os.path.join(tokenizer_path, "tokenizer.json")
-    if not os.path.exists(tokenizer_json):
-        tokenizer_path = config.model.local_path or config.model.name_or_path
-        logger.warning(f"tokenizer.json not found, using base model: {tokenizer_path}")
+    tokenizer_path = config.model.local_path or config.model.name_or_path
     tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
+    logger.info(f"Tokenizer loaded from base model: {tokenizer_path}")
 
     # 准备数据集
     logger.info("Preparing datasets...")
