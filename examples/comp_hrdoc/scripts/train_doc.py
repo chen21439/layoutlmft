@@ -135,6 +135,10 @@ def parse_args():
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to use when --use-stage-features is enabled")
 
+    # Output
+    parser.add_argument("--artifact-dir", type=str, default=None,
+                        help="Directory to save model checkpoints (overrides default artifact path)")
+
     return parser.parse_args()
 
 
@@ -647,7 +651,7 @@ def main():
 
     # Setup experiment directory
     stage_name = "doc" if args.use_construct else "order"
-    artifact_root = get_artifact_path(args.env)
+    artifact_root = args.artifact_dir if args.artifact_dir else get_artifact_path(args.env)
     exp_manager, exp_dir = ensure_experiment(
         artifact_root=artifact_root,
         exp=args.exp,
