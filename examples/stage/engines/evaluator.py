@@ -770,12 +770,15 @@ class Evaluator:
         unique_line_ids = sorted(set(lid for lid in all_line_ids if lid >= 0))
 
         # 提取分类 GT
-        if sample.line_semantic_labels is not None:
-            # 优先使用 line_semantic_labels（line_id 直接索引）
-            labels = sample.line_semantic_labels.cpu().tolist()
-            for line_id, label in enumerate(labels):
-                if label >= 0:
-                    gt["classes"][line_id] = label
+        if sample.line_labels is not None:
+            # 优先使用 line_labels（行索引直接对应）
+            labels = sample.line_labels.cpu().tolist()
+            for line_idx, label in enumerate(labels):
+                if label >= 0 and label != -100:
+                    # line_labels 按行序号索引，需要映射到 line_id
+                    if line_idx < len(unique_line_ids):
+                        line_id = unique_line_ids[line_idx]
+                        gt["classes"][line_id] = label
         elif all_labels:
             # Fallback: 从 token labels 提取（首次出现策略）
             for label, line_id in zip(all_labels, all_line_ids):

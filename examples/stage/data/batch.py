@@ -37,7 +37,7 @@ class Sample:
     labels: Optional[torch.Tensor] = None
     line_parent_ids: Optional[torch.Tensor] = None  # [num_lines]
     line_relations: Optional[torch.Tensor] = None   # [num_lines]
-    line_semantic_labels: Optional[torch.Tensor] = None  # [num_lines]
+    line_labels: Optional[torch.Tensor] = None  # [num_lines] 行级别分类标签
 
     # 元信息
     document_name: Optional[str] = None
@@ -59,7 +59,7 @@ class Sample:
             labels=move(self.labels),
             line_parent_ids=move(self.line_parent_ids),
             line_relations=move(self.line_relations),
-            line_semantic_labels=move(self.line_semantic_labels),
+            line_labels=move(self.line_labels),
             document_name=self.document_name,
             json_path=self.json_path,
             num_chunks=self.num_chunks,
@@ -134,7 +134,7 @@ class PageLevelBatch(BatchBase):
             labels=self.raw.get("labels", [None] * self._batch_size)[idx] if "labels" in self.raw else None,
             line_parent_ids=self.raw.get("line_parent_ids", [None] * self._batch_size)[idx] if "line_parent_ids" in self.raw else None,
             line_relations=self.raw.get("line_relations", [None] * self._batch_size)[idx] if "line_relations" in self.raw else None,
-            line_semantic_labels=self.raw.get("line_semantic_labels", [None] * self._batch_size)[idx] if "line_semantic_labels" in self.raw else None,
+            line_labels=self.raw.get("line_labels", [None] * self._batch_size)[idx] if "line_labels" in self.raw else None,
             document_name=self.raw.get("document_names", [None] * self._batch_size)[idx] if "document_names" in self.raw else None,
             num_chunks=1,
             is_document_level=False,
@@ -220,9 +220,9 @@ class DocumentLevelBatch(BatchBase):
         if "line_relations" in self.raw:
             line_relations = self.raw["line_relations"][idx]
 
-        line_semantic_labels = None
-        if "line_semantic_labels" in self.raw:
-            line_semantic_labels = self.raw["line_semantic_labels"][idx]
+        line_labels = None
+        if "line_labels" in self.raw:
+            line_labels = self.raw["line_labels"][idx]
 
         return Sample(
             input_ids=input_ids,
@@ -233,7 +233,7 @@ class DocumentLevelBatch(BatchBase):
             labels=labels,
             line_parent_ids=line_parent_ids,
             line_relations=line_relations,
-            line_semantic_labels=line_semantic_labels,
+            line_labels=line_labels,
             document_name=self._document_names[idx] if idx < len(self._document_names) else None,
             json_path=self._json_paths[idx] if idx < len(self._json_paths) else None,
             num_chunks=num_chunks,

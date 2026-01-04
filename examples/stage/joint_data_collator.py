@@ -126,7 +126,7 @@ class HRDocJointDataCollator:
 
             padded_line_parent_ids = []
             padded_line_relations = []
-            padded_line_semantic_labels = []
+            padded_line_labels = []
 
             for i in range(batch_size):
                 num_lines = len(line_parent_ids[i])
@@ -151,14 +151,14 @@ class HRDocJointDataCollator:
                     # 空样本用 -100 填充到 max_lines
                     padded_line_relations.append([-100] * max_lines)
 
-                # semantic_labels: 从 features 中直接获取（已经是 14 类索引）
-                if "line_semantic_labels" in features[i]:
-                    sem_labels = features[i]["line_semantic_labels"]
-                    padded_line_semantic_labels.append(
-                        list(sem_labels) + [0] * padding_len
+                # line_labels: 从 features 中直接获取（已经是 14 类索引），padding 用 -100
+                if "line_labels" in features[i]:
+                    labels_list = features[i]["line_labels"]
+                    padded_line_labels.append(
+                        list(labels_list) + [-100] * padding_len
                     )
                 else:
-                    padded_line_semantic_labels.append([0] * max_lines)
+                    padded_line_labels.append([-100] * max_lines)
 
             batch["line_parent_ids"] = torch.tensor(padded_line_parent_ids, dtype=torch.long)
 
@@ -166,8 +166,8 @@ class HRDocJointDataCollator:
             if has_line_relations and len(padded_line_relations) > 0:
                 batch["line_relations"] = torch.tensor(padded_line_relations, dtype=torch.long)
 
-            if len(padded_line_semantic_labels) > 0:
-                batch["line_semantic_labels"] = torch.tensor(padded_line_semantic_labels, dtype=torch.long)
+            if len(padded_line_labels) > 0:
+                batch["line_labels"] = torch.tensor(padded_line_labels, dtype=torch.long)
 
         # Line bboxes
         has_line_bboxes = any(len(lb) > 0 for lb in line_bboxes)
@@ -218,6 +218,8 @@ class HRDocDocumentLevelCollator:
         document_names = []
         json_paths = []
 
+        all_line_labels = []  # 从数据源直接获取的行级别标签
+
         for doc in features:
             document_names.append(doc["document_name"])
             json_paths.append(doc.get("json_path", ""))
@@ -226,6 +228,7 @@ class HRDocDocumentLevelCollator:
             all_chunks.extend(chunks)
             all_line_parent_ids.append(doc["line_parent_ids"])
             all_line_relations.append(doc["line_relations"])
+            all_line_labels.append(doc.get("line_labels", []))
 
         num_chunks = len(all_chunks)
         max_seq_len = max(len(chunk["input_ids"]) for chunk in all_chunks)
@@ -319,30 +322,36 @@ class HRDocDocumentLevelCollator:
             batch["line_parent_ids"] = torch.tensor(padded_parent_ids, dtype=torch.long)
             batch["line_relations"] = torch.tensor(padded_relations, dtype=torch.long)
 
-            # 提取 line_labels（用于 section_parent_weight 加权）
+            # 提取 line_labels（用于 section_parent_weight 加权和分类 loss）
             padded_line_labels = []
             chunk_idx = 0
             for doc_idx in range(batch_size):
                 num_chunks = chunks_per_doc[doc_idx]
                 num_lines = len(all_line_parent_ids[doc_idx])
 
-                # 合并该文档所有 chunks 的 labels 和 line_ids
-                doc_labels = []
-                doc_line_ids = []
-                for i in range(chunk_idx, chunk_idx + num_chunks):
-                    if i < len(padded_labels):
-                        doc_labels.extend(padded_labels[i])
-                    if i < len(padded_line_ids):
-                        doc_line_ids.extend(padded_line_ids[i])
-                chunk_idx += num_chunks
+                # 优先使用数据源提供的 line_labels
+                doc_line_labels = all_line_labels[doc_idx] if doc_idx < len(all_line_labels) else []
+                if doc_line_labels and len(doc_line_labels) >= num_lines:
+                    # 直接使用数据源的 line_labels
+                    line_labels = list(doc_line_labels[:num_lines]) + [-100] * (max_lines - num_lines)
+                else:
+                    # Fallback: 从 token labels 反推
+                    doc_labels = []
+                    doc_line_ids = []
+                    for i in range(chunk_idx, chunk_idx + num_chunks):
+                        if i < len(padded_labels):
+                            doc_labels.extend(padded_labels[i])
+                        if i < len(padded_line_ids):
+                            doc_line_ids.extend(padded_line_ids[i])
 
-                # 提取每行的 label
-                line_labels = [-100] * max_lines
-                for line_idx in range(num_lines):
-                    for token_label, token_line_id in zip(doc_labels, doc_line_ids):
-                        if token_line_id == line_idx and token_label >= 0:
-                            line_labels[line_idx] = token_label
-                            break
+                    line_labels = [-100] * max_lines
+                    for line_idx in range(num_lines):
+                        for token_label, token_line_id in zip(doc_labels, doc_line_ids):
+                            if token_line_id == line_idx and token_label >= 0:
+                                line_labels[line_idx] = token_label
+                                break
+
+                chunk_idx += num_chunks
                 padded_line_labels.append(line_labels)
 
             batch["line_labels"] = torch.tensor(padded_line_labels, dtype=torch.long)

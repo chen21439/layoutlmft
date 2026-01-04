@@ -79,6 +79,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             # 该页涉及的行的 parent_id 和 relation（全局索引）
             "line_parent_ids": datasets.Sequence(datasets.Value("int64")),
             "line_relations": datasets.Sequence(datasets.Value("string")),
+            "line_labels": datasets.Sequence(datasets.Value("int64")),  # 行级别标签（每行一个）
         })
 
         return datasets.DatasetInfo(
@@ -314,6 +315,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 page_line_ids = []
                 page_parent_ids = []  # 该页行的 parent_id
                 page_relations = []   # 该页行的 relation
+                page_line_labels = []  # 该页行的分类标签（每行一个）
 
                 for line_idx, item in enumerate(form_data):
                     # 使用 trans_class 将细粒度标签转换为论文14类
@@ -357,9 +359,10 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     if relation == "" or relation is None:
                         relation = "none"
 
-                    # 记录该页的 parent_id 和 relation（每行一个）
+                    # 记录该页的 parent_id、relation 和 line_label（每行一个）
                     page_parent_ids.append(parent_id)
                     page_relations.append(relation)
+                    page_line_labels.append(label)
 
                     # 构建当前页的 tokens 列表
                     for w in words:
@@ -381,6 +384,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         "line_ids": page_line_ids,  # 全局 line_id
                         "line_parent_ids": page_parent_ids,  # 该页行的 parent_id（全局索引）
                         "line_relations": page_relations,
+                        "line_labels": page_line_labels,  # 该页行的分类标签
                     }
                     guid += 1
                     doc_has_valid_page = True

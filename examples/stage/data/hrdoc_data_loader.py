@@ -155,6 +155,7 @@ def load_hrdoc_raw_datasets_batched(
                         # 处理行
                         tokens, bboxes, ner_tags, line_ids = [], [], [], []
                         line_parent_ids, line_relations = [], []
+                        line_labels = []  # line-level 标签（每行一个）
 
                         for item in form_data:
                             label = trans_class(item.get("class", item.get("label", "paraline")),
@@ -180,6 +181,7 @@ def load_hrdoc_raw_datasets_batched(
                             relation = item.get("relation", "none") or "none"
                             line_parent_ids.append(parent_id)
                             line_relations.append(relation)
+                            line_labels.append(label)  # 保存 line-level 标签
 
                             for w in words:
                                 tokens.append(w.get("text", ""))
@@ -199,6 +201,7 @@ def load_hrdoc_raw_datasets_batched(
                                 "line_ids": line_ids,
                                 "line_parent_ids": line_parent_ids,
                                 "line_relations": line_relations,
+                                "line_labels": line_labels,
                             })
 
                 except Exception as e:
@@ -346,6 +349,7 @@ def tokenize_with_line_boundary(
     line_ids: Optional[List[int]] = None,
     line_parent_ids: Optional[List[int]] = None,
     line_relations: Optional[List[int]] = None,
+    line_labels: Optional[List[int]] = None,  # 行级别标签（每行一个）
     image: Optional[Any] = None,
     document_name: Optional[str] = None,
     page_number: Optional[int] = None,
@@ -470,6 +474,15 @@ def tokenize_with_line_boundary(
                 else:
                     chunk_line_relations.append(-100)
 
+        # 提取 chunk 对应的 line_labels
+        chunk_line_labels = []
+        if line_labels is not None:
+            for original_idx in chunk_line_indices:
+                if original_idx < len(line_labels):
+                    chunk_line_labels.append(line_labels[original_idx])
+                else:
+                    chunk_line_labels.append(-100)
+
         # 计算 line-level bboxes
         line_bboxes = compute_line_bboxes(aligned_bboxes, aligned_line_ids)
 
@@ -490,6 +503,9 @@ def tokenize_with_line_boundary(
 
         if chunk_line_relations:
             result["line_relations"] = chunk_line_relations
+
+        if chunk_line_labels:
+            result["line_labels"] = chunk_line_labels
 
         if document_name is not None:
             result["document_name"] = document_name
@@ -744,6 +760,7 @@ class HRDocDataLoader:
             all_line_ids = []
             all_line_parent_ids = []
             all_line_relations = []
+            all_line_labels = []  # 行级别标签
             all_line_bboxes = []
 
             batch_size = len(examples["tokens"])
@@ -756,6 +773,7 @@ class HRDocDataLoader:
                 line_ids = examples.get("line_ids", [None] * batch_size)[idx]
                 line_parent_ids = examples.get("line_parent_ids", [None] * batch_size)[idx]
                 line_relations = examples.get("line_relations", [None] * batch_size)[idx]
+                line_labels = examples.get("line_labels", [None] * batch_size)[idx]  # 行级别标签
                 document_name = examples.get("document_name", [None] * batch_size)[idx]
                 page_number = examples.get("page_number", [None] * batch_size)[idx]
 
@@ -769,6 +787,7 @@ class HRDocDataLoader:
                     line_ids=line_ids if self.include_line_info else None,
                     line_parent_ids=line_parent_ids if self.include_line_info else None,
                     line_relations=line_relations if self.include_line_info else None,
+                    line_labels=line_labels if self.include_line_info else None,
                     image=image,
                     document_name=document_name,
                     page_number=page_number,
@@ -789,6 +808,7 @@ class HRDocDataLoader:
                         all_line_ids.append(chunk.get("line_ids", []))
                         all_line_parent_ids.append(chunk.get("line_parent_ids", []))
                         all_line_relations.append(chunk.get("line_relations", []))
+                        all_line_labels.append(chunk.get("line_labels", []))
 
             result = {
                 "input_ids": all_input_ids,
@@ -804,6 +824,7 @@ class HRDocDataLoader:
                 result["line_ids"] = all_line_ids
                 result["line_parent_ids"] = all_line_parent_ids
                 result["line_relations"] = all_line_relations
+                result["line_labels"] = all_line_labels
 
             return result
 
@@ -968,6 +989,7 @@ class HRDocDataLoader:
         all_chunks = []
         all_parent_ids = []
         all_relations = []
+        all_line_labels = []  # 行级别标签
 
         for page in pages:
             page_number = page["page_number"]
@@ -978,6 +1000,7 @@ class HRDocDataLoader:
             line_ids = page["line_ids"]
             page_parent_ids = page["line_parent_ids"]
             page_relations = page["line_relations"]
+            page_line_labels = page.get("line_labels", [])
 
             chunks = tokenize_page_with_line_boundary(
                 tokenizer=self.tokenizer,
@@ -996,6 +1019,7 @@ class HRDocDataLoader:
             all_chunks.extend(chunks)
             all_parent_ids.extend(page_parent_ids)
             all_relations.extend(page_relations)
+            all_line_labels.extend(page_line_labels)
 
         if len(all_chunks) == 0:
             return None
@@ -1019,6 +1043,7 @@ class HRDocDataLoader:
             "chunks": all_chunks,
             "line_parent_ids": all_parent_ids,
             "line_relations": all_relations,
+            "line_labels": all_line_labels,  # 行级别标签
             "json_path": json_path,
         }
 
