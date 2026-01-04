@@ -169,8 +169,15 @@ class JointTrainer(Trainer):
         文档级别模式下跳过 Trainer 内置的 prediction_loop（形状不一致会失败），
         只触发 callbacks（E2EEvaluationCallback 会运行正确的评估）。
         """
-        if self.document_level:
-            # 文档级别：跳过 prediction_loop，直接调用 callbacks
+        # 判断是否需要跳过 prediction_loop
+        # 1. document_level 模式：输出形状不一致，Trainer 内置评估会失败
+        # 2. stage34 模式：lambda_cls=0 导致 logits=None，prediction_loop 会报 IndexError
+        #    （TODO: 此分支用于排查 page-level vs document-level 问题，排查完成后可考虑删除）
+        is_stage34 = self.model_args and getattr(self.model_args, 'mode', None) == "stage34"
+        skip_prediction_loop = self.document_level or is_stage34
+
+        if skip_prediction_loop:
+            # 跳过 prediction_loop，直接调用 callbacks
             self.model.eval()
 
             # 手动遍历 callbacks 并调用 on_evaluate（传递 model）
@@ -184,7 +191,7 @@ class JointTrainer(Trainer):
             self.model.train()
             return {}
         else:
-            # 页面级别：正常评估
+            # 页面级别 + stage1 模式：正常评估
             return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
