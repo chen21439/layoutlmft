@@ -220,30 +220,6 @@ def prepare_datasets(tokenizer, data_args, training_args, model_args):
     return train_dataset, eval_dataset, raw_train_dataset
 
 
-def compute_line_level_metrics(eval_pred):
-    """计算 line-level 评估指标"""
-    from sklearn.metrics import accuracy_score, f1_score
-
-    predictions, labels = eval_pred
-    predictions = np.argmax(predictions, axis=2)
-
-    all_preds, all_labels = [], []
-    for pred, label in zip(predictions, labels):
-        for p, l in zip(pred, label):
-            if l != -100:
-                all_preds.append(p)
-                all_labels.append(l)
-
-    if not all_labels:
-        return {"accuracy": 0.0, "macro_f1": 0.0}
-
-    return {
-        "accuracy": accuracy_score(all_labels, all_preds),
-        "macro_f1": f1_score(all_labels, all_preds, average="macro", zero_division=0),
-        "micro_f1": f1_score(all_labels, all_preds, average="micro", zero_division=0),
-    }
-
-
 # ==================== 模型构建 ====================
 
 def build_model(model_args, config, raw_train_dataset, device):
@@ -535,7 +511,7 @@ def main():
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_line_level_metrics,
+        compute_metrics=None,  # 使用 E2EEvaluationCallback 的 line-level 评估
         callbacks=callbacks,
     )
 
