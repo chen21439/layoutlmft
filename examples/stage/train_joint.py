@@ -545,7 +545,11 @@ def main():
 
     # 训练
     logger.info("Starting training...")
-    train_result = trainer.train()
+    resume_from = None
+    if training_args.resume_from_checkpoint:
+        resume_from = training_args.resume_from_checkpoint
+        logger.info(f"Resuming from checkpoint: {resume_from}")
+    train_result = trainer.train(resume_from_checkpoint=resume_from)
 
     # 保存
     trainer.save_model()
