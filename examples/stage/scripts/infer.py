@@ -130,16 +130,13 @@ def main():
     logger.info("Running inference...")
     from engines.predictor import Predictor
 
-    # P0: 默认启用约束解码
-    use_constraint = not args.no_constraint
-    logger.info(f"P0 Constrained Decoding: {'ENABLED' if use_constraint else 'DISABLED'}")
-
-    predictor = Predictor(
-        model,
-        device,
-        use_parent_constraint=use_constraint,
-        use_relation_gating=use_constraint,
-    )
+    # P0: Predictor 默认启用约束解码，--no_constraint 可禁用
+    if args.no_constraint:
+        predictor = Predictor(model, device, use_parent_constraint=False, use_relation_gating=False)
+        logger.info("P0 Constrained Decoding: DISABLED")
+    else:
+        predictor = Predictor(model, device)  # 默认启用
+        logger.info("P0 Constrained Decoding: ENABLED (default)")
 
     predictor.predict_and_save(
         dataloader=eval_dataloader,

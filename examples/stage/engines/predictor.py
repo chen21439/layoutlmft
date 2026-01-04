@@ -62,9 +62,9 @@ class Predictor:
         model: nn.Module,
         device: torch.device = None,
         micro_batch_size: int = 1,
-        # P0 约束解码参数
-        use_parent_constraint: bool = False,
-        use_relation_gating: bool = False,
+        # P0 约束解码参数（默认启用）
+        use_parent_constraint: bool = True,
+        use_relation_gating: bool = True,
         M_cp: Optional[torch.Tensor] = None,
         mcp_threshold: float = 0.02,
         confidence_threshold: float = 0.7,
