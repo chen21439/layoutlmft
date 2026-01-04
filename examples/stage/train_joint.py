@@ -423,6 +423,10 @@ def main():
         training_args.eval_steps = 25
         training_args.save_steps = 25
         training_args.logging_steps = 10
+    # Page-level 模式调整（非 quick 模式）
+    elif not data_args.document_level and not training_args.quick:
+        training_args.logging_steps = 10
+        training_args.eval_steps = 100
 
     set_seed(training_args.seed)
 
