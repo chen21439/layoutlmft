@@ -172,6 +172,7 @@ class JointTrainingArguments(TrainingArguments):
     eval_before_train: bool = field(default=False, metadata={"help": "Run evaluation before training"})
     save_predictions: bool = field(default=False, metadata={"help": "Save prediction results"})
     dry_run: bool = field(default=False, metadata={"help": "Dry run mode"})
+    resume_from_checkpoint: str = field(default=None, metadata={"help": "Path to checkpoint to resume training"})
 
     # DataLoader 设置
     dataloader_num_workers: int = field(default=0, metadata={"help": "Number of dataloader workers"})
