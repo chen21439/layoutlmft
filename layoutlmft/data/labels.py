@@ -151,3 +151,119 @@ def get_id2label():
 def get_label2id():
     """获取 label->id 字典（用于模型 config）"""
     return LABEL2ID.copy()
+
+
+# ============================================================
+# 关系类型定义（Stage4）
+# ============================================================
+# 模型输出 3 类关系（论文定义）
+# ROOT 边的关系单独处理，不占用模型类别
+RELATION_LIST = [
+    "connect",   # 0: 连接关系（同级续行、段落连接）
+    "contain",   # 1: 包含关系（父节点包含子节点，如 section 包含 paragraph）
+    "equality",  # 2: 等价关系（如 figure 和 caption）
+]
+
+NUM_RELATIONS = len(RELATION_LIST)  # 3
+
+# ID <-> Relation 映射
+RELATION2ID = {rel: i for i, rel in enumerate(RELATION_LIST)}
+ID2RELATION = {i: rel for i, rel in enumerate(RELATION_LIST)}
+
+def relation2id(relation: str) -> int:
+    """关系名 -> 数字ID"""
+    return RELATION2ID.get(relation.lower(), -1)
+
+def id2relation(relation_id: int) -> str:
+    """数字ID -> 关系名"""
+    return ID2RELATION.get(relation_id, "unknown")
+
+
+# ============================================================
+# Label-Pair Gating 规则（P0 约束解码）
+# ============================================================
+# 定义哪些 (child_label, parent_label) 组合更可能产生哪种关系
+# 用于推理时的 label-pair gating
+
+# 语义类别分组（用于简化规则）
+HEADING_LABELS = {"title", "section"}  # 标题类
+PARAGRAPH_LABELS = {"fstline", "paraline"}  # 段落类
+FLOAT_LABELS = {"table", "figure", "equation"}  # 浮动对象
+CAPTION_LABELS = {"caption"}  # 标题
+META_LABELS = {"author", "mail", "affili", "footer", "header", "footnote"}  # 元信息
+
+# Label-pair 到允许关系的映射
+# 格式：{(child_group, parent_group): [allowed_relations]}
+# 如果不在表中，默认允许所有关系
+_LABEL_PAIR_RULES = {
+    # HEADING -> HEADING: 更可能 connect（同级）或 contain（降级）
+    ("heading", "heading"): ["connect", "contain"],
+    # PARAGRAPH -> HEADING: 更可能 contain（挂靠到 section）
+    ("paragraph", "heading"): ["contain", "connect"],
+    # PARAGRAPH -> PARAGRAPH: 更可能 connect（同段落续行）
+    ("paragraph", "paragraph"): ["connect"],
+    # FLOAT -> HEADING: contain
+    ("float", "heading"): ["contain"],
+    # CAPTION -> FLOAT: equality 或 contain
+    ("caption", "float"): ["equality", "contain"],
+    # CAPTION -> HEADING: contain
+    ("caption", "heading"): ["contain"],
+    # META -> any: 通常 connect
+    ("meta", "heading"): ["contain", "connect"],
+    ("meta", "meta"): ["connect"],
+}
+
+
+def _get_label_group(label: str) -> str:
+    """获取标签所属的语义分组"""
+    label = label.lower()
+    if label in HEADING_LABELS:
+        return "heading"
+    elif label in PARAGRAPH_LABELS:
+        return "paragraph"
+    elif label in FLOAT_LABELS:
+        return "float"
+    elif label in CAPTION_LABELS:
+        return "caption"
+    elif label in META_LABELS:
+        return "meta"
+    return "other"
+
+
+def get_allowed_relations(child_label: str, parent_label: str) -> list:
+    """
+    获取给定 (child_label, parent_label) 允许的关系类型
+
+    Args:
+        child_label: 子节点的语义类别（如 "section", "paraline"）
+        parent_label: 父节点的语义类别
+
+    Returns:
+        允许的关系名列表（如 ["connect", "contain"]）
+    """
+    child_group = _get_label_group(child_label)
+    parent_group = _get_label_group(parent_label)
+
+    key = (child_group, parent_group)
+    if key in _LABEL_PAIR_RULES:
+        return _LABEL_PAIR_RULES[key]
+
+    # 默认：允许所有关系
+    return RELATION_LIST.copy()
+
+
+def get_allowed_relation_ids(child_label_id: int, parent_label_id: int) -> list:
+    """
+    获取给定 (child_label_id, parent_label_id) 允许的关系 ID 列表
+
+    Args:
+        child_label_id: 子节点的语义类别 ID
+        parent_label_id: 父节点的语义类别 ID
+
+    Returns:
+        允许的关系 ID 列表（如 [0, 1]）
+    """
+    child_label = id2label(child_label_id)
+    parent_label = id2label(parent_label_id)
+    allowed = get_allowed_relations(child_label, parent_label)
+    return [RELATION2ID[rel] for rel in allowed]

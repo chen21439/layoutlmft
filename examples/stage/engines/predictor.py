@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.batch import Sample, BatchBase, wrap_batch
 from tasks import SemanticClassificationTask
 from tasks.parent_finding import ParentFindingTask
+from tasks.relation_constraint import RelationClassificationTask, get_default_relation_for_root_edge
 
 
 @dataclass
@@ -61,20 +62,39 @@ class Predictor:
         model: nn.Module,
         device: torch.device = None,
         micro_batch_size: int = 1,
+        # P0 约束解码参数
+        use_parent_constraint: bool = False,
+        use_relation_gating: bool = False,
+        M_cp: Optional[torch.Tensor] = None,
+        mcp_threshold: float = 0.02,
+        confidence_threshold: float = 0.7,
     ):
         """
         Args:
             model: JointModel 或类似结构（需要有 stage1, stage3, stage4, feature_extractor）
             device: 计算设备
             micro_batch_size: Stage 1 推理时的 micro-batch 大小（默认 1，与训练一致）
+            use_parent_constraint: 是否启用 M_cp 父节点约束过滤（P0）
+            use_relation_gating: 是否启用 label-pair relation gating（P0）
+            M_cp: Child-Parent 分布矩阵 [num_classes+1, num_classes]（可选）
+            mcp_threshold: M_cp 过滤阈值（低于此值的父类别被过滤）
+            confidence_threshold: 只有分类置信度 >= 此值时才启用硬过滤
         """
         self.model = model
         self.device = device or next(model.parameters()).device
         self.micro_batch_size = micro_batch_size
 
+        # P0 约束解码参数
+        self.use_parent_constraint = use_parent_constraint
+        self.use_relation_gating = use_relation_gating
+        self.M_cp = M_cp
+        self.mcp_threshold = mcp_threshold
+        self.confidence_threshold = confidence_threshold
+
         # 使用 tasks/ 中的统一 decode 逻辑（复用，不重复实现）
         self.cls_task = SemanticClassificationTask(model=model, use_line_level=True)
-        self.parent_task = ParentFindingTask()
+        self.parent_task = ParentFindingTask(M_cp=M_cp)
+        self.relation_task = RelationClassificationTask()
 
     def predict(self, sample: Sample) -> PredictionOutput:
         """
@@ -184,20 +204,28 @@ class Predictor:
 
         use_gru = getattr(self.model, 'use_gru', False)
 
-        # 获取 cls_logits（用于 soft-mask）
+        # 获取 cls_logits（用于 soft-mask 和约束解码）
         # 如果模型有 cls_head（line-level 分类），使用它来获取 cls_logits
         cls_logits = None
+        pred_labels = None
+        pred_probs = None
         if hasattr(self.model, 'cls_head') and self.model.cls_head is not None:
             valid_features = line_features[:actual_num_lines]  # [L, H]
             cls_logits = self.model.cls_head(valid_features)  # [L, num_classes]
+
+            # 获取预测标签和置信度（用于 P0 约束解码）
+            cls_probs = torch.softmax(cls_logits, dim=-1)  # [L, num_classes]
+            pred_labels = cls_logits.argmax(dim=-1)  # [L]
+            pred_probs = cls_probs.max(dim=-1).values  # [L]
+
             cls_logits = cls_logits.unsqueeze(0)  # [1, L, num_classes]
 
         if use_gru:
             # 调试日志：Stage 3 输入
             print(f"\n[Stage3 Debug] Input shapes:")
-            print(f"  line_features: {line_features.shape}")  # 应该是 [426, H]
-            print(f"  line_mask: {line_mask.shape}, sum={line_mask.sum().item()}")  # 应该是 [426], sum=426
-            print(f"  cls_logits: {cls_logits.shape if cls_logits is not None else None}")  # 应该是 [1, 426, 14]
+            print(f"  line_features: {line_features.shape}")
+            print(f"  line_mask: {line_mask.shape}, sum={line_mask.sum().item()}")
+            print(f"  cls_logits: {cls_logits.shape if cls_logits is not None else None}")
 
             parent_logits, gru_hidden = self.model.stage3(
                 line_features.unsqueeze(0),
@@ -208,22 +236,35 @@ class Predictor:
 
             # 调试日志：Stage 3 输出
             print(f"[Stage3 Debug] Output shapes:")
-            print(f"  parent_logits: {parent_logits.shape}")  # 应该是 [1, 427, 427]
-            print(f"  gru_hidden: {gru_hidden.shape}")  # 应该是 [1, 427, 512]
+            print(f"  parent_logits: {parent_logits.shape}")
+            print(f"  gru_hidden: {gru_hidden.shape}")
 
             # 打印 parent_logits 的一些统计
             print(f"[Stage3 Debug] parent_logits stats:")
             print(f"  min={parent_logits.min().item():.4f}, max={parent_logits.max().item():.4f}")
-            # 打印第10行的候选父节点分数
             if parent_logits.shape[1] > 10:
-                row10_logits = parent_logits[0, 10, :10]  # 第10行（line_id=9）的候选父节点
+                row10_logits = parent_logits[0, 10, :10]
                 print(f"  Row 10 logits (candidates 0-9): {row10_logits.tolist()}")
                 print(f"  Row 10 argmax: {row10_logits.argmax().item()}")
 
             gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
 
-            # 复用 tasks/parent_finding.py 的 decode 逻辑
-            parent_preds = self.parent_task.decode(parent_logits, line_mask.unsqueeze(0))
+            # P0: 使用约束解码还是原始解码
+            if self.use_parent_constraint and pred_labels is not None:
+                print(f"[Stage3 Debug] Using constrained decoding (P0)")
+                parent_preds = self.parent_task.decode_with_constraint(
+                    parent_logits,
+                    line_mask.unsqueeze(0),
+                    pred_labels.unsqueeze(0),
+                    pred_probs.unsqueeze(0) if pred_probs is not None else None,
+                    M_cp=self.M_cp,
+                    mcp_threshold=self.mcp_threshold,
+                    confidence_threshold=self.confidence_threshold,
+                )
+            else:
+                # 原始贪心解码
+                parent_preds = self.parent_task.decode(parent_logits, line_mask.unsqueeze(0))
+
             pred_parents = parent_preds[0].tolist()  # [L] -> list
 
             # 调试日志：预测结果统计
@@ -242,11 +283,16 @@ class Predictor:
                 pred_parents[child_idx] = scores.argmax().item()
 
         # ==================== Stage 4: Relation Classification ====================
-        pred_relations = [0] * actual_num_lines  # Default: connect (0)
+        # P0 改进：ROOT 边使用固定默认值，不是 connect(0)
+        default_root_relation = get_default_relation_for_root_edge()
+        pred_relations = [default_root_relation] * actual_num_lines
 
         for child_idx in range(actual_num_lines):
             parent_idx = pred_parents[child_idx]
+
+            # ROOT 边：使用默认关系，不参与模型预测
             if parent_idx < 0 or parent_idx >= actual_num_lines:
+                pred_relations[child_idx] = default_root_relation
                 continue
 
             if gru_hidden is not None:
@@ -262,7 +308,16 @@ class Predictor:
                 parent_feat.unsqueeze(0),
                 child_feat.unsqueeze(0),
             )
-            pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
+
+            # P0: 使用 label-pair gating 还是原始解码
+            if self.use_relation_gating and pred_labels is not None:
+                child_label_id = pred_labels[child_idx].item()
+                parent_label_id = pred_labels[parent_idx].item()
+                pred_relations[child_idx] = self.relation_task.decode_with_gating(
+                    rel_logits, child_label_id, parent_label_id
+                )
+            else:
+                pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
 
         # 构建输出
         sorted_line_ids = sorted(line_classes.keys())
@@ -419,15 +474,16 @@ class Predictor:
         total_lines = 0
         start_time = time.time()
 
-        # 标签映射
+        # 标签映射（从统一的 labels.py 导入）
         try:
-            from layoutlmft.data.labels import ID2LABEL
+            from layoutlmft.data.labels import ID2LABEL, ID2RELATION
             print(f"[DEBUG] ID2LABEL loaded successfully: {ID2LABEL}")
+            print(f"[DEBUG] ID2RELATION loaded successfully: {ID2RELATION}")
+            RELATION_LABELS = ID2RELATION
         except ImportError as e:
-            print(f"[DEBUG] Failed to import ID2LABEL: {e}")
+            print(f"[DEBUG] Failed to import labels: {e}")
             ID2LABEL = {i: f"cls_{i}" for i in range(14)}
-
-        RELATION_LABELS = {0: "connect", 1: "contain", 2: "equality"}
+            RELATION_LABELS = {0: "connect", 1: "contain", 2: "equality"}
 
         os.makedirs(output_dir, exist_ok=True)
         self.model.eval()
