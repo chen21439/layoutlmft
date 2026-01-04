@@ -758,21 +758,28 @@ class Evaluator:
         if sample.line_ids is None:
             return gt
 
-        # 提取 line_ids（展平处理多 chunk 情况）
+        # 提取 line_ids 和 labels（展平处理多 chunk 情况）
         if sample.is_document_level:
             all_line_ids = sample.line_ids.reshape(-1).cpu().tolist()
+            all_labels = sample.labels.reshape(-1).cpu().tolist() if sample.labels is not None else []
         else:
             all_line_ids = sample.line_ids.cpu().tolist()
+            all_labels = sample.labels.cpu().tolist() if sample.labels is not None else []
 
         # 提取 sorted_line_ids（与 predictor 的 LinePooling.get_line_ids_mapping 一致）
         unique_line_ids = sorted(set(lid for lid in all_line_ids if lid >= 0))
 
-        # 使用 line_semantic_labels 提取分类 GT
-        # line_semantic_labels[line_id] = label（与训练时一致）
+        # 提取分类 GT
         if sample.line_semantic_labels is not None:
+            # 优先使用 line_semantic_labels（line_id 直接索引）
             labels = sample.line_semantic_labels.cpu().tolist()
             for line_id, label in enumerate(labels):
                 if label >= 0:
+                    gt["classes"][line_id] = label
+        elif all_labels:
+            # Fallback: 从 token labels 提取（首次出现策略）
+            for label, line_id in zip(all_labels, all_line_ids):
+                if line_id >= 0 and label >= 0 and line_id not in gt["classes"]:
                     gt["classes"][line_id] = label
 
         # 处理 parent_ids 和 relations
