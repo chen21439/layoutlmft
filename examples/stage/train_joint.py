@@ -529,7 +529,7 @@ def main():
         args=training_args,
         model_args=model_args,
         learning_rate_stage34=training_args.learning_rate_stage34,
-        document_level=data_args.document_level and model_args.mode != "stage1",
+        document_level=data_args.document_level,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         tokenizer=tokenizer,
