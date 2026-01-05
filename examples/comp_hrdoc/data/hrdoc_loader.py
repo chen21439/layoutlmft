@@ -609,33 +609,54 @@ class HRDocLayoutXLMCollator:
                         max(0, min(1000, int(bbox[3]))),
                     ], dtype=torch.float)
 
-            # chunk 返回的 parent_ids 已经是全局索引
+            # chunk 返回的 parent_ids：索引是行序号，值是 parent 的 line_id（全局索引）
             chunk_parent_ids = all_line_parent_ids[i]
             chunk_relations = all_line_relations[i]
 
-            # 获取 chunk 中的 line_id 列表（用于确定有效行）
-            line_ids_in_chunk = list(tokenized_lines)
+            # 获取 chunk 中的 line_id 列表（按行序号顺序）
+            line_ids_in_chunk = sorted(tokenized_lines)
+
+            # 建立 line_id -> 行序号 的映射（参考 stage/engines/evaluator.py）
+            line_id_to_row = {lid: row for row, lid in enumerate(line_ids_in_chunk)}
 
             if chunk_parent_ids and chunk_relations:
-                # 使用 tree_utils 处理 equality 关系（全局索引）
+                # 把 parent 的 line_id 转换为行序号，tree_utils 需要节点列表索引
+                converted_parent_ids = []
+                for parent_line_id in chunk_parent_ids:
+                    if parent_line_id == -1:
+                        converted_parent_ids.append(-1)
+                    elif parent_line_id in line_id_to_row:
+                        converted_parent_ids.append(line_id_to_row[parent_line_id])
+                    else:
+                        # parent 不在当前 chunk 中，视为 ROOT
+                        converted_parent_ids.append(-1)
+
+                # 使用 tree_utils 处理 equality 关系（行序号）
                 hierarchical_parents, sibling_groups = resolve_hierarchical_parents_and_siblings(
-                    chunk_parent_ids, chunk_relations
+                    converted_parent_ids, chunk_relations
                 )
 
-                # 填充 parent_ids（全局索引，直接使用）
-                for idx, hp in enumerate(hierarchical_parents):
-                    line_id = line_ids_in_chunk[idx] if idx < len(line_ids_in_chunk) else idx
-                    if line_id < max_lines_in_batch:
-                        parent_ids[i, line_id] = hp
+                # 填充 parent_ids：行序号 -> line_id
+                for row, hp_row in enumerate(hierarchical_parents):
+                    if row < len(line_ids_in_chunk):
+                        line_id = line_ids_in_chunk[row]
+                        if line_id < max_lines_in_batch:
+                            if hp_row == -1:
+                                parent_ids[i, line_id] = -1
+                            elif hp_row < len(line_ids_in_chunk):
+                                parent_ids[i, line_id] = line_ids_in_chunk[hp_row]
 
-                # 填充 sibling_labels（全局索引）
+                # 填充 sibling_labels：行序号 -> line_id
                 for group in sibling_groups:
                     for j_idx in range(len(group)):
                         for k_idx in range(j_idx + 1, len(group)):
-                            j, k = group[j_idx], group[k_idx]
-                            if j < max_lines_in_batch and k < max_lines_in_batch:
-                                sibling_labels[i, j, k] = 1
-                                sibling_labels[i, k, j] = 1
+                            j_row, k_row = group[j_idx], group[k_idx]
+                            if j_row < len(line_ids_in_chunk) and k_row < len(line_ids_in_chunk):
+                                j = line_ids_in_chunk[j_row]
+                                k = line_ids_in_chunk[k_row]
+                                if j < max_lines_in_batch and k < max_lines_in_batch:
+                                    sibling_labels[i, j, k] = 1
+                                    sibling_labels[i, k, j] = 1
 
         # 加载图像
         all_images = []
