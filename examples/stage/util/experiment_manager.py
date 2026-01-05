@@ -24,7 +24,8 @@ import os
 import yaml
 import glob
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -58,6 +59,16 @@ class StageState:
 
 
 @dataclass
+class RunRecord:
+    """Record of a single training run with actual parameters used."""
+    timestamp: str = ""
+    stage: str = ""  # stage1, stage34, joint
+    dataset: str = ""
+    command: str = ""  # Full command line
+    params: Dict[str, Any] = field(default_factory=dict)  # Actual params used
+
+
+@dataclass
 class ExperimentConfig:
     """Experiment configuration and state."""
     # Experiment metadata
@@ -77,6 +88,9 @@ class ExperimentConfig:
 
     # Dynamic state (updated during training)
     stages: Dict[str, Dict] = field(default_factory=dict)
+
+    # Run history (each training run records its actual parameters)
+    runs: List[Dict] = field(default_factory=list)
 
 
 class ExperimentManager:
@@ -352,6 +366,106 @@ class ExperimentManager:
     def mark_stage_failed(self, exp: Optional[str], stage: str, dataset: str):
         """Mark a stage as failed."""
         self.update_stage_state(exp, stage, dataset, status='failed')
+
+    def record_run(
+        self,
+        exp: Optional[str],
+        stage: str,
+        dataset: str,
+        model_args: Any = None,
+        data_args: Any = None,
+        training_args: Any = None,
+        command: Optional[str] = None,
+    ):
+        """
+        Record a training run with actual parameters used.
+
+        This should be called at the start of training to record
+        all command-line and effective parameters.
+
+        Args:
+            exp: Experiment identifier
+            stage: Stage name (stage1, stage34, joint)
+            dataset: Dataset name
+            model_args: Model arguments dataclass
+            data_args: Data arguments dataclass
+            training_args: Training arguments dataclass
+            command: Full command line (if None, uses sys.argv)
+        """
+        exp_dir = self.get_experiment_dir(exp)
+        if not exp_dir:
+            print(f"Warning: Experiment not found: {exp}")
+            return
+
+        config_path = os.path.join(exp_dir, "config.yml")
+        if not os.path.exists(config_path):
+            print(f"Warning: Config not found: {config_path}")
+            return
+
+        # Read current config
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+        # Initialize runs list if needed
+        if 'runs' not in config:
+            config['runs'] = []
+
+        # Build run record
+        run_record = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'stage': stage,
+            'dataset': dataset,
+            'command': command or ' '.join(sys.argv),
+        }
+
+        # Extract key parameters from args
+        params = {}
+
+        if model_args:
+            params['model'] = {
+                'mode': getattr(model_args, 'mode', None),
+                'model_name_or_path': getattr(model_args, 'model_name_or_path', None),
+                'lambda_cls': getattr(model_args, 'lambda_cls', None),
+                'lambda_parent': getattr(model_args, 'lambda_parent', None),
+                'lambda_rel': getattr(model_args, 'lambda_rel', None),
+                'use_gru': getattr(model_args, 'use_gru', None),
+                'use_gt_class': getattr(model_args, 'use_gt_class', None),
+                'gradient_checkpointing': getattr(model_args, 'gradient_checkpointing', None),
+                'section_parent_weight': getattr(model_args, 'section_parent_weight', None),
+            }
+
+        if data_args:
+            params['data'] = {
+                'dataset': getattr(data_args, 'dataset', None),
+                'covmatch': getattr(data_args, 'covmatch', None),
+                'document_level': getattr(data_args, 'document_level', None),
+                'max_train_samples': getattr(data_args, 'max_train_samples', None),
+                'max_eval_samples': getattr(data_args, 'max_eval_samples', None),
+            }
+
+        if training_args:
+            params['training'] = {
+                'output_dir': getattr(training_args, 'output_dir', None),
+                'artifact_dir': getattr(training_args, 'artifact_dir', None),
+                'learning_rate': getattr(training_args, 'learning_rate', None),
+                'per_device_train_batch_size': getattr(training_args, 'per_device_train_batch_size', None),
+                'max_steps': getattr(training_args, 'max_steps', None),
+                'num_train_epochs': getattr(training_args, 'num_train_epochs', None),
+                'eval_steps': getattr(training_args, 'eval_steps', None),
+                'save_steps': getattr(training_args, 'save_steps', None),
+                'resume_from_checkpoint': getattr(training_args, 'resume_from_checkpoint', None),
+            }
+
+        run_record['params'] = convert_to_python_types(params)
+
+        # Append to runs history
+        config['runs'].append(run_record)
+
+        # Update last_run timestamp
+        config['experiment']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Write back
+        self._write_config(config_path, config)
 
     def get_experiment_status(self, exp: Optional[str] = None) -> Dict:
         """

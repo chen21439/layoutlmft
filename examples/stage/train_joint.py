@@ -430,6 +430,16 @@ def main():
     os.makedirs(training_args.output_dir, exist_ok=True)
     exp_manager.mark_stage_started(training_args.exp, stage_name, data_args.dataset)
 
+    # 记录本次运行的实际参数
+    exp_manager.record_run(
+        exp=training_args.exp,
+        stage=stage_name,
+        dataset=data_args.dataset,
+        model_args=model_args,
+        data_args=data_args,
+        training_args=training_args,
+    )
+
     # 加载 tokenizer（始终从 base model 加载，不从 checkpoint 加载）
     # 原因：
     # 1. tokenizer 在训练过程中不会改变
