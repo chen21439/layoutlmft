@@ -1,9 +1,33 @@
 """测试 HRDocLayoutXLMCollator"""
+import os
 import sys
+
+# 尝试使用本地缓存
+os.environ["TRANSFORMERS_OFFLINE"] = "0"
+os.environ["HF_HUB_OFFLINE"] = "0"
+
 from examples.comp_hrdoc.data.hrdoc_loader import HRDocDataset, HRDocLayoutXLMCollator
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("microsoft/layoutxlm-base")
+# 尝试多个模型路径
+model_paths = [
+    "microsoft/layoutxlm-base",
+    "/home/ubuntu/.cache/huggingface/hub/models--microsoft--layoutxlm-base",
+]
+
+tokenizer = None
+for path in model_paths:
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
+        print(f"Loaded tokenizer from: {path}")
+        break
+    except Exception as e:
+        print(f"Failed to load from {path}: {e}")
+
+if tokenizer is None:
+    # 最后尝试联网下载
+    print("Trying to download from HuggingFace...")
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/layoutxlm-base")
 
 dataset = HRDocDataset(
     data_dir="/data/LLM_group/layoutlmft/data/HRDS",

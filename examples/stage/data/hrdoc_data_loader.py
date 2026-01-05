@@ -358,7 +358,7 @@ def tokenize_with_line_boundary(
     """
     页面级别 tokenization（parent_id 映射到 chunk 内本地索引）
 
-    用于快速训练，每个 chunk 是独立样本，跨 chunk 的 parent 设为 -1 (ROOT)
+    每个 chunk 是独立样本，跨 chunk 的 parent 设为 -1 (ROOT)
     """
     if label2id is None:
         label2id = get_label2id()
@@ -521,7 +521,7 @@ def tokenize_with_line_boundary(
     return results
 
 
-# ==================== 文档级别 Tokenization（全局索引，用于推理）====================
+# ==================== 文档级别 Tokenization（全局索引）====================
 
 def tokenize_page_with_line_boundary(
     tokenizer,
@@ -531,13 +531,17 @@ def tokenize_page_with_line_boundary(
     line_ids: List[int],
     max_length: int = 512,
     label2id: Optional[Dict[str, int]] = None,
+    line_parent_ids: Optional[List[int]] = None,
+    line_relations: Optional[List[int]] = None,
     image: Optional[Any] = None,
     page_number: Optional[int] = None,
     document_name: Optional[str] = None,
     label_all_tokens: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    文档级别 tokenization（保持全局 line_id，用于跨页关系）
+    文档级别 tokenization（保持全局 line_id，支持跨页/跨 chunk 关系）
+
+    与页面级别不同，parent_ids 保持全局索引，不做本地重映射。
     """
     if label2id is None:
         label2id = get_label2id()
@@ -583,6 +587,14 @@ def tokenize_page_with_line_boundary(
         chunk_bboxes = [bboxes[i] for i in chunk_line_indices]
         chunk_labels = [labels[i] for i in chunk_line_indices]
         chunk_global_line_ids = [line_ids[i] for i in chunk_line_indices]
+
+        # 提取 parent_ids 和 relations（保持全局索引，不重映射）
+        chunk_parent_ids = None
+        chunk_relations = None
+        if line_parent_ids is not None:
+            chunk_parent_ids = [line_parent_ids[i] for i in chunk_line_indices]
+        if line_relations is not None:
+            chunk_relations = [line_relations[i] for i in chunk_line_indices]
 
         tokenized = tokenizer(
             chunk_tokens,
@@ -637,6 +649,12 @@ def tokenize_page_with_line_boundary(
 
         if page_number is not None:
             result["page_number"] = page_number
+
+        # 添加 parent_ids 和 relations（全局索引）
+        if chunk_parent_ids is not None:
+            result["line_parent_ids"] = chunk_parent_ids
+        if chunk_relations is not None:
+            result["line_relations"] = chunk_relations
 
         results.append(result)
 
