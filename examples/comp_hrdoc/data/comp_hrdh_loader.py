@@ -1,6 +1,6 @@
-"""Comp_HRDoc 数据加载器
+"""Comp_HRDH 数据加载器
 
-加载论文作者提供的 Comp_HRDoc 数据集，用于训练 Order 模块。
+加载论文作者提供的 Comp_HRDH 数据集，用于训练 Order 模块。
 
 数据格式：
 - unified_layout_analysis_train.json: 包含 reading_order_id（阅读顺序）
@@ -26,13 +26,16 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 
+# 从 tree_utils 导入层级父节点和兄弟分组计算函数
+from ..utils.tree_utils import resolve_parent_and_sibling_from_tree
+
 logger = logging.getLogger(__name__)
 
 
 # ==================== 环境配置 ====================
 
 @dataclass
-class CompHRDocPaths:
+class CompHRDHPaths:
     """Comp_HRDoc 数据路径配置"""
 
     # dev 环境路径（本地开发）
@@ -121,7 +124,7 @@ READING_ORDER_LABELS = {
 # ==================== 数据加载器 ====================
 
 @dataclass
-class CompHRDocConfig:
+class CompHRDHConfig:
     """数据加载配置"""
     env: str = "dev"
     max_length: int = 512
@@ -135,7 +138,7 @@ class CompHRDocConfig:
     document_level: bool = False
 
 
-class CompHRDocDataset(Dataset):
+class CompHRDHDataset(Dataset):
     """Comp_HRDoc 数据集
 
     支持两种模式:
@@ -145,7 +148,7 @@ class CompHRDocDataset(Dataset):
 
     def __init__(
         self,
-        config: CompHRDocConfig,
+        config: CompHRDHConfig,
         split: str = "train",
         tokenizer=None,
     ):
@@ -160,7 +163,7 @@ class CompHRDocDataset(Dataset):
         self.tokenizer = tokenizer
 
         # 获取路径
-        self.paths = CompHRDocPaths.get_paths(config.env)
+        self.paths = CompHRDHPaths.get_paths(config.env)
 
         # 加载数据
         if config.document_level:
@@ -589,8 +592,52 @@ class CompHRDocDataset(Dataset):
         return sample
 
 
-class CompHRDocCollator:
-    """Comp_HRDoc Data Collator"""
+class CompHRDHCollator:
+    """Comp_HRDoc Data Collator (页面级别)
+
+    将多个样本 collate 成一个 batch，用于训练。
+
+    输出格式 (Dict[str, Tensor]):
+        input_ids:        [B, seq_len]      - Token IDs
+        attention_mask:   [B, seq_len]      - Attention mask
+        token_bboxes:     [B, seq_len, 4]   - Token 级别 bbox
+        region_ids:       [B, seq_len]      - Token 对应的区域索引
+        parent_ids:       [B, N]            - 层级父节点索引 (-1 表示 ROOT)
+        sibling_labels:   [B, N, N]         - 兄弟关系矩阵
+        categories:       [B, N]            - 分类标签
+        region_mask:      [B, N]            - 有效区域掩码
+        bboxes:           [B, N, 4]         - 区域级别 bbox
+
+    parent_ids 示例:
+        parent_ids = [-1, -1, 1, 0, 3]   (N=5)
+
+        解读：
+          区域0: parent=-1 → ROOT
+          区域1: parent=-1 → ROOT
+          区域2: parent=1  → 区域1
+          区域3: parent=0  → 区域0
+          区域4: parent=3  → 区域3
+
+        树结构：
+                 ROOT
+                /    \\
+            区域0    区域1
+              |        |
+            区域3    区域2
+              |
+            区域4
+
+    sibling_labels 示例:
+        根据上面的树，区域0 和 区域1 互为兄弟（都在 ROOT 下）
+
+        sibling_labels[j, k] = 1 表示区域 j 和 k 是兄弟
+              0  1  2  3  4
+           0 [0, 1, 0, 0, 0]   ← 区域0 和 区域1 是兄弟
+           1 [1, 0, 0, 0, 0]   ← 对称
+           2 [0, 0, 0, 0, 0]
+           3 [0, 0, 0, 0, 0]
+           4 [0, 0, 0, 0, 0]
+    """
 
     def __init__(self, tokenizer=None, max_regions: int = 128):
         self.tokenizer = tokenizer
@@ -642,15 +689,21 @@ class CompHRDocCollator:
             categories[i, :num_regions] = torch.tensor(f['categories'][:num_regions])
             region_mask[i, :num_regions] = True
 
-            # 从 parent_ids 推导 sibling_labels（同一父节点的区域互为兄弟）
+            # 使用 resolve_parent_and_sibling_from_tree 计算正确的层级父节点和兄弟关系
+            # 这能正确处理 equality 关系（同一父节点下的兄弟节点）
             sample_parent_ids = f['parent_ids'][:num_regions]
-            for j in range(num_regions):
-                for k in range(j + 1, num_regions):
-                    # 有效父节点且相同 => 兄弟关系
-                    if (sample_parent_ids[j] >= 0 and
-                        sample_parent_ids[j] == sample_parent_ids[k]):
-                        sibling_labels[i, j, k] = 1
-                        sibling_labels[i, k, j] = 1  # 对称
+            sample_relations = f['relations'][:num_regions]
+            hierarchical_parents, sibling_groups = resolve_parent_and_sibling_from_tree(
+                sample_parent_ids, sample_relations
+            )
+            # 根据 sibling_groups 填充 sibling_labels
+            for group in sibling_groups:
+                for j_idx in range(len(group)):
+                    for k_idx in range(j_idx + 1, len(group)):
+                        j, k = group[j_idx], group[k_idx]
+                        if j < num_regions and k < num_regions:
+                            sibling_labels[i, j, k] = 1
+                            sibling_labels[i, k, j] = 1  # 对称
 
             for j, bbox in enumerate(f['bboxes'][:num_regions]):
                 bboxes[i, j] = torch.tensor(bbox, dtype=torch.float)
@@ -697,11 +750,32 @@ class CompHRDocCollator:
         return batch
 
 
-class CompHRDocDocumentCollator:
+class CompHRDHDocumentCollator:
     """Comp_HRDoc 文档级别 Data Collator
 
     用于文档级别训练，每个样本是一个完整文档（包含所有页面的区域）。
     支持跨页 parent 关系。
+
+    数据处理流程:
+        平铺 JSON                     解析层级关系                    Tensor
+        (parent_id + relation)  →  hierarchical_parents  →  parent_ids [B, N]
+                                   sibling_groups          sibling_labels [B, N, N]
+
+    输出格式 (Dict[str, Tensor]):
+        parent_ids:       [B, N]            - 层级父节点索引 (-1 表示 ROOT)
+        sibling_labels:   [B, N, N]         - 兄弟关系矩阵
+        categories:       [B, N]            - 分类标签
+        region_mask:      [B, N]            - 有效区域掩码
+        bboxes:           [B, N, 4]         - 区域级别 bbox
+        page_indices:     [B, N]            - 区域所属页面索引
+
+    parent_ids 示例:
+        parent_ids[i] = j  表示区域 i 的父节点是区域 j
+        parent_ids[i] = -1 表示区域 i 的父节点是 ROOT
+
+    sibling_labels 示例:
+        sibling_labels[j, k] = 1 表示区域 j 和区域 k 是兄弟
+        矩阵是对称的: sibling_labels[j, k] = sibling_labels[k, j]
     """
 
     def __init__(self, tokenizer=None, max_regions: int = 512):
@@ -773,13 +847,20 @@ class CompHRDocDocumentCollator:
             if 'page_indices' in f:
                 page_indices[i, :num_regions] = torch.tensor(f['page_indices'][:num_regions])
 
-            # 从 parent_ids 推导 sibling_labels（同一父节点的区域互为兄弟）
-            for j in range(num_regions):
-                for k in range(j + 1, num_regions):
-                    if (sample_parent_ids[j] >= 0 and
-                        sample_parent_ids[j] == sample_parent_ids[k]):
-                        sibling_labels[i, j, k] = 1
-                        sibling_labels[i, k, j] = 1
+            # 使用 resolve_parent_and_sibling_from_tree 计算正确的层级父节点和兄弟关系
+            # 这能正确处理 equality 关系（同一父节点下的兄弟节点）
+            sample_relations = f['relations'][:num_regions]
+            hierarchical_parents, sibling_groups = resolve_parent_and_sibling_from_tree(
+                sample_parent_ids, sample_relations
+            )
+            # 根据 sibling_groups 填充 sibling_labels
+            for group in sibling_groups:
+                for j_idx in range(len(group)):
+                    for k_idx in range(j_idx + 1, len(group)):
+                        j, k = group[j_idx], group[k_idx]
+                        if j < num_regions and k < num_regions:
+                            sibling_labels[i, j, k] = 1
+                            sibling_labels[i, k, j] = 1  # 对称
 
             for j, bbox in enumerate(f['bboxes'][:num_regions]):
                 bboxes[i, j] = torch.tensor(bbox, dtype=torch.float)
@@ -798,10 +879,10 @@ class CompHRDocDocumentCollator:
         return batch
 
 
-def create_comp_hrdoc_datasets(
-    config: CompHRDocConfig,
+def create_comp_hrdh_datasets(
+    config: CompHRDHConfig,
     tokenizer=None,
-) -> Dict[str, CompHRDocDataset]:
+) -> Dict[str, CompHRDHDataset]:
     """创建 Comp_HRDoc 数据集
 
     Args:
@@ -813,8 +894,8 @@ def create_comp_hrdoc_datasets(
     """
     datasets = {}
 
-    datasets['train'] = CompHRDocDataset(config, split='train', tokenizer=tokenizer)
-    datasets['validation'] = CompHRDocDataset(config, split='validation', tokenizer=tokenizer)
+    datasets['train'] = CompHRDHDataset(config, split='train', tokenizer=tokenizer)
+    datasets['validation'] = CompHRDHDataset(config, split='validation', tokenizer=tokenizer)
 
     logger.info(f"Created datasets: train={len(datasets['train'])}, validation={len(datasets['validation'])}")
 
@@ -827,10 +908,10 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # 测试 dev 环境
-    config = CompHRDocConfig(env="dev", max_train_samples=100)
+    config = CompHRDHConfig(env="dev", max_train_samples=100)
 
     print("=== 测试数据加载 ===")
-    dataset = CompHRDocDataset(config, split="train")
+    dataset = CompHRDHDataset(config, split="train")
     print(f"Train samples: {len(dataset)}")
 
     if len(dataset) > 0:
@@ -843,7 +924,7 @@ if __name__ == "__main__":
 
     # 测试 collator
     print("\n=== 测试 Collator ===")
-    collator = CompHRDocCollator()
+    collator = CompHRDHCollator()
     batch = collator([dataset[i] for i in range(min(2, len(dataset)))])
     print(f"Batch keys: {list(batch.keys())}")
     print(f"reading_orders shape: {batch['reading_orders'].shape}")

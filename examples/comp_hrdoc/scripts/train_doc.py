@@ -40,11 +40,11 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
-from examples.comp_hrdoc.data.comp_hrdoc_loader import (
-    CompHRDocConfig,
-    CompHRDocDataset,
-    CompHRDocCollator,
-    CompHRDocDocumentCollator,
+from examples.comp_hrdoc.data.comp_hrdh_loader import (
+    CompHRDHConfig,
+    CompHRDHDataset,
+    CompHRDHCollator,
+    CompHRDHDocumentCollator,
 )
 from examples.comp_hrdoc.models import (
     DOCModel,
@@ -848,7 +848,7 @@ def main():
         # Create datasets
         mode = "document-level" if args.document_level else "page-level"
         logger.info(f"Creating datasets in {mode} mode...")
-        data_config = CompHRDocConfig(
+        data_config = CompHRDHConfig(
             env=args.env,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
@@ -857,8 +857,8 @@ def main():
             document_level=args.document_level,
         )
 
-        train_dataset = CompHRDocDataset(data_config, split="train")
-        val_dataset = CompHRDocDataset(data_config, split="validation")
+        train_dataset = CompHRDHDataset(data_config, split="train")
+        val_dataset = CompHRDHDataset(data_config, split="validation")
 
         logger.info(f"Train dataset: {len(train_dataset)} samples")
         logger.info(f"Validation dataset: {len(val_dataset)} samples")
@@ -867,10 +867,10 @@ def main():
         # 文档级别使用更大的 max_regions (默认 512)，页面级别使用 args.max_regions
         if args.document_level:
             max_regions = args.max_regions if args.max_regions > 128 else 512
-            collator = CompHRDocDocumentCollator(max_regions=max_regions)
+            collator = CompHRDHDocumentCollator(max_regions=max_regions)
             logger.info(f"Using document-level collator with max_regions={max_regions}")
         else:
-            collator = CompHRDocCollator(max_regions=args.max_regions)
+            collator = CompHRDHCollator(max_regions=args.max_regions)
             logger.info(f"Using page-level collator with max_regions={args.max_regions}")
 
         train_loader = DataLoader(

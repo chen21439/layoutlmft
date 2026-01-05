@@ -57,7 +57,7 @@ sys.path.insert(0, PROJECT_ROOT)
 COMP_HRDOC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, COMP_HRDOC_ROOT)
 
-from data.comp_hrdoc_loader import CompHRDocDataset, CompHRDocConfig, CompHRDocCollator
+from data.comp_hrdh_loader import CompHRDHDataset, CompHRDHConfig, CompHRDHCollator
 from models.order_only import build_order_only_model, save_order_only_model, OrderOnlyModel
 
 logger = logging.getLogger(__name__)
@@ -415,7 +415,7 @@ def main():
 
     # 创建数据集配置
     logger.info("Creating datasets...")
-    data_config = CompHRDocConfig(
+    data_config = CompHRDHConfig(
         env=args.env,
         max_length=args.max_length,
         max_train_samples=args.max_train_samples,
@@ -425,14 +425,14 @@ def main():
     )
 
     # 创建数据集（不使用 tokenizer，直接使用区域级特征）
-    train_dataset = CompHRDocDataset(data_config, split="train")
-    val_dataset = CompHRDocDataset(data_config, split="validation")
+    train_dataset = CompHRDHDataset(data_config, split="train")
+    val_dataset = CompHRDHDataset(data_config, split="validation")
 
     logger.info(f"Train dataset: {len(train_dataset)} samples")
     logger.info(f"Validation dataset: {len(val_dataset)} samples")
 
     # 创建 data collator
-    collator = CompHRDocCollator(max_regions=args.max_regions)
+    collator = CompHRDHCollator(max_regions=args.max_regions)
 
     # 创建 dataloader
     train_loader = DataLoader(

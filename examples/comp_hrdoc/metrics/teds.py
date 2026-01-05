@@ -14,6 +14,9 @@ try:
 except ImportError:
     HAS_APTED = False
 
+# 从 tree_utils 导入 Node 和 generate_doc_tree（避免重复实现）
+from ..utils.tree_utils import Node, generate_doc_tree
+
 
 @dataclass
 class TEDSResult:
@@ -27,50 +30,7 @@ class TEDSResult:
     per_sample: Dict[str, Dict] = field(default_factory=dict)
 
 
-class Node:
-    """文档树节点
-
-    用于构建层级文档结构树。
-    """
-
-    def __init__(self, name: str, info: Any = None):
-        self.name = name
-        self.info = info
-        self.children: List['Node'] = []
-        self.parent: Optional['Node'] = None
-        self.ref_children: List['Node'] = []
-        self.ref_parent: Optional['Node'] = None
-        self.ref_parent_relation: Optional[str] = None
-        self.depth: int = 0
-
-    def _set_parent(self, node: 'Node'):
-        self.parent = node
-
-    def _set_ref_parent(self, node: 'Node', relation: str):
-        self.ref_parent = node
-        self.ref_parent_relation = relation
-
-    def add_child(self, node: 'Node'):
-        self.children.append(node)
-        node._set_parent(self)
-
-    def add_ref_child(self, node: 'Node', relation: str):
-        self.ref_children.append(node)
-        node._set_ref_parent(self, relation)
-
-    def set_depth(self, cur_depth: int):
-        self.depth = cur_depth
-        for child in self.children:
-            child.set_depth(cur_depth + 1)
-
-    def __repr__(self):
-        return self.name
-
-    def __len__(self):
-        length = 1
-        for child in self.children:
-            length += len(child)
-        return length
+# Node 类已移至 utils/tree_utils.py
 
 
 def tree_edit_distance(pred_tree: Node, gt_tree: Node) -> Tuple[int, float]:
@@ -92,52 +52,7 @@ def tree_edit_distance(pred_tree: Node, gt_tree: Node) -> Tuple[int, float]:
     return distance, teds
 
 
-def generate_doc_tree(
-    texts: List[str],
-    parent_ids: List[int],
-    relations: List[str],
-) -> Node:
-    """从模型输出构建文档树
-
-    Args:
-        texts: 节点文本列表 (格式: "class:text")
-        parent_ids: 父节点索引列表
-        relations: 关系类型列表 ("contain", "equality", "connect")
-
-    Returns:
-        文档树根节点
-    """
-    assert len(texts) == len(parent_ids) == len(relations)
-
-    # 创建节点列表，包括ROOT节点
-    node_lst = [Node(name='ROOT')]
-    for text in texts:
-        node = Node(name=text)
-        node_lst.append(node)
-
-    # 建立父子关系
-    for b_i, box in enumerate(node_lst):
-        if b_i > 0:
-            no_root_idx = b_i - 1
-            # parent_id + 1 因为有 ROOT 节点
-            relative_parent_idx = parent_ids[no_root_idx] + 1
-            relation = relations[no_root_idx]
-            parent = node_lst[relative_parent_idx]
-            parent.add_ref_child(box, relation)
-
-            if relation in ['contain', 'connect']:
-                box.ref_parent.add_child(box)
-            elif relation == 'equality':
-                # equality 关系：找到最老的兄弟节点的父节点
-                oldest_bro = box.ref_parent
-                while oldest_bro.ref_parent_relation == 'equality':
-                    oldest_bro = oldest_bro.ref_parent
-                if oldest_bro.parent:
-                    oldest_bro.parent.add_child(box)
-
-    root = node_lst[0]
-    root.set_depth(cur_depth=0)
-    return root
+# generate_doc_tree 函数已移至 utils/tree_utils.py
 
 
 def sequence_edit_distance(seq1: List[str], seq2: List[str]) -> Tuple[int, float]:

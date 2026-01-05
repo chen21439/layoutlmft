@@ -3,12 +3,21 @@
 """
 分批测试 HRDH 数据集，定位有问题的文件
 
+主要用途：
+1. 检测数据加载时会导致阻塞/卡住的文件
+2. 检测 parent_id 循环引用问题（opara 的 parent_id 指向自己会导致 trans_class 无限循环）
+3. 检测图片加载问题
+
 用法:
     python scripts/debug_hrdh_batch.py --start 0 --end 100
     python scripts/debug_hrdh_batch.py --start 100 --end 200
     ...
 
 找到有问题的批次后，缩小范围继续排查
+
+已知问题文件（已删除）：
+- 1607.03341.json: page 1 中有 5 个 opara 的 parent_id 指向自己（自环），
+  导致 layoutlmft/data/labels.py 中 trans_class 函数的 while 循环无限执行
 """
 
 import os

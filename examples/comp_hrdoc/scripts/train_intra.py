@@ -68,7 +68,7 @@ from examples.comp_hrdoc.data.line_collator_v2 import (
     LineLevelCollatorV2,
     create_dataloaders_v2,
 )
-from examples.comp_hrdoc.data.hrds_loader import (
+from examples.comp_hrdoc.data.hrdoc_loader import (
     HRDSDataset,
     HRDSLayoutXLMCollator,
     create_hrds_layoutxlm_dataloaders,

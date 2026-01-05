@@ -72,7 +72,7 @@ data/line_level_loader.py  # 行级别数据加载器
 scripts/train.py --config configs/order.yaml
 
 # 数据加载
-data/comp_hrdoc_loader.py  # 区域级别数据加载器
+data/comp_hrdh_loader.py  # 区域级别数据加载器
 ```
 
 **输入输出**：

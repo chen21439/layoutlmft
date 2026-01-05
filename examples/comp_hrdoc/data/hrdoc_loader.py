@@ -1,17 +1,24 @@
-"""HRDS Data Loader
+"""HRDoc Data Loader
 
-Loads HRDS dataset (HRDoc-Simple) where each document is a separate JSON file.
-Fields are similar to HRDH but with individual files per document.
+统一加载 HRDS (HRDoc-Simple) 和 HRDH (HRDoc-Hard) 数据集。
+两个数据集格式相同，仅难度不同。
 
-Data structure:
-- Each JSON file is a list of line objects
-- Each line has: text, box, class, page, is_meta, line_id, parent_id, relation
+数据格式：
+- 每个文档一个 JSON 文件
+- 每行包含: text, box, class, page, is_meta, line_id, parent_id, relation
 
 Relation types:
-- "contain": Child is contained in parent (section -> paragraph)
-- "connect": Continues from parent (line -> next line in reading order)
-- "meta": Metadata lines (title, author, etc.)
-- "equality": Equivalent elements (table cells, equations)
+- "contain": 父子包含关系 (section -> paragraph)
+- "connect": 阅读顺序延续 (line -> next line)
+- "meta": 元信息行 (title, author, etc.)
+- "equality": 兄弟关系 (table cells, equations)
+
+使用示例:
+    # HRDS
+    dataset = HRDocDataset(data_dir="/path/to/HRDS/train", dataset_name="hrds")
+
+    # HRDH
+    dataset = HRDocDataset(data_dir="/path/to/HRDH/train", dataset_name="hrdh")
 """
 
 import json
@@ -25,16 +32,17 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-class HRDSDataset(Dataset):
-    """Dataset for HRDS (HRDoc-Simple) format
+class HRDocDataset(Dataset):
+    """统一的 HRDoc 数据集加载器
 
-    Each sample is one document (one JSON file).
-    Extracts line-level features for intra-region training.
+    支持 HRDS (HRDoc-Simple) 和 HRDH (HRDoc-Hard)，格式相同。
+    每个样本是一个文档（一个 JSON 文件）。
     """
 
     def __init__(
         self,
         data_dir: str,
+        dataset_name: str = "hrds",
         max_lines: int = 256,
         max_samples: int = None,
         split: str = 'train',
@@ -42,13 +50,15 @@ class HRDSDataset(Dataset):
     ):
         """
         Args:
-            data_dir: Directory containing JSON files (e.g., .../HRDS/train/)
-            max_lines: Maximum lines per sample
-            max_samples: Limit number of samples (for debugging)
-            split: 'train' or 'validation'
-            val_split_ratio: Ratio for validation split (only used if no separate val dir)
+            data_dir: 数据目录，包含 JSON 文件 (e.g., .../HRDS/train/)
+            dataset_name: 数据集名称 ("hrds" 或 "hrdh")，仅用于日志
+            max_lines: 每个样本最大行数
+            max_samples: 限制样本数量（用于调试）
+            split: 'train' 或 'validation'
+            val_split_ratio: 验证集比例
         """
         self.data_dir = data_dir
+        self.dataset_name = dataset_name
         self.max_lines = max_lines
         self.samples = []
 
@@ -92,7 +102,7 @@ class HRDSDataset(Dataset):
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        logger.info(f"Loaded {len(self.samples)} samples for {split} from {data_dir}")
+        logger.info(f"[{self.dataset_name}] Loaded {len(self.samples)} samples for {split} from {data_dir}")
 
     def _process_file(self, json_path: Path) -> Optional[Dict]:
         """Process one JSON file into a sample
@@ -279,8 +289,8 @@ class HRDSDataset(Dataset):
         }
 
 
-class HRDSCollator:
-    """Collator for HRDS batches"""
+class HRDocCollator:
+    """Collator for HRDoc batches"""
 
     # Semantic class to index mapping
     CLASS_TO_IDX = {
@@ -343,11 +353,11 @@ class HRDSCollator:
         }
 
 
-class HRDSLayoutXLMCollator:
+class HRDocLayoutXLMCollator:
     """Collator that tokenizes text for LayoutXLM"""
 
-    CLASS_TO_IDX = HRDSCollator.CLASS_TO_IDX
-    NUM_CLASSES = HRDSCollator.NUM_CLASSES
+    CLASS_TO_IDX = HRDocCollator.CLASS_TO_IDX
+    NUM_CLASSES = HRDocCollator.NUM_CLASSES
 
     def __init__(
         self,
@@ -478,8 +488,9 @@ class HRDSLayoutXLMCollator:
         }
 
 
-def create_hrds_dataloaders(
+def create_hrdoc_dataloaders(
     data_dir: str,
+    dataset_name: str = "hrds",
     batch_size: int = 4,
     max_lines: int = 256,
     max_train_samples: int = None,
@@ -487,10 +498,11 @@ def create_hrds_dataloaders(
     val_split_ratio: float = 0.1,
     num_workers: int = 0,
 ) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation dataloaders for HRDS
+    """Create train and validation dataloaders for HRDoc (HRDS/HRDH)
 
     Args:
-        data_dir: Directory containing JSON files (e.g., .../HRDS/train/)
+        data_dir: 数据目录，包含 JSON 文件
+        dataset_name: 数据集名称 ("hrds" 或 "hrdh")
         batch_size: Batch size
         max_lines: Maximum lines per sample
         max_train_samples: Limit training samples
@@ -501,23 +513,25 @@ def create_hrds_dataloaders(
     Returns:
         (train_loader, val_loader)
     """
-    train_dataset = HRDSDataset(
+    train_dataset = HRDocDataset(
         data_dir=data_dir,
+        dataset_name=dataset_name,
         max_lines=max_lines,
         max_samples=max_train_samples,
         split='train',
         val_split_ratio=val_split_ratio,
     )
 
-    val_dataset = HRDSDataset(
+    val_dataset = HRDocDataset(
         data_dir=data_dir,
+        dataset_name=dataset_name,
         max_lines=max_lines,
         max_samples=max_val_samples,
         split='validation',
         val_split_ratio=val_split_ratio,
     )
 
-    collator = HRDSCollator(max_lines=max_lines)
+    collator = HRDocCollator(max_lines=max_lines)
 
     train_loader = DataLoader(
         train_dataset,
@@ -538,9 +552,10 @@ def create_hrds_dataloaders(
     return train_loader, val_loader
 
 
-def create_hrds_layoutxlm_dataloaders(
+def create_hrdoc_layoutxlm_dataloaders(
     data_dir: str,
     tokenizer,
+    dataset_name: str = "hrds",
     batch_size: int = 4,
     max_length: int = 512,
     max_lines: int = 256,
@@ -552,8 +567,9 @@ def create_hrds_layoutxlm_dataloaders(
     """Create train and validation dataloaders with LayoutXLM tokenization
 
     Args:
-        data_dir: Directory containing JSON files
+        data_dir: 数据目录，包含 JSON 文件
         tokenizer: LayoutXLM tokenizer
+        dataset_name: 数据集名称 ("hrds" 或 "hrdh")
         batch_size: Batch size
         max_length: Max sequence length
         max_lines: Maximum lines per sample
@@ -565,23 +581,25 @@ def create_hrds_layoutxlm_dataloaders(
     Returns:
         (train_loader, val_loader)
     """
-    train_dataset = HRDSDataset(
+    train_dataset = HRDocDataset(
         data_dir=data_dir,
+        dataset_name=dataset_name,
         max_lines=max_lines,
         max_samples=max_train_samples,
         split='train',
         val_split_ratio=val_split_ratio,
     )
 
-    val_dataset = HRDSDataset(
+    val_dataset = HRDocDataset(
         data_dir=data_dir,
+        dataset_name=dataset_name,
         max_lines=max_lines,
         max_samples=max_val_samples,
         split='validation',
         val_split_ratio=val_split_ratio,
     )
 
-    collator = HRDSLayoutXLMCollator(
+    collator = HRDocLayoutXLMCollator(
         tokenizer=tokenizer,
         max_length=max_length,
         max_lines=max_lines,
@@ -606,15 +624,27 @@ def create_hrds_layoutxlm_dataloaders(
     return train_loader, val_loader
 
 
+# ==================== 向后兼容别名 ====================
+# 保持旧的 HRDS* 名称可用
+
+HRDSDataset = HRDocDataset
+HRDSCollator = HRDocCollator
+HRDSLayoutXLMCollator = HRDocLayoutXLMCollator
+create_hrds_dataloaders = create_hrdoc_dataloaders
+create_hrds_layoutxlm_dataloaders = create_hrdoc_layoutxlm_dataloaders
+
+
 # Quick test
 if __name__ == '__main__':
     import sys
     logging.basicConfig(level=logging.INFO)
 
     data_dir = sys.argv[1] if len(sys.argv) > 1 else '/data/LLM_group/layoutlmft/data/HRDS/train'
+    dataset_name = sys.argv[2] if len(sys.argv) > 2 else 'hrds'
 
-    train_loader, val_loader = create_hrds_dataloaders(
+    train_loader, val_loader = create_hrdoc_dataloaders(
         data_dir=data_dir,
+        dataset_name=dataset_name,
         batch_size=2,
         max_lines=64,
         max_train_samples=10,
