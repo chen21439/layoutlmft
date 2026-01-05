@@ -24,10 +24,13 @@ Relation types:
 import json
 import logging
 import os
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
+
+from layoutlmft.data.utils import load_image
 
 from ..utils.tree_utils import (
     resolve_hierarchical_parents_and_siblings,
@@ -82,6 +85,13 @@ class HRDocDataset(Dataset):
         self.dataset_name = dataset_name
         self.max_lines = max_lines
         self.samples = []
+
+        # 确定图像目录
+        data_path = Path(data_dir)
+        self.images_dir = data_path / "images"
+        if not self.images_dir.exists():
+            logger.warning(f"Images directory not found: {self.images_dir}")
+            self.images_dir = None
 
         self._load_data(data_dir, max_samples, split, val_split_ratio, covmatch)
 
@@ -256,6 +266,7 @@ class HRDocDataset(Dataset):
 
         return {
             'file_name': json_path.name,
+            'doc_name': json_path.stem,  # 文档名（不含扩展名），用于构建图像路径
             'lines': all_lines,
             'region_ids': all_region_ids,
             'successor_labels': all_successor_labels,
@@ -345,13 +356,17 @@ class HRDocDataset(Dataset):
         # 提取 parent_ids 和 relations
         parent_ids = []
         relations = []
+        pages = set()
         for line in lines:
             parent_ids.append(line.get('parent_id', -1))
             rel_str = line.get('relation', '')
             relations.append(RELATION_STR_TO_INT.get(rel_str, 0))  # 默认 contain
+            pages.add(line.get('page', 0))
 
         return {
             'file_name': sample['file_name'],
+            'doc_name': sample['doc_name'],
+            'pages': sorted(pages),  # 该文档包含的页码列表
             'bboxes': [line['bbox'] for line in lines],
             'texts': [line['text'] for line in lines],
             'class_labels': sample['class_labels'],
@@ -360,6 +375,7 @@ class HRDocDataset(Dataset):
             'parent_ids': parent_ids,
             'relations': relations,
             'num_lines': sample['num_lines'],
+            'images_dir': str(self.images_dir) if self.images_dir else None,
         }
 
 
@@ -616,14 +632,51 @@ class HRDocLayoutXLMCollator:
                                 sibling_labels[i, j, k] = 1
                                 sibling_labels[i, k, j] = 1  # 对称
 
-        # 创建占位图像 (LayoutXLM 需要图像输入)
-        # 形状: [batch_size, 3, 224, 224]
-        # 使用 ImageNet 均值填充 (近似于空白图像)
-        image = torch.zeros(batch_size, 3, 224, 224, dtype=torch.float)
-        # ImageNet 均值: [0.485, 0.456, 0.406]
-        image[:, 0, :, :] = 0.485
-        image[:, 1, :, :] = 0.456
-        image[:, 2, :, :] = 0.406
+        # 加载图像
+        all_images = []
+        for sample in batch:
+            images_dir = sample.get('images_dir')
+            doc_name = sample.get('doc_name', '')
+            pages = sample.get('pages', [0])
+            page = pages[0] if pages else 0  # 使用第一页的图像
+
+            image_loaded = False
+            if images_dir:
+                images_path = Path(images_dir)
+                # 尝试多种图像路径格式
+                possible_paths = [
+                    # HRDS 格式: images/{doc_name}/{doc_name}_{page}.jpg
+                    images_path / doc_name / f"{doc_name}_{page}.jpg",
+                    images_path / doc_name / f"{doc_name}_{page}.png",
+                    # HRDH 格式: images/{doc_name}/{page}.png
+                    images_path / doc_name / f"{page}.png",
+                    images_path / doc_name / f"{page}.jpg",
+                    # 单页格式: images/{doc_name}.png
+                    images_path / f"{doc_name}.png",
+                    images_path / f"{doc_name}.jpg",
+                ]
+
+                for img_path in possible_paths:
+                    if img_path.exists():
+                        try:
+                            img_array, _ = load_image(str(img_path))
+                            all_images.append(img_array)
+                            image_loaded = True
+                            break
+                        except Exception as e:
+                            logger.warning(f"Failed to load image {img_path}: {e}")
+
+            # 如果没有找到图像，使用占位符
+            if not image_loaded:
+                # 占位符: 3x224x224 填充 ImageNet 均值
+                placeholder = np.zeros((3, 224, 224), dtype=np.uint8)
+                placeholder[0, :, :] = int(0.485 * 255)
+                placeholder[1, :, :] = int(0.456 * 255)
+                placeholder[2, :, :] = int(0.406 * 255)
+                all_images.append(placeholder)
+
+        # Stack images: [batch_size, 3, 224, 224]
+        image = torch.tensor(np.stack(all_images), dtype=torch.float) / 255.0
 
         return {
             'input_ids': torch.tensor(all_input_ids, dtype=torch.long),
@@ -634,11 +687,9 @@ class HRDocLayoutXLMCollator:
             'region_ids': region_ids,
             'successor_labels': successor_labels,
             'class_labels': class_labels,
-            'line_labels': class_labels,  # 别名，与 train_doc.py 兼容
             'line_mask': line_mask,
             'line_bboxes': line_bboxes,
             'parent_ids': parent_ids,
-            'line_parent_ids': parent_ids,  # 别名，与 train_doc.py 兼容
             'sibling_labels': sibling_labels,
         }
 

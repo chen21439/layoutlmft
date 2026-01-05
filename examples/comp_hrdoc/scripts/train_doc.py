@@ -453,10 +453,10 @@ def train_epoch_with_stage_features(
             )
 
         # Get labels from HRDoc data
-        # line_parent_ids: [num_docs, max_lines]
-        # line_relations: [num_docs, max_lines]
-        line_parent_ids = batch.get("line_parent_ids")
-        line_labels = batch.get("line_labels")  # Category labels
+        # parent_ids: [batch_size, max_lines]
+        # class_labels: [batch_size, max_lines]
+        line_parent_ids = batch.get("parent_ids")
+        line_labels = batch.get("class_labels")
 
         if line_parent_ids is not None:
             line_parent_ids = line_parent_ids.to(device)
@@ -606,8 +606,8 @@ def evaluate_with_stage_features(
             chunks_per_doc=batch.get("chunks_per_doc"),
         )
 
-        line_parent_ids = batch.get("line_parent_ids")
-        line_labels = batch.get("line_labels")
+        line_parent_ids = batch.get("parent_ids")
+        line_labels = batch.get("class_labels")
 
         if line_parent_ids is not None:
             line_parent_ids = line_parent_ids.to(device)
