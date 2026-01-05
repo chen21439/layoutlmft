@@ -709,10 +709,10 @@ def main():
         sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
         from data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
         from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
-        from util.config_setup import load_config_safe
+        from configs.config_loader import load_config
 
         # 获取数据目录
-        stage_config = load_config_safe(args.env)
+        stage_config = load_config(args.env).get_effective_config()
         data_dir = stage_config.dataset.get_data_dir(args.dataset)
         os.environ["HRDOC_DATA_DIR"] = data_dir
         logger.info(f"Data directory: {data_dir}")
