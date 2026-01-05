@@ -154,11 +154,19 @@ class JointTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
     def log(self, logs: Dict[str, float]) -> None:
-        """扩展日志，添加各阶段 loss"""
+        """扩展日志，添加各阶段 loss 和 stage34 学习率"""
 
         # 添加各 loss 到日志
         if self._current_loss_dict:
             logs.update(self._current_loss_dict)
+
+        # 添加 stage34 的学习率（param_groups[2] 是 stage3）
+        if self.optimizer is not None and len(self.optimizer.param_groups) >= 3:
+            lr_stage34 = self.optimizer.param_groups[2]["lr"]
+            logs["lr_stage34"] = lr_stage34
+            # 如果 learning_rate 是 0（stage1 冻结），用 stage34 的 lr 替代显示
+            if logs.get("learning_rate", 0) == 0:
+                logs["learning_rate"] = lr_stage34
 
         super().log(logs)
 
