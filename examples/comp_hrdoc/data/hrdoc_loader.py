@@ -616,17 +616,29 @@ class HRDocLayoutXLMCollator:
                                 sibling_labels[i, j, k] = 1
                                 sibling_labels[i, k, j] = 1  # 对称
 
+        # 创建占位图像 (LayoutXLM 需要图像输入)
+        # 形状: [batch_size, 3, 224, 224]
+        # 使用 ImageNet 均值填充 (近似于空白图像)
+        image = torch.zeros(batch_size, 3, 224, 224, dtype=torch.float)
+        # ImageNet 均值: [0.485, 0.456, 0.406]
+        image[:, 0, :, :] = 0.485
+        image[:, 1, :, :] = 0.456
+        image[:, 2, :, :] = 0.406
+
         return {
             'input_ids': torch.tensor(all_input_ids, dtype=torch.long),
             'bbox': torch.tensor(all_bbox, dtype=torch.long),
             'attention_mask': torch.tensor(all_attention_mask, dtype=torch.long),
+            'image': image,
             'line_ids': torch.tensor(all_line_ids, dtype=torch.long),
             'region_ids': region_ids,
             'successor_labels': successor_labels,
             'class_labels': class_labels,
+            'line_labels': class_labels,  # 别名，与 train_doc.py 兼容
             'line_mask': line_mask,
             'line_bboxes': line_bboxes,
             'parent_ids': parent_ids,
+            'line_parent_ids': parent_ids,  # 别名，与 train_doc.py 兼容
             'sibling_labels': sibling_labels,
         }
 
