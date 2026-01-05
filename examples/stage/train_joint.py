@@ -127,7 +127,7 @@ class JointModelArguments:
     stage1_micro_batch_size: int = field(default=1, metadata={"help": "Stage1 micro-batch size"})
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Enable gradient checkpointing for Stage1"})
     freeze_visual: bool = field(default=False, metadata={"help": "Freeze visual encoder (ResNet)"})
-    use_gt_class: bool = field(default=False, metadata={"help": "Use GT class labels for Stage3/4"})
+    teacher_forcing: bool = field(default=True, metadata={"help": "Use GT labels for Stage3/4 training (True=stable, False=matches inference)"})
 
 
 @dataclass
@@ -322,7 +322,7 @@ def build_model(model_args, config, raw_train_dataset, device):
         stage1_micro_batch_size=model_args.stage1_micro_batch_size,
         freeze_visual=model_args.freeze_visual,
         stage1_no_grad=stage1_no_grad,
-        use_gt_class=model_args.use_gt_class,
+        teacher_forcing=model_args.teacher_forcing,
     )
 
     if model_args.mode == "stage1":

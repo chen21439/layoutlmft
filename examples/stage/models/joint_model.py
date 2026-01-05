@@ -112,7 +112,7 @@ class JointModel(nn.Module):
         stage1_no_grad: bool = False,
         freeze_visual: bool = False,
         cls_dropout: float = 0.1,  # 分类头 dropout
-        use_gt_class: bool = False,  # 使用 GT class 而不是 Stage1 预测（用于 Stage2 训练）
+        teacher_forcing: bool = True,  # 使用 GT labels 训练 Stage3/4（True=稳定训练, False=贴近推理）
         relation_class_weights: list = None,  # 关系分类的类别权重 [connect, contain, equality]
     ):
         super().__init__()
@@ -148,7 +148,7 @@ class JointModel(nn.Module):
         self.stage1_micro_batch_size = stage1_micro_batch_size
         self.stage1_no_grad = stage1_no_grad
         self.num_classes = num_classes
-        self.use_gt_class = use_gt_class  # 使用 GT class 而不是 Stage1 预测
+        self.teacher_forcing = teacher_forcing  # 使用 GT labels 训练 Stage3/4
 
         # 保存旧接口的引用（兼容性）
         self.stage1 = stage1_model
@@ -611,6 +611,7 @@ class JointModel(nn.Module):
         parent_correct = 0
         parent_total = 0
         gru_hidden = None  # GRU 隐状态，用于 Stage 4
+        pred_parent_ids = {}  # 预测的 parent，供 Stage 4 在 teacher_forcing=False 时使用
 
         # section 类型 ID（用于加权）
         SECTION_ID = 4
@@ -625,8 +626,8 @@ class JointModel(nn.Module):
                 # 准备传入 Stage 3 的 cls_logits
                 stage1_cls_logits = None
 
-                if self.use_gt_class and line_labels is not None:
-                    # 使用 GT class 构建 one-hot 向量（用于 Stage 2 训练）
+                if self.teacher_forcing and line_labels is not None:
+                    # Teacher Forcing: 使用 GT class 构建 one-hot 向量
                     # line_labels: [num_docs, max_lines]，值为类别索引或 -100
                     max_lines = line_labels.shape[1]
                     gt_one_hot = torch.zeros(num_docs, max_lines, self.num_classes, device=device)
@@ -637,9 +638,9 @@ class JointModel(nn.Module):
                             if 0 <= label < self.num_classes:
                                 gt_one_hot[b, line_idx, label] = 1.0
                     stage1_cls_logits = gt_one_hot * 10.0  # 放大以模拟高置信度 logits
-                    if not hasattr(self, '_logged_using_gt_class'):
-                        print(f"[JointModel] 使用 GT class (one-hot) 作为 Stage3 的 cls_logits")
-                        self._logged_using_gt_class = True
+                    if not hasattr(self, '_logged_teacher_forcing'):
+                        print(f"[JointModel] Teacher Forcing: 使用 GT class (one-hot) 作为 Stage3 的 cls_logits")
+                        self._logged_teacher_forcing = True
                 elif outputs.get("logits") is not None:
                     if self.use_line_level_cls:
                         # Line-level 模式：直接使用 outputs["logits"]
@@ -674,21 +675,41 @@ class JointModel(nn.Module):
                 )
                 # gru_hidden: [num_docs, L+1, gru_hidden_size]，包括 ROOT
 
+                # 收集预测的 parent（用于 teacher_forcing=False 时的 Stage 4）
+                # pred_parent_ids[b][child_idx] = 预测的 parent index（-1 表示 ROOT）
+                pred_parent_ids = {}
+
                 for b in range(num_docs):
                     sample_parent_ids = line_parent_ids[b]
                     sample_mask = line_mask[b]
                     num_lines = int(sample_mask.sum().item())
+                    pred_parent_ids[b] = {}
 
                     for child_idx in range(num_lines):
                         gt_parent = sample_parent_ids[child_idx].item()
 
+                        # 计算预测的 parent（即使 gt_parent 无效也计算，用于 Stage 4）
+                        child_logits_raw = parent_logits[b, child_idx + 1, :child_idx + 2]
+                        if not torch.isinf(child_logits_raw).all():
+                            child_logits_clean = torch.where(
+                                torch.isinf(child_logits_raw),
+                                torch.full_like(child_logits_raw, -1e4),
+                                child_logits_raw
+                            )
+                            pred_parent_idx = child_logits_clean.argmax().item()
+                            # pred_parent_idx=0 表示 ROOT，转换为 -1；否则减 1 得到原始索引
+                            pred_parent_ids[b][child_idx] = pred_parent_idx - 1
+                        else:
+                            pred_parent_ids[b][child_idx] = -1  # 无法预测时默认 ROOT
+
+                        # 以下是损失计算，需要有效的 gt_parent
                         if gt_parent == -100:
                             continue
                         if gt_parent >= child_idx:
                             continue
 
                         target_idx = gt_parent + 1 if gt_parent >= 0 else 0
-                        child_logits = parent_logits[b, child_idx + 1, :child_idx + 2]
+                        child_logits = child_logits_raw
 
                         if torch.isinf(child_logits).all():
                             continue
@@ -719,25 +740,33 @@ class JointModel(nn.Module):
                         if pred_parent == target_idx:
                             parent_correct += 1
             else:
+                # 非 GRU 分支也需要收集预测的 parent
+                pred_parent_ids = {}
+
                 for b in range(num_docs):
                     sample_features = line_features[b]
                     sample_mask = line_mask[b]
                     sample_parent_ids = line_parent_ids[b]
+                    pred_parent_ids[b] = {}
 
-                    num_lines = sample_mask.sum().item()
+                    num_lines = int(sample_mask.sum().item())
                     if num_lines <= 1:
                         continue
 
-                    for child_idx in range(1, int(num_lines)):
+                    for child_idx in range(1, num_lines):
                         gt_parent = sample_parent_ids[child_idx].item()
-
-                        if gt_parent < 0 or gt_parent >= child_idx:
-                            continue
 
                         parent_candidates = sample_features[:child_idx]
                         child_feat = sample_features[child_idx]
 
                         scores = self.stage3(parent_candidates, child_feat)
+
+                        # 收集预测的 parent
+                        pred_parent_ids[b][child_idx] = scores.argmax().item()
+
+                        # 以下是损失计算，需要有效的 gt_parent
+                        if gt_parent < 0 or gt_parent >= child_idx:
+                            continue
 
                         target = torch.tensor([gt_parent], device=device)
                         loss = F.cross_entropy(scores.unsqueeze(0), target)
@@ -794,15 +823,23 @@ class JointModel(nn.Module):
             else:
                 use_gru_offset = True
 
+            # 是否使用预测的 parent（teacher_forcing=False 时使用）
+            use_pred_parent = not self.teacher_forcing and self.lambda_parent > 0
+
             for b in range(num_docs):
                 sample_mask = line_mask[b]
-                sample_parent_ids = line_parent_ids[b]
+                sample_gt_parent_ids = line_parent_ids[b]
                 sample_relations = line_relations[b]
 
                 num_lines = int(sample_mask.sum().item())
 
                 for child_idx in range(num_lines):
-                    parent_idx = sample_parent_ids[child_idx].item()
+                    # 选择使用 GT parent 还是预测的 parent
+                    if use_pred_parent and b in pred_parent_ids and child_idx in pred_parent_ids[b]:
+                        parent_idx = pred_parent_ids[b][child_idx]
+                    else:
+                        parent_idx = sample_gt_parent_ids[child_idx].item()
+
                     rel_label = sample_relations[child_idx].item()
 
                     if parent_idx < 0 or parent_idx >= num_lines:
@@ -851,10 +888,10 @@ class JointModel(nn.Module):
                 self._debug_step = 0
             self._debug_step += 1
             if self._debug_step % 100 == 1:
+                print(f"[Stage4 Debug] teacher_forcing={self.teacher_forcing}, use_pred_parent={use_pred_parent}")
                 print(f"[Stage4 Debug] rel_total={rel_total}, skipped_parent={debug_skipped_parent}, skipped_label={debug_skipped_label}")
                 print(f"[Stage4 Debug] Label dist: connect={debug_label_counts[0]}, contain={debug_label_counts[1]}, equality={debug_label_counts[2]}")
                 print(f"[Stage4 Debug] Pred dist:  connect={debug_pred_counts[0]}, contain={debug_pred_counts[1]}, equality={debug_pred_counts[2]}")
-                print(f"[Stage4 Debug] use_gru_offset={use_gru_offset}, gru_hidden shape={gru_hidden.shape if gru_hidden is not None else None}")
 
             outputs["rel_loss"] = rel_loss
             outputs["loss"] = outputs["loss"] + rel_loss * self.lambda_rel

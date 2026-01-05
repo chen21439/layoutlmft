@@ -429,7 +429,7 @@ class ExperimentManager:
                 'lambda_parent': getattr(model_args, 'lambda_parent', None),
                 'lambda_rel': getattr(model_args, 'lambda_rel', None),
                 'use_gru': getattr(model_args, 'use_gru', None),
-                'use_gt_class': getattr(model_args, 'use_gt_class', None),
+                'teacher_forcing': getattr(model_args, 'teacher_forcing', None),
                 'gradient_checkpointing': getattr(model_args, 'gradient_checkpointing', None),
                 'section_parent_weight': getattr(model_args, 'section_parent_weight', None),
             }

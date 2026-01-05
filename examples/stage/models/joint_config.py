@@ -49,7 +49,7 @@ class JointConfig(PretrainedConfig):
         # 冻结配置（用于两阶段训练）
         stage1_no_grad: bool = False,
         freeze_visual: bool = False,
-        use_gt_class: bool = False,
+        teacher_forcing: bool = True,
 
         # 其他
         stage1_micro_batch_size: int = 1,
@@ -84,7 +84,7 @@ class JointConfig(PretrainedConfig):
         # 冻结配置
         self.stage1_no_grad = stage1_no_grad
         self.freeze_visual = freeze_visual
-        self.use_gt_class = use_gt_class
+        self.teacher_forcing = teacher_forcing
 
         # 其他
         self.stage1_micro_batch_size = stage1_micro_batch_size
