@@ -342,7 +342,11 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         words = [{"text": "[EMPTY]", "box": item.get("box", [0, 0, 0, 0])}]
 
                     # 获取全局 line_id（不重映射）
-                    item_line_id = item.get("line_id", item.get("id", line_idx))
+                    # 注意：line_id 必须存在，否则 parent_id 映射会出错
+                    if "line_id" not in item and "id" not in item:
+                        raise ValueError(f"Missing 'line_id' or 'id' field in {file}, line {line_idx}. "
+                                        f"Run scripts/add_line_id_to_hrdh.py to fix HRDH data.")
+                    item_line_id = item.get("line_id", item.get("id"))
 
                     # 获取 parent_id（全局索引，不重映射）
                     raw_parent_id = item.get("parent_id", -1)
