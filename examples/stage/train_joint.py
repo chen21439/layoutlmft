@@ -395,15 +395,25 @@ def main():
         training_args.save_steps = 10
         training_args.logging_steps = 5
 
-    # Document-level 模式调整
+    # Document-level 模式调整（仅当用户未显式指定时才使用默认值）
+    # 检查命令行是否显式传递了这些参数
+    cli_has_eval_steps = "--eval_steps" in sys.argv
+    cli_has_save_steps = "--save_steps" in sys.argv
+    cli_has_logging_steps = "--logging_steps" in sys.argv
+
     if data_args.document_level and not training_args.quick:
-        training_args.eval_steps = 25
-        training_args.save_steps = 25
-        training_args.logging_steps = 10
+        if not cli_has_eval_steps:
+            training_args.eval_steps = 25
+        if not cli_has_save_steps:
+            training_args.save_steps = 25
+        if not cli_has_logging_steps:
+            training_args.logging_steps = 10
     # Page-level 模式调整（非 quick 模式）
     elif not data_args.document_level and not training_args.quick:
-        training_args.logging_steps = 10
-        training_args.eval_steps = 100
+        if not cli_has_logging_steps:
+            training_args.logging_steps = 10
+        if not cli_has_eval_steps:
+            training_args.eval_steps = 100
 
     set_seed(training_args.seed)
 
