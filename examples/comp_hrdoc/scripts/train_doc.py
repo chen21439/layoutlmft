@@ -142,8 +142,8 @@ def parse_args():
                         help="Dataset to use when --use-stage-features is enabled")
     parser.add_argument("--toc-only", action="store_true", default=False,
                         help="Only train on section headings (align with paper 4.4 TOC generation)")
-    parser.add_argument("--section-label-id", type=int, default=1,
-                        help="Label ID for section headings in the dataset")
+    parser.add_argument("--section-label-id", type=int, default=4,
+                        help="Label ID for section headings (default=4 per labels.py: section)")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
