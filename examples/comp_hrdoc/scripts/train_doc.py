@@ -707,7 +707,7 @@ def main():
 
         # Load HRDoc DataLoader (from stage directory)
         sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
-        from data.hrdoc_dataloader import HRDocDataLoader
+        from data.hrdoc_data_loader import HRDocDataLoader
 
         hrdoc_loader = HRDocDataLoader(
             env=args.env,
