@@ -140,6 +140,10 @@ def parse_args():
                         help="Path to stage joint model checkpoint (required if --use-stage-features)")
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="Dataset to use when --use-stage-features is enabled")
+    parser.add_argument("--toc-only", action="store_true", default=False,
+                        help="Only train on section headings (align with paper 4.4 TOC generation)")
+    parser.add_argument("--section-label-id", type=int, default=1,
+                        help="Label ID for section headings in the dataset")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
@@ -458,16 +462,44 @@ def train_epoch_with_stage_features(
         if line_labels is not None:
             line_labels = line_labels.to(device)
 
-        # Generate sibling labels from parent_ids
-        sibling_labels = None
-        if line_parent_ids is not None:
-            from examples.comp_hrdoc.models.construct_only import generate_sibling_labels
-            sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
+        # TOC-only mode: compress to section-only subgraph (align with paper 4.4)
+        if args.toc_only and line_labels is not None:
+            from examples.comp_hrdoc.utils.toc_compress import (
+                compress_to_sections_batch,
+                generate_sibling_labels_from_parents,
+            )
+            compressed = compress_to_sections_batch(
+                line_features=line_features,
+                line_mask=line_mask,
+                parent_ids=line_parent_ids,
+                line_labels=line_labels,
+                reading_orders=None,  # will be generated based on section order
+                section_label_id=args.section_label_id,
+            )
+            # Replace with compressed data
+            line_features = compressed["features"]
+            line_mask = compressed["mask"]
+            line_parent_ids = compressed["parent_ids"]
+            line_labels = compressed["categories"]
+            reading_orders = compressed["reading_orders"]
 
-        # Get reading order (use line index as reading order for now)
-        # TODO: Get actual reading order from stage model predictions
-        batch_size, max_lines = line_mask.shape
-        reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+            # Generate sibling labels from compressed parent_ids
+            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask)
+
+            # Skip batch if no sections
+            if line_mask.sum() == 0:
+                continue
+        else:
+            # Original logic: all lines
+            # Generate sibling labels from parent_ids
+            sibling_labels = None
+            if line_parent_ids is not None:
+                from examples.comp_hrdoc.models.construct_only import generate_sibling_labels
+                sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
+
+            # Get reading order (use line index as reading order for now)
+            batch_size, max_lines = line_mask.shape
+            reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
 
         # Forward pass
         if args.fp16 and scaler is not None:
@@ -535,6 +567,7 @@ def evaluate_with_stage_features(
     dataloader: DataLoader,
     feature_extractor,
     device: torch.device,
+    args=None,
 ) -> Dict[str, float]:
     """Evaluate ConstructFromFeatures model using stage features."""
     from examples.comp_hrdoc.models.construct_only import (
@@ -556,6 +589,10 @@ def evaluate_with_stage_features(
     all_root_correct = 0
     all_root_total = 0
 
+    # Check toc_only mode
+    toc_only = args.toc_only if args else False
+    section_label_id = args.section_label_id if args else 1
+
     for batch in tqdm(dataloader, desc="Evaluating (stage features)"):
         # Extract line features
         line_features, line_mask = feature_extractor.extract_features(
@@ -576,12 +613,37 @@ def evaluate_with_stage_features(
         if line_labels is not None:
             line_labels = line_labels.to(device)
 
-        sibling_labels = None
-        if line_parent_ids is not None:
-            sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
+        # TOC-only mode: compress to section-only subgraph
+        if toc_only and line_labels is not None:
+            from examples.comp_hrdoc.utils.toc_compress import (
+                compress_to_sections_batch,
+                generate_sibling_labels_from_parents,
+            )
+            compressed = compress_to_sections_batch(
+                line_features=line_features,
+                line_mask=line_mask,
+                parent_ids=line_parent_ids,
+                line_labels=line_labels,
+                reading_orders=None,
+                section_label_id=section_label_id,
+            )
+            line_features = compressed["features"]
+            line_mask = compressed["mask"]
+            line_parent_ids = compressed["parent_ids"]
+            line_labels = compressed["categories"]
+            reading_orders = compressed["reading_orders"]
+            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask)
 
-        batch_size, max_lines = line_mask.shape
-        reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+            # Skip batch if no sections
+            if line_mask.sum() == 0:
+                continue
+        else:
+            sibling_labels = None
+            if line_parent_ids is not None:
+                sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
+
+            batch_size, max_lines = line_mask.shape
+            reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
 
         outputs = model(
             region_features=line_features,
@@ -704,6 +766,13 @@ def main():
             device=str(device),
         )
         logger.info(f"Loaded StageFeatureExtractor from: {args.stage_checkpoint}")
+
+        # Log toc_only mode
+        if args.toc_only:
+            logger.info("=" * 60)
+            logger.info("TOC-Only Mode: Training on section headings only (paper 4.4)")
+            logger.info(f"  Section label ID: {args.section_label_id}")
+            logger.info("=" * 60)
 
         # Load HRDoc DataLoader (from stage directory)
         sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
@@ -950,7 +1019,7 @@ def main():
         # Evaluate
         if args.use_stage_features:
             val_metrics = evaluate_with_stage_features(
-                model, val_loader, stage_feature_extractor, device
+                model, val_loader, stage_feature_extractor, device, args
             )
         else:
             val_metrics = evaluate(model, val_loader, device)

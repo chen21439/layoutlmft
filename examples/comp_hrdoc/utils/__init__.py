@@ -3,6 +3,7 @@
 # config.py: 配置解析/GPU设置/环境检测
 # experiment_manager.py: 实验管理
 # stage_feature_extractor.py: 使用 stage 模型提取 line-level 特征
+# toc_compress.py: TOC 子图压缩（对齐论文 4.4）
 
 from .config import (
     setup_environment,
