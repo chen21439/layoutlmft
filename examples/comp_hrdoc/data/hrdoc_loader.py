@@ -43,6 +43,19 @@ class HRDocDataset(Dataset):
 
     支持 HRDS (HRDoc-Simple) 和 HRDH (HRDoc-Hard)，格式相同。
     每个样本是一个文档（一个 JSON 文件）。
+
+    目录结构支持：
+    1. covmatch 模式 (推荐)：
+       data_dir/
+       ├── train/           # JSON 文件目录
+       └── covmatch/
+           └── doc_covmatch_xxx/
+               ├── train_doc_ids.json
+               └── dev_doc_ids.json
+
+    2. 简单模式 (直接分割)：
+       data_dir/
+       └── train/           # JSON 文件目录
     """
 
     def __init__(
@@ -53,22 +66,24 @@ class HRDocDataset(Dataset):
         max_samples: int = None,
         split: str = 'train',
         val_split_ratio: float = 0.1,
+        covmatch: str = None,
     ):
         """
         Args:
-            data_dir: 数据目录，包含 JSON 文件 (e.g., .../HRDS/train/)
+            data_dir: 数据集根目录 (e.g., .../HRDS)
             dataset_name: 数据集名称 ("hrds" 或 "hrdh")，仅用于日志
             max_lines: 每个样本最大行数
             max_samples: 限制样本数量（用于调试）
             split: 'train' 或 'validation'
-            val_split_ratio: 验证集比例
+            val_split_ratio: 验证集比例（仅在无 covmatch 时使用）
+            covmatch: covmatch 目录名 (e.g., "doc_covmatch_dev10_seed42")
         """
         self.data_dir = data_dir
         self.dataset_name = dataset_name
         self.max_lines = max_lines
         self.samples = []
 
-        self._load_data(data_dir, max_samples, split, val_split_ratio)
+        self._load_data(data_dir, max_samples, split, val_split_ratio, covmatch)
 
     def _load_data(
         self,
@@ -76,39 +91,81 @@ class HRDocDataset(Dataset):
         max_samples: int,
         split: str,
         val_split_ratio: float,
+        covmatch: str,
     ):
-        """Load all JSON files from directory"""
+        """Load JSON files from directory with covmatch support"""
         data_path = Path(data_dir)
 
         if not data_path.exists():
             raise ValueError(f"Data directory not found: {data_dir}")
 
+        # 确定 JSON 文件目录 (优先 train 子目录)
+        train_dir = data_path / "train"
+        if train_dir.exists():
+            json_dir = train_dir
+        else:
+            json_dir = data_path
+
         # Get all JSON files
-        json_files = sorted(data_path.glob("*.json"))
+        json_files = sorted(json_dir.glob("*.json"))
 
         if len(json_files) == 0:
-            raise ValueError(f"No JSON files found in {data_dir}")
+            raise ValueError(f"No JSON files found in {json_dir}")
 
-        # Process each file
+        logger.info(f"[{self.dataset_name}] Found {len(json_files)} JSON files in {json_dir}")
+
+        # 加载 covmatch split（如果指定）
+        train_doc_ids = None
+        dev_doc_ids = None
+
+        if covmatch:
+            covmatch_dir = data_path / "covmatch" / covmatch
+            train_ids_file = covmatch_dir / "train_doc_ids.json"
+            dev_ids_file = covmatch_dir / "dev_doc_ids.json"
+
+            if train_ids_file.exists() and dev_ids_file.exists():
+                with open(train_ids_file, 'r') as f:
+                    train_doc_ids = set(json.load(f))
+                with open(dev_ids_file, 'r') as f:
+                    dev_doc_ids = set(json.load(f))
+                logger.info(f"[{self.dataset_name}] Using covmatch split: {len(train_doc_ids)} train, {len(dev_doc_ids)} dev")
+            else:
+                logger.warning(f"[{self.dataset_name}] Covmatch files not found in {covmatch_dir}, falling back to ratio split")
+
+        # Process each file and filter by split
         all_samples = []
         for json_file in json_files:
+            doc_id = json_file.stem  # 文件名（不含扩展名）作为 doc_id
+
+            # 根据 covmatch 或 ratio 决定是否包含此文件
+            if train_doc_ids is not None and dev_doc_ids is not None:
+                # covmatch 模式
+                if split == 'train' and doc_id not in train_doc_ids:
+                    continue
+                if split == 'validation' and doc_id not in dev_doc_ids:
+                    continue
+            # ratio 模式在后面处理
+
             sample = self._process_file(json_file)
             if sample is not None:
                 all_samples.append(sample)
 
-        # Split train/val
-        n_total = len(all_samples)
-        n_val = int(n_total * val_split_ratio)
+        # 如果没有使用 covmatch，按比例分割
+        if train_doc_ids is None or dev_doc_ids is None:
+            n_total = len(all_samples)
+            n_val = int(n_total * val_split_ratio)
 
-        if split == 'train':
-            self.samples = all_samples[n_val:]
-        else:
-            self.samples = all_samples[:n_val]
+            if split == 'train':
+                all_samples = all_samples[n_val:]
+            else:
+                all_samples = all_samples[:n_val]
+
+        self.samples = all_samples
 
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        logger.info(f"[{self.dataset_name}] Loaded {len(self.samples)} samples for {split} from {data_dir}")
+        logger.info(f"[{self.dataset_name}] Loaded {len(self.samples)} samples for {split}")
 
     def _process_file(self, json_path: Path) -> Optional[Dict]:
         """Process one JSON file into a sample

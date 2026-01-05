@@ -71,6 +71,8 @@ def parse_args():
                         help="运行环境: dev(本地开发) 或 test(服务器)")
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
                         help="数据集: hrds(简单) 或 hrdh(困难)")
+    parser.add_argument("--covmatch", type=str, default=None,
+                        help="Covmatch split directory name (e.g., 'doc_covmatch_dev10_seed42')")
 
     # 模型参数
     parser.add_argument(
@@ -425,6 +427,10 @@ def main():
     data_dir = global_config.dataset.get_data_dir(args.dataset)
     logger.info(f"Data directory: {data_dir}")
 
+    # 获取 covmatch (命令行参数优先于配置文件)
+    covmatch = args.covmatch or global_config.dataset.covmatch
+    logger.info(f"Covmatch: {covmatch}")
+
     # 创建数据集
     train_dataset = HRDocDataset(
         data_dir=data_dir,
@@ -433,6 +439,7 @@ def main():
         max_samples=args.max_train_samples,
         split='train',
         val_split_ratio=args.val_split_ratio,
+        covmatch=covmatch,
     )
     val_dataset = HRDocDataset(
         data_dir=data_dir,
@@ -441,6 +448,7 @@ def main():
         max_samples=args.max_val_samples,
         split='validation',
         val_split_ratio=args.val_split_ratio,
+        covmatch=covmatch,
     )
 
     logger.info(f"Train dataset: {len(train_dataset)} samples")
