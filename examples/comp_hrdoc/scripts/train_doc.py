@@ -20,6 +20,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# 提前解析 --gpu 参数
+if "--gpu" in sys.argv:
+    gpu_idx = sys.argv.index("--gpu")
+    if gpu_idx + 1 < len(sys.argv):
+        os.environ["CUDA_VISIBLE_DEVICES"] = sys.argv[gpu_idx + 1]
+
 from examples.comp_hrdoc.utils.config import setup_environment
 setup_environment()
 # ==================== GPU 设置结束 ====================
@@ -138,6 +144,10 @@ def parse_args():
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
                         help="Directory to save model checkpoints (overrides default artifact path)")
+
+    # GPU
+    parser.add_argument("--gpu", type=str, default=None,
+                        help="GPU device ID(s) to use, e.g., '0' or '0,1' (sets CUDA_VISIBLE_DEVICES)")
 
     return parser.parse_args()
 
