@@ -707,19 +707,69 @@ def main():
 
         # Load HRDoc DataLoader (from stage directory)
         sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
-        from data.hrdoc_data_loader import HRDocDataLoader
+        from data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
+        from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
+        from util.config_setup import load_config_safe
 
-        hrdoc_loader = HRDocDataLoader(
-            env=args.env,
-            dataset=args.dataset,
-            batch_size=args.batch_size,
-            document_level=args.document_level,
+        # 获取数据目录
+        stage_config = load_config_safe(args.env)
+        data_dir = stage_config.dataset.get_data_dir(args.dataset)
+        os.environ["HRDOC_DATA_DIR"] = data_dir
+        logger.info(f"Data directory: {data_dir}")
+
+        # 创建数据加载器配置
+        loader_config = HRDocDataLoaderConfig(
+            data_dir=data_dir,
+            dataset_name=args.dataset,
+            max_length=512,
+            preprocessing_num_workers=4,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
+            document_level=args.document_level,
         )
 
-        train_loader = hrdoc_loader.get_train_dataloader()
-        val_loader = hrdoc_loader.get_eval_dataloader()
+        # 使用 stage_feature_extractor 的 tokenizer
+        tokenizer = stage_feature_extractor.tokenizer
+
+        hrdoc_loader = HRDocDataLoader(
+            tokenizer=tokenizer,
+            config=loader_config,
+            include_line_info=True,
+        )
+
+        # 准备数据集
+        hrdoc_loader.load_raw_datasets()
+        tokenized_datasets = hrdoc_loader.prepare_datasets()
+
+        train_dataset = tokenized_datasets.get("train")
+        val_dataset = tokenized_datasets.get("validation")
+
+        logger.info(f"Train dataset: {len(train_dataset) if train_dataset else 0} samples")
+        logger.info(f"Val dataset: {len(val_dataset) if val_dataset else 0} samples")
+
+        # 创建 collator
+        if args.document_level:
+            collator = HRDocDocumentLevelCollator(tokenizer=tokenizer, padding=True, max_length=512)
+            logger.info("Using DOCUMENT-LEVEL collator")
+        else:
+            collator = HRDocJointDataCollator(tokenizer=tokenizer, padding=True, max_length=512)
+            logger.info("Using PAGE-LEVEL collator")
+
+        # 创建 DataLoader
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            collate_fn=collator,
+            num_workers=0,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collator,
+            num_workers=0,
+        )
 
         logger.info(f"Using HRDocDataLoader with dataset={args.dataset}")
         logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
