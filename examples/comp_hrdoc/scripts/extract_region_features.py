@@ -64,7 +64,12 @@ from layoutlmft.data.utils import load_image
 # 添加 comp_hrdoc 路径
 COMP_HRDOC_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, COMP_HRDOC_PATH)
-from data.comp_hrdh_loader import convert_filename_to_image_path
+# 旧版本的 comp_hrdh_loader 已删除，此函数内联定义
+def convert_filename_to_image_path(filename: str, image_dir: str) -> str:
+    """将 filename 转换为图片路径 (legacy)"""
+    import os
+    # 简单的路径转换
+    return os.path.join(image_dir, filename)
 
 logger = logging.getLogger(__name__)
 

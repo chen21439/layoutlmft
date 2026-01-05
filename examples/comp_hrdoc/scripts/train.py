@@ -57,7 +57,7 @@ sys.path.insert(0, PROJECT_ROOT)
 COMP_HRDOC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, COMP_HRDOC_ROOT)
 
-from data.comp_hrdh_loader import CompHRDHDataset, CompHRDHConfig, CompHRDHCollator
+from data.hrdoc_loader import HRDocDataset, HRDocLayoutXLMCollator
 from models.order_only import build_order_only_model, save_order_only_model, OrderOnlyModel
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,8 @@ def parse_args():
     # 环境配置
     parser.add_argument("--env", type=str, default="dev", choices=["dev", "test"],
                         help="运行环境: dev(本地开发) 或 test(服务器)")
+    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
+                        help="数据集: hrds(简单) 或 hrdh(困难)")
 
     # 模型参数
     parser.add_argument(
@@ -415,24 +417,46 @@ def main():
 
     # 创建数据集配置
     logger.info("Creating datasets...")
-    data_config = CompHRDHConfig(
-        env=args.env,
-        max_length=args.max_length,
-        max_train_samples=args.max_train_samples,
-        max_val_samples=args.max_val_samples,
-        use_images=args.use_images,
+    from configs.config_loader import load_config as load_global_config
+    from transformers import AutoTokenizer
+
+    # 获取数据目录 (使用全局 config)
+    global_config = load_global_config(args.env).get_effective_config()
+    data_dir = global_config.dataset.get_data_dir(args.dataset)
+    logger.info(f"Data directory: {data_dir}")
+
+    # 创建数据集
+    train_dataset = HRDocDataset(
+        data_dir=data_dir,
+        dataset_name=args.dataset,
+        max_lines=args.max_regions,
+        max_samples=args.max_train_samples,
+        split='train',
         val_split_ratio=args.val_split_ratio,
     )
-
-    # 创建数据集（不使用 tokenizer，直接使用区域级特征）
-    train_dataset = CompHRDHDataset(data_config, split="train")
-    val_dataset = CompHRDHDataset(data_config, split="validation")
+    val_dataset = HRDocDataset(
+        data_dir=data_dir,
+        dataset_name=args.dataset,
+        max_lines=args.max_regions,
+        max_samples=args.max_val_samples,
+        split='validation',
+        val_split_ratio=args.val_split_ratio,
+    )
 
     logger.info(f"Train dataset: {len(train_dataset)} samples")
     logger.info(f"Validation dataset: {len(val_dataset)} samples")
 
+    # 加载 tokenizer
+    model_name = global_config.model.get("layoutxlm_base", "microsoft/layoutxlm-base")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    logger.info(f"Loaded tokenizer from: {model_name}")
+
     # 创建 data collator
-    collator = CompHRDHCollator(max_regions=args.max_regions)
+    collator = HRDocLayoutXLMCollator(
+        tokenizer=tokenizer,
+        max_length=512,
+        max_lines=args.max_regions,
+    )
 
     # 创建 dataloader
     train_loader = DataLoader(

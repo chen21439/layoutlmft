@@ -40,11 +40,10 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
-from examples.comp_hrdoc.data.comp_hrdh_loader import (
-    CompHRDHConfig,
-    CompHRDHDataset,
-    CompHRDHCollator,
-    CompHRDHDocumentCollator,
+# 数据加载使用 hrdoc_loader (统一的 HRDS/HRDH 加载器)
+from examples.comp_hrdoc.data.hrdoc_loader import (
+    HRDocDataset,
+    HRDocLayoutXLMCollator,
 )
 from examples.comp_hrdoc.models import (
     DOCModel,
@@ -774,55 +773,43 @@ def main():
             logger.info(f"  Section label ID: {args.section_label_id}")
             logger.info("=" * 60)
 
-        # Load HRDoc DataLoader (from stage directory)
-        sys.path.insert(0, str(PROJECT_ROOT / "examples" / "stage"))
-        from data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
-        from joint_data_collator import HRDocJointDataCollator, HRDocDocumentLevelCollator
-        from configs.config_loader import load_config
-
-        # 获取数据目录
-        stage_config = load_config(args.env).get_effective_config()
-        data_dir = stage_config.dataset.get_data_dir(args.dataset)
-        os.environ["HRDOC_DATA_DIR"] = data_dir
+        # 获取数据目录 (使用全局 config)
+        from configs.config_loader import load_config as load_global_config
+        global_config = load_global_config(args.env).get_effective_config()
+        data_dir = global_config.dataset.get_data_dir(args.dataset)
         logger.info(f"Data directory: {data_dir}")
-
-        # 创建数据加载器配置
-        loader_config = HRDocDataLoaderConfig(
-            data_dir=data_dir,
-            dataset_name=args.dataset,
-            max_length=512,
-            preprocessing_num_workers=4,
-            max_train_samples=args.max_train_samples,
-            max_val_samples=args.max_val_samples,
-            document_level=args.document_level,
-        )
 
         # 使用 stage_feature_extractor 的 tokenizer
         tokenizer = stage_feature_extractor.tokenizer
 
-        hrdoc_loader = HRDocDataLoader(
-            tokenizer=tokenizer,
-            config=loader_config,
-            include_line_info=True,
+        # 创建数据集
+        train_dataset = HRDocDataset(
+            data_dir=data_dir,
+            dataset_name=args.dataset,
+            max_lines=args.max_regions,
+            max_samples=args.max_train_samples,
+            split='train',
+            val_split_ratio=args.val_split_ratio,
+        )
+        val_dataset = HRDocDataset(
+            data_dir=data_dir,
+            dataset_name=args.dataset,
+            max_lines=args.max_regions,
+            max_samples=args.max_val_samples,
+            split='validation',
+            val_split_ratio=args.val_split_ratio,
         )
 
-        # 准备数据集
-        hrdoc_loader.load_raw_datasets()
-        tokenized_datasets = hrdoc_loader.prepare_datasets()
+        logger.info(f"Train dataset: {len(train_dataset)} samples")
+        logger.info(f"Val dataset: {len(val_dataset)} samples")
 
-        train_dataset = tokenized_datasets.get("train")
-        val_dataset = tokenized_datasets.get("validation")
-
-        logger.info(f"Train dataset: {len(train_dataset) if train_dataset else 0} samples")
-        logger.info(f"Val dataset: {len(val_dataset) if val_dataset else 0} samples")
-
-        # 创建 collator
-        if args.document_level:
-            collator = HRDocDocumentLevelCollator(tokenizer=tokenizer, padding=True, max_length=512)
-            logger.info("Using DOCUMENT-LEVEL collator")
-        else:
-            collator = HRDocJointDataCollator(tokenizer=tokenizer, padding=True, max_length=512)
-            logger.info("Using PAGE-LEVEL collator")
+        # 创建 collator (使用 LayoutXLM tokenizer)
+        collator = HRDocLayoutXLMCollator(
+            tokenizer=tokenizer,
+            max_length=512,
+            max_lines=args.max_regions,
+        )
+        logger.info(f"Using HRDocLayoutXLMCollator with max_lines={args.max_regions}")
 
         # 创建 DataLoader
         train_loader = DataLoader(
@@ -840,38 +827,56 @@ def main():
             num_workers=0,
         )
 
-        logger.info(f"Using HRDocDataLoader with dataset={args.dataset}")
+        logger.info(f"Using comp_hrdoc HRDocDataset with dataset={args.dataset}")
         logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
     # ==================== Standard Mode ====================
     else:
-        # Create datasets
+        # 使用 hrdoc_loader (统一的 HRDS/HRDH 加载器)
+        from configs.config_loader import load_config as load_global_config
+        from transformers import AutoTokenizer
+
+        # 获取数据目录 (使用全局 config)
+        global_config = load_global_config(args.env).get_effective_config()
+        data_dir = global_config.dataset.get_data_dir(args.dataset)
+        logger.info(f"Data directory: {data_dir}")
+
         mode = "document-level" if args.document_level else "page-level"
         logger.info(f"Creating datasets in {mode} mode...")
-        data_config = CompHRDHConfig(
-            env=args.env,
-            max_train_samples=args.max_train_samples,
-            max_val_samples=args.max_val_samples,
-            val_split_ratio=args.val_split_ratio,
-            use_images=False,
-            document_level=args.document_level,
-        )
 
-        train_dataset = CompHRDHDataset(data_config, split="train")
-        val_dataset = CompHRDHDataset(data_config, split="validation")
+        # 创建数据集
+        train_dataset = HRDocDataset(
+            data_dir=data_dir,
+            dataset_name=args.dataset,
+            max_lines=args.max_regions,
+            max_samples=args.max_train_samples,
+            split='train',
+            val_split_ratio=args.val_split_ratio,
+        )
+        val_dataset = HRDocDataset(
+            data_dir=data_dir,
+            dataset_name=args.dataset,
+            max_lines=args.max_regions,
+            max_samples=args.max_val_samples,
+            split='validation',
+            val_split_ratio=args.val_split_ratio,
+        )
 
         logger.info(f"Train dataset: {len(train_dataset)} samples")
         logger.info(f"Validation dataset: {len(val_dataset)} samples")
 
-        # Create dataloaders
-        # 文档级别使用更大的 max_regions (默认 512)，页面级别使用 args.max_regions
-        if args.document_level:
-            max_regions = args.max_regions if args.max_regions > 128 else 512
-            collator = CompHRDHDocumentCollator(max_regions=max_regions)
-            logger.info(f"Using document-level collator with max_regions={max_regions}")
-        else:
-            collator = CompHRDHCollator(max_regions=args.max_regions)
-            logger.info(f"Using page-level collator with max_regions={args.max_regions}")
+        # 加载 tokenizer
+        model_name = global_config.model.get("layoutxlm_base", "microsoft/layoutxlm-base")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        logger.info(f"Loaded tokenizer from: {model_name}")
+
+        # 创建 collator
+        collator = HRDocLayoutXLMCollator(
+            tokenizer=tokenizer,
+            max_length=512,
+            max_lines=args.max_regions,
+        )
+        logger.info(f"Using HRDocLayoutXLMCollator with max_lines={args.max_regions}")
 
         train_loader = DataLoader(
             train_dataset,

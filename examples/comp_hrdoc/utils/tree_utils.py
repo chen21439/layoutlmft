@@ -1,6 +1,6 @@
 """树构建工具函数
 
-用于构建层级文档结构树，被 metrics/teds.py 和 data/comp_hrdh_loader.py 复用。
+用于构建层级文档结构树，被 metrics/teds.py 和 data/hrdoc_loader.py 复用。
 
 数据处理流程
 ============

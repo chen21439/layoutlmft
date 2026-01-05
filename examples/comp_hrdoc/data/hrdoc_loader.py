@@ -29,6 +29,12 @@ from torch.utils.data import Dataset, DataLoader
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 
+from ..utils.tree_utils import (
+    resolve_hierarchical_parents_and_siblings,
+    build_sibling_matrix,
+    RELATION_STR_TO_INT,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -277,14 +283,25 @@ class HRDocDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        lines = sample['lines']
+
+        # 提取 parent_ids 和 relations
+        parent_ids = []
+        relations = []
+        for line in lines:
+            parent_ids.append(line.get('parent_id', -1))
+            rel_str = line.get('relation', '')
+            relations.append(RELATION_STR_TO_INT.get(rel_str, 0))  # 默认 contain
 
         return {
             'file_name': sample['file_name'],
-            'bboxes': [line['bbox'] for line in sample['lines']],
-            'texts': [line['text'] for line in sample['lines']],
+            'bboxes': [line['bbox'] for line in lines],
+            'texts': [line['text'] for line in lines],
             'class_labels': sample['class_labels'],
             'region_ids': sample['region_ids'],
             'successor_labels': sample['successor_labels'],
+            'parent_ids': parent_ids,
+            'relations': relations,
             'num_lines': sample['num_lines'],
         }
 
@@ -317,6 +334,10 @@ class HRDocCollator:
         class_labels = torch.full((batch_size, max_lines), -1, dtype=torch.long)
         line_mask = torch.zeros(batch_size, max_lines, dtype=torch.bool)
 
+        # Construct 训练需要的 tensors
+        parent_ids = torch.full((batch_size, max_lines), -1, dtype=torch.long)
+        sibling_labels = torch.zeros(batch_size, max_lines, max_lines, dtype=torch.long)
+
         for i, sample in enumerate(batch):
             n_lines = min(sample['num_lines'], max_lines)
 
@@ -343,6 +364,32 @@ class HRDocCollator:
             # Mask
             line_mask[i, :n_lines] = True
 
+            # 使用 tree_utils 计算层级 parent_ids 和 sibling_labels
+            sample_parent_ids = sample.get('parent_ids', [])[:n_lines]
+            sample_relations = sample.get('relations', [])[:n_lines]
+
+            if sample_parent_ids and sample_relations:
+                # 修正超出范围的 parent_id
+                fixed_parent_ids = [p if p < n_lines else -1 for p in sample_parent_ids]
+
+                hierarchical_parents, sibling_groups = resolve_hierarchical_parents_and_siblings(
+                    fixed_parent_ids, sample_relations
+                )
+
+                # 填充 parent_ids
+                for j, hp in enumerate(hierarchical_parents):
+                    if j < max_lines:
+                        parent_ids[i, j] = hp
+
+                # 填充 sibling_labels
+                for group in sibling_groups:
+                    for j_idx in range(len(group)):
+                        for k_idx in range(j_idx + 1, len(group)):
+                            j, k = group[j_idx], group[k_idx]
+                            if j < max_lines and k < max_lines:
+                                sibling_labels[i, j, k] = 1
+                                sibling_labels[i, k, j] = 1
+
         return {
             'bboxes': bboxes,
             'region_ids': region_ids,
@@ -350,6 +397,8 @@ class HRDocCollator:
             'class_labels': class_labels,
             'line_mask': line_mask,
             'texts': [s['texts'] for s in batch],
+            'parent_ids': parent_ids,
+            'sibling_labels': sibling_labels,
         }
 
 
@@ -384,6 +433,10 @@ class HRDocLayoutXLMCollator:
         class_labels = torch.full((batch_size, max_lines_in_batch), -1, dtype=torch.long)
         line_mask = torch.zeros(batch_size, max_lines_in_batch, dtype=torch.bool)
         line_bboxes = torch.zeros(batch_size, max_lines_in_batch, 4, dtype=torch.float)
+
+        # Construct 训练需要的 tensors
+        parent_ids = torch.full((batch_size, max_lines_in_batch), -1, dtype=torch.long)
+        sibling_labels = torch.zeros(batch_size, max_lines_in_batch, max_lines_in_batch, dtype=torch.long)
 
         for i, sample in enumerate(batch):
             texts = sample['texts']
@@ -475,6 +528,37 @@ class HRDocLayoutXLMCollator:
 
                     line_mask[i, j] = True
 
+            # 使用 tree_utils 计算层级 parent_ids 和 sibling_labels
+            sample_parent_ids = sample.get('parent_ids', [])[:actual_n_lines]
+            sample_relations = sample.get('relations', [])[:actual_n_lines]
+
+            if sample_parent_ids and sample_relations:
+                # 修正超出范围的 parent_id
+                fixed_parent_ids = []
+                for pid in sample_parent_ids:
+                    if pid >= actual_n_lines:
+                        fixed_parent_ids.append(-1)
+                    else:
+                        fixed_parent_ids.append(pid)
+
+                hierarchical_parents, sibling_groups = resolve_hierarchical_parents_and_siblings(
+                    fixed_parent_ids, sample_relations
+                )
+
+                # 填充 parent_ids
+                for j, hp in enumerate(hierarchical_parents):
+                    if j < max_lines_in_batch:
+                        parent_ids[i, j] = hp
+
+                # 填充 sibling_labels
+                for group in sibling_groups:
+                    for j_idx in range(len(group)):
+                        for k_idx in range(j_idx + 1, len(group)):
+                            j, k = group[j_idx], group[k_idx]
+                            if j < max_lines_in_batch and k < max_lines_in_batch:
+                                sibling_labels[i, j, k] = 1
+                                sibling_labels[i, k, j] = 1  # 对称
+
         return {
             'input_ids': torch.tensor(all_input_ids, dtype=torch.long),
             'bbox': torch.tensor(all_bbox, dtype=torch.long),
@@ -485,6 +569,8 @@ class HRDocLayoutXLMCollator:
             'class_labels': class_labels,
             'line_mask': line_mask,
             'line_bboxes': line_bboxes,
+            'parent_ids': parent_ids,
+            'sibling_labels': sibling_labels,
         }
 
 
@@ -660,12 +746,15 @@ if __name__ == '__main__':
         print(f"  successor_labels: {batch['successor_labels'].shape}")
         print(f"  class_labels: {batch['class_labels'].shape}")
         print(f"  line_mask: {batch['line_mask'].shape}")
+        print(f"  parent_ids: {batch['parent_ids'].shape}")
+        print(f"  sibling_labels: {batch['sibling_labels'].shape}")
         print(f"  Valid lines: {batch['line_mask'].sum()}")
 
-        # Check successor labels
+        # Check parent and sibling labels
         for i in range(batch['bboxes'].size(0)):
             valid = batch['line_mask'][i].sum().item()
-            succs = batch['successor_labels'][i, :int(valid)]
-            has_succ = (succs >= 0).sum().item()
-            print(f"  Sample {i}: {valid} lines, {has_succ} have successors")
+            parents = batch['parent_ids'][i, :int(valid)]
+            has_parent = (parents >= 0).sum().item()
+            sibling_count = batch['sibling_labels'][i].sum().item() // 2  # 对称矩阵
+            print(f"  Sample {i}: {valid} lines, {has_parent} have parent, {sibling_count} sibling pairs")
         break
