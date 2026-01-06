@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 import torch
 from datasets import load_dataset, Dataset, DatasetDict, concatenate_datasets
 
+from layoutlmft.data.text_cleaner import clean_text, is_valid_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,7 +166,13 @@ def load_hrdoc_raw_datasets_batched(
                                 label = LABEL2ID.get(label, 0)
 
                             words = item.get("words", [{"text": item.get("text", ""), "box": item.get("box", [0,0,0,0])}])
-                            words = [w for w in words if w.get("text", "").strip()]
+                            # 清洗文本并过滤无效行
+                            cleaned_words = []
+                            for w in words:
+                                cleaned = clean_text(w.get("text", ""))
+                                if is_valid_text(cleaned):
+                                    cleaned_words.append({"text": cleaned, "box": w.get("box", [0,0,0,0])})
+                            words = cleaned_words
                             if not words:
                                 words = [{"text": "[EMPTY]", "box": item.get("box", [0,0,0,0])}]
 
