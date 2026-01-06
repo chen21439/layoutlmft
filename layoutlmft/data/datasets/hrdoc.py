@@ -12,6 +12,7 @@ import os
 import datasets
 
 from layoutlmft.data.utils import load_image, normalize_bbox, group_items_by_page
+from layoutlmft.data.text_cleaner import clean_text, is_valid_text
 from layoutlmft.data.labels import (
     LABEL_LIST,
     NUM_LABELS,
@@ -336,17 +337,13 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                             "text": item["text"],
                             "box": item["box"]
                         }]
-                    def is_valid_text(text):
-                        """检查文本是否有效（非空且非乱码）"""
-                        text = text.strip()
-                        if not text:
-                            return False
-                        # 检查是否全是乱码字符（replacement character 等）
-                        if not any(c.isalnum() for c in text):
-                            return False
-                        return True
-
-                    words = [w for w in words if is_valid_text(w["text"])]
+                    # 清洗文本并过滤无效行
+                    cleaned_words = []
+                    for w in words:
+                        cleaned = clean_text(w["text"])
+                        if is_valid_text(cleaned):
+                            cleaned_words.append({"text": cleaned, "box": w["box"]})
+                    words = cleaned_words
                     if len(words) == 0:
                         # 空行或乱码行用占位符代替，保持 line_id 连续（不跳过）
                         words = [{"text": "[EMPTY]", "box": item.get("box", [0, 0, 0, 0])}]
