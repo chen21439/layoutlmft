@@ -159,6 +159,17 @@ class LinePooling(nn.Module):
         # ========== Step 7: 生成 mask ==========
         line_mask = line_counts > 0
 
+        # Debug: 检查是否有 False 值（理论上不应该有）
+        if line_mask.sum() < num_lines:
+            import logging
+            logger = logging.getLogger(__name__)
+            zero_indices = (line_counts == 0).nonzero(as_tuple=True)[0]
+            logger.warning(f"[LinePooling] mask 中有 {num_lines - line_mask.sum().item()} 个 False!")
+            logger.warning(f"[LinePooling] num_lines={num_lines}, mask.sum()={line_mask.sum().item()}")
+            logger.warning(f"[LinePooling] zero_indices={zero_indices.tolist()[:10]}...")
+            logger.warning(f"[LinePooling] unique_line_ids at zero_indices={unique_line_ids[zero_indices].tolist()[:10]}...")
+            logger.warning(f"[LinePooling] line_indices unique={line_indices.unique().tolist()[:20]}...")
+
         return line_features, line_mask
 
     def get_line_ids_mapping(self, line_ids: torch.Tensor) -> torch.Tensor:
