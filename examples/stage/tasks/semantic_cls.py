@@ -127,12 +127,6 @@ class SemanticClassificationTask:
             if i < len(line_id_list):
                 line_classes[line_id_list[i]] = pred
 
-        # 调试日志
-        print(f"[SemanticCls Debug] line_preds length: {len(line_preds)}, line_id_list length: {len(line_id_list)}")
-        print(f"[SemanticCls Debug] line_preds[:10]: {line_preds[:10]}")
-        print(f"[SemanticCls Debug] line_id_list[:10]: {line_id_list[:10]}")
-        print(f"[SemanticCls Debug] line_classes sample: {dict(list(line_classes.items())[:5])}")
-
         return line_classes
 
     def _decode_token_level(

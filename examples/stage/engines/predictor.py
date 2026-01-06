@@ -205,47 +205,18 @@ class Predictor:
             cls_logits = cls_logits.unsqueeze(0)  # [1, L, num_classes]
 
         if use_gru:
-            # 调试日志：Stage 3 输入
-            print(f"\n[Stage3 Debug] Input shapes:")
-            print(f"  line_features: {line_features.shape}")  # 应该是 [426, H]
-            print(f"  line_mask: {line_mask.shape}, sum={line_mask.sum().item()}")  # 应该是 [426], sum=426
-            print(f"  cls_logits: {cls_logits.shape if cls_logits is not None else None}")  # 应该是 [1, 426, 14]
-
             parent_logits, gru_hidden = self.model.stage3(
                 line_features.unsqueeze(0),
                 line_mask.unsqueeze(0),
                 return_gru_hidden=True,
-                cls_logits=cls_logits  # 传入分类 logits 用于 soft-mask
+                cls_logits=cls_logits
             )
-
-            # 调试日志：Stage 3 输出
-            print(f"[Stage3 Debug] Output shapes:")
-            print(f"  parent_logits: {parent_logits.shape}")  # 应该是 [1, 427, 427]
-            print(f"  gru_hidden: {gru_hidden.shape}")  # 应该是 [1, 427, 512]
-
-            # 打印 parent_logits 的一些统计
-            print(f"[Stage3 Debug] parent_logits stats:")
-            print(f"  min={parent_logits.min().item():.4f}, max={parent_logits.max().item():.4f}")
-            # 打印第10行的候选父节点分数
-            if parent_logits.shape[1] > 10:
-                row10_logits = parent_logits[0, 10, :10]  # 第10行（line_id=9）的候选父节点
-                print(f"  Row 10 logits (candidates 0-9): {row10_logits.tolist()}")
-                print(f"  Row 10 argmax: {row10_logits.argmax().item()}")
 
             gru_hidden = gru_hidden[0]  # [L+1, gru_hidden_size]
 
             # 复用 tasks/parent_finding.py 的 decode 逻辑
             parent_preds = self.parent_task.decode(parent_logits, line_mask.unsqueeze(0))
             pred_parents = parent_preds[0].tolist()  # [L] -> list
-
-            # 调试日志：预测结果统计
-            from collections import Counter
-            parent_counter = Counter(pred_parents)
-            print(f"[Stage3 Debug] Prediction stats:")
-            print(f"  pred_parents length: {len(pred_parents)}")
-            print(f"  pred_parents[:20]: {pred_parents[:20]}")
-            print(f"  ROOT (-1) count: {parent_counter[-1]}")
-            print(f"  Non-ROOT count: {len(pred_parents) - parent_counter[-1]}")
         else:
             for child_idx in range(1, actual_num_lines):
                 parent_candidates = line_features[:child_idx]
@@ -445,9 +416,7 @@ class Predictor:
         # 标签映射
         try:
             from layoutlmft.data.labels import ID2LABEL
-            print(f"[DEBUG] ID2LABEL loaded successfully: {ID2LABEL}")
-        except ImportError as e:
-            print(f"[DEBUG] Failed to import ID2LABEL: {e}")
+        except ImportError:
             ID2LABEL = {i: f"cls_{i}" for i in range(14)}
 
         RELATION_LABELS = {0: "connect", 1: "contain", 2: "equality"}
@@ -480,25 +449,11 @@ class Predictor:
                     total_pages += num_chunks  # chunks 约等于页数
                     total_lines += pred.num_lines
 
-                    print(f"\n[Predictor] Processing: {doc_name}")
-                    print(f"  num_lines: {pred.num_lines}, chunks: {num_chunks}")
-                    # 调试：打印部分 line_classes
-                    sample_classes = {k: v for i, (k, v) in enumerate(pred.line_classes.items()) if i < 10}
-                    print(f"  line_classes sample (first 10): {sample_classes}")
-                    # 调试：统计各类别预测数量
-                    from collections import Counter
-                    class_counter = Counter(pred.line_classes.values())
-                    class_stats = {ID2LABEL.get(k, f"cls_{k}"): v for k, v in sorted(class_counter.items())}
-                    print(f"  class distribution: {class_stats}")
-
                     # 加载原始 JSON
                     original_data = []
                     if json_path and os.path.exists(json_path):
                         with open(json_path, 'r', encoding='utf-8') as f:
                             original_data = json.load(f)
-                        print(f"  Loaded original JSON: {len(original_data)} items")
-                    else:
-                        print(f"  Warning: Original JSON not found: {json_path}")
 
                     # 构建预测结果数组
                     sorted_line_ids = sorted(pred.line_classes.keys())
@@ -521,21 +476,6 @@ class Predictor:
                             "parent_id": pred_parent,
                             "relation": relation_str,
                         }
-
-                    # 调试：打印部分 pred_map
-                    sample_pred_map = {k: v for i, (k, v) in enumerate(pred_map.items()) if i < 5}
-                    print(f"  pred_map sample (first 5): {sample_pred_map}")
-
-                    # 调试：统计 parent_id 分布，特别是 -1 的情况
-                    parent_counter = Counter(pred.line_parents)
-                    print(f"  parent_id=-1 count: {parent_counter.get(-1, 0)}")
-                    # 打印 parent_id=54 的元素
-                    lines_with_parent_54 = [(line_id, pred_map[line_id]) for line_id in sorted_line_ids
-                                            if pred_map[line_id]['parent_id'] == 54]
-                    if lines_with_parent_54:
-                        print(f"  Lines with parent_id=54 ({len(lines_with_parent_54)}):")
-                        for line_id, info in lines_with_parent_54[:10]:
-                            print(f"    line_id={line_id}: {info}")
 
                     # 将预测结果添加到原始数据中
                     output_data = []
@@ -560,7 +500,6 @@ class Predictor:
                         json.dump(output_data, f, ensure_ascii=False, indent=2)
 
                     output_files.append(output_file)
-                    print(f"  Saved: {output_file} ({len(output_data)} items)")
 
         # 计算推理时间
         end_time = time.time()
