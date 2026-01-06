@@ -14,6 +14,7 @@ from .parent_finding import (
     build_child_parent_matrix_from_dataset,
     ParentFindingTask,
 )
+from .losses import FocalLoss, ClassBalancedLoss, BalancedFocalLoss, get_balanced_loss
 
 __all__ = [
     # Semantic Classification
@@ -22,4 +23,9 @@ __all__ = [
     "ChildParentDistributionMatrix",
     "build_child_parent_matrix_from_dataset",
     "ParentFindingTask",
+    # Losses
+    "FocalLoss",
+    "ClassBalancedLoss",
+    "BalancedFocalLoss",
+    "get_balanced_loss",
 ]

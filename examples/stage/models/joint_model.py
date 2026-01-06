@@ -191,11 +191,14 @@ class JointModel(nn.Module):
         weight_tensor = torch.tensor(relation_class_weights, dtype=torch.float32)
 
         if use_focal_loss:
-            from layoutlmft.models.relation_classifier import FocalLoss
+            from tasks.losses import FocalLoss
             # FocalLoss 使用 alpha 参数作为类别权重
             self.relation_criterion = FocalLoss(alpha=weight_tensor, gamma=2.0)
+            # Stage1 分类也使用 FocalLoss（论文设计）
+            self.cls_criterion = FocalLoss(gamma=2.0, ignore_index=-100)
         else:
             self.relation_criterion = nn.CrossEntropyLoss(weight=weight_tensor, ignore_index=-100)
+            self.cls_criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
     def freeze_stage1(self):
         """
@@ -569,7 +572,8 @@ class JointModel(nn.Module):
                             if valid_indices.any():
                                 valid_logits = logits[valid_indices]
                                 valid_targets = sample_labels[valid_indices]
-                                loss = F.cross_entropy(valid_logits, valid_targets)
+                                # 使用 FocalLoss（论文设计，解决类别不平衡）
+                                loss = self.cls_criterion(valid_logits, valid_targets)
                                 cls_loss = cls_loss + loss
 
                                 preds = valid_logits.argmax(dim=-1)
@@ -604,12 +608,11 @@ class JointModel(nn.Module):
                         token_logits = None
 
                     if token_logits is not None:
-                        # 计算 token-level 损失
-                        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                        # 计算 token-level 损失（使用 FocalLoss）
                         active_loss = attention_mask.view(-1) == 1
                         active_logits = token_logits.view(-1, self.num_classes)[active_loss]
                         active_labels = labels.view(-1)[active_loss]
-                        cls_loss = loss_fct(active_logits, active_labels)
+                        cls_loss = self.cls_criterion(active_logits, active_labels)
 
                         # 计算准确率
                         valid_mask = active_labels != -100
