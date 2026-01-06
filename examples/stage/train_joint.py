@@ -512,6 +512,7 @@ def main():
     # 创建 callbacks（根据 mode 选择）
     # 注意：评估 Callback 需要 trainer 引用用于保存 best model，在 trainer 创建后添加
     callbacks = [JointLoggingCallback(mode=model_args.mode), AMPDiagnosticCallback()]
+    eval_callback = None  # 保存评估回调引用，用于获取 best checkpoint 信息
 
     # 创建 Trainer
     trainer = JointTrainer(
@@ -532,16 +533,16 @@ def main():
     if eval_dataloader is not None:
         if model_args.mode == "stage1":
             # Stage1 模式：分类评估，best 指标固定为 line_macro_f1
-            stage1_callback = Stage1EvaluationCallback(
+            eval_callback = Stage1EvaluationCallback(
                 eval_dataloader=eval_dataloader,
                 output_dir=training_args.output_dir,
                 trainer=trainer,
             )
-            trainer.add_callback(stage1_callback)
+            trainer.add_callback(eval_callback)
         else:
-            # Joint/Stage34 模式：E2E 评估，best 指标可配置（默认 parent_accuracy）
+            # Joint/Stage34 模式：E2E 评估，best 指标可配置（默认 section_edge）
             runs_dir = os.path.join(STAGE_ROOT, "runs") if training_args.save_predictions else None
-            e2e_callback = E2EEvaluationCallback(
+            eval_callback = E2EEvaluationCallback(
                 eval_dataloader=eval_dataloader,
                 data_collator=data_collator,
                 compute_teds=not training_args.quick,
@@ -550,7 +551,7 @@ def main():
                 best_model_metric=training_args.best_model_metric,
                 trainer=trainer,
             )
-            trainer.add_callback(e2e_callback)
+            trainer.add_callback(eval_callback)
 
     # 训练前评估
     if training_args.eval_before_train and eval_dataset is not None:
@@ -570,15 +571,33 @@ def main():
     trainer.save_metrics("train", metrics)
 
     # 最终评估
+    eval_metrics = {}
     if eval_dataset is not None:
         logger.info("Running final evaluation...")
-        trainer.evaluate()
+        eval_metrics = trainer.evaluate()
+        # 保存 eval metrics 到文件
+        trainer.log_metrics("eval", eval_metrics)
+        trainer.save_metrics("eval", eval_metrics)
+
+    # 获取 best checkpoint 信息（从评估回调获取）
+    best_checkpoint = "final"
+    best_metrics = {"train_loss": float(metrics.get("train_loss", 0.0))}
+    if eval_callback is not None and eval_callback.best_step is not None:
+        best_checkpoint = f"step-{eval_callback.best_step}"
+        best_metrics.update({
+            "best_metric": eval_callback.best_model_metric,
+            "best_value": eval_callback.best_metric_value,
+        })
+        # 添加 eval metrics（去掉 eval_ 前缀）
+        for k, v in eval_metrics.items():
+            if k.startswith("eval_"):
+                best_metrics[k[5:]] = v
 
     # 更新实验状态
     exp_manager.mark_stage_completed(
         training_args.exp, stage_name, data_args.dataset,
-        best_checkpoint="final",
-        metrics={"train_loss": float(metrics.get("train_loss", 0.0))},
+        best_checkpoint=best_checkpoint,
+        metrics=best_metrics,
     )
 
     logger.info("=" * 60)
