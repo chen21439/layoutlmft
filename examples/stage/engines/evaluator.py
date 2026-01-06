@@ -65,6 +65,12 @@ class EvaluationOutput:
     relation_macro_f1: float = 0.0
     relation_micro_f1: float = 0.0
 
+    # Section 类别单独统计（用于监控难点类别）
+    section_parent_accuracy: float = 0.0
+    section_relation_accuracy: float = 0.0
+    section_edge_accuracy: float = 0.0  # parent 和 relation 都正确
+    section_count: int = 0
+
     # TEDS 指标
     teds_score: Optional[float] = None
 
@@ -137,6 +143,15 @@ class Evaluator:
         all_pred_parents = []
         all_gt_relations = []
         all_pred_relations = []
+
+        # Section 类别单独统计（用于监控难点类别）
+        SECTION_ID = LABEL2ID.get("section", 4)
+        section_gt_parents = []
+        section_pred_parents = []
+        section_gt_relations = []
+        section_pred_relations = []
+        # Section edge: (gt_parent, pred_parent, gt_rel, pred_rel) 用于计算 edge_acc
+        section_edges = []
 
         # 收集预测结果用于保存
         all_predictions = []
@@ -244,6 +259,11 @@ class Evaluator:
 
                         # 收集 parent 类别统计信息
                         child_class = gt["classes"].get(child_line_id, -1)
+
+                        # Section 类别单独统计
+                        if child_class == SECTION_ID:
+                            section_gt_parents.append(gt_parent)
+                            section_pred_parents.append(pred_parent)
                         gt_parent_line_id = gt_line_ids[gt_parent] if gt_parent >= 0 and gt_parent < len(gt_line_ids) else None
                         gt_parent_class = gt["classes"].get(gt_parent_line_id, None) if gt_parent_line_id is not None else None
                         pred_parent_line_id = gt_line_ids[pred_parent] if pred_parent >= 0 and pred_parent < len(gt_line_ids) else None
@@ -295,6 +315,15 @@ class Evaluator:
                             continue
                         all_gt_relations.append(gt_rel)
                         all_pred_relations.append(pred_rel)
+
+                        # Section 类别单独统计
+                        child_class = gt["classes"].get(child_line_id, -1)
+                        if child_class == SECTION_ID:
+                            section_gt_relations.append(gt_rel)
+                            section_pred_relations.append(pred_rel)
+                            # 同时记录 parent 用于计算 edge_acc
+                            pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
+                            section_edges.append((gt_parent, pred_parent, gt_rel, pred_rel))
 
                     # 收集用于 TEDS 计算的文档级数据
                     if compute_teds and TEDS_AVAILABLE:
@@ -406,6 +435,20 @@ class Evaluator:
         output.num_lines = len(all_gt_classes)
         output.num_parent_pairs = len(all_gt_parents)
         output.num_relation_pairs = len(all_gt_relations)
+
+        # 计算 Section 指标
+        output.section_count = len(section_gt_parents)
+        if section_gt_parents:
+            output.section_parent_accuracy = self._accuracy(section_gt_parents, section_pred_parents)
+        if section_gt_relations:
+            output.section_relation_accuracy = self._accuracy(section_gt_relations, section_pred_relations)
+        # Section edge accuracy: parent 和 relation 都正确才算对
+        if section_edges:
+            correct_edges = sum(
+                1 for gt_p, pred_p, gt_r, pred_r in section_edges
+                if gt_p == pred_p and gt_r == pred_r
+            )
+            output.section_edge_accuracy = correct_edges / len(section_edges)
 
         # 计算 TEDS 分数
         if compute_teds and TEDS_AVAILABLE and teds_gt_docs and teds_pred_docs:

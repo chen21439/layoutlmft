@@ -11,6 +11,7 @@
 """
 
 import logging
+import os
 from typing import Dict, Optional
 
 import torch
@@ -153,13 +154,23 @@ class E2EEvaluationCallback(TrainerCallback):
         compute_teds: bool = False,
         save_predictions: bool = False,
         output_dir: str = None,
+        # Best model 保存配置
+        best_model_metric: str = "parent_accuracy",
+        trainer=None,  # JointTrainer 实例，用于保存模型
     ):
         self.eval_dataloader = eval_dataloader
         self.data_collator = data_collator
         self.compute_teds = compute_teds
         self.save_predictions = save_predictions
         self.output_dir = output_dir
-        # 历史评估记录：[(step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds), ...]
+
+        # Best model 配置（始终保存，指标越大越好）
+        self.best_model_metric = best_model_metric
+        self.trainer = trainer
+        self.best_metric_value = float('-inf')
+        self.best_step = None
+
+        # 历史评估记录：[(step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent, sec_rel), ...]
         self.history = []
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
@@ -197,6 +208,10 @@ class E2EEvaluationCallback(TrainerCallback):
         rel_micro = output.relation_micro_f1 * 100
         teds = output.teds_score * 100 if output.teds_score is not None else None
         num_lines = output.num_lines
+        # Section 指标
+        sec_parent_acc = output.section_parent_accuracy * 100
+        sec_rel_acc = output.section_relation_accuracy * 100
+        sec_edge_acc = output.section_edge_accuracy * 100
 
         def fmt_delta(d, threshold=0.5):
             if d >= threshold:
@@ -222,6 +237,8 @@ class E2EEvaluationCallback(TrainerCallback):
             avg_rel_macro = sum(h[5] for h in recent) / avg_n
             avg_rel_micro = sum(h[6] for h in recent) / avg_n
             avg_rel_acc = sum(h[7] for h in recent) / avg_n
+            avg_sec_parent = sum(h[9] for h in recent) / avg_n
+            avg_sec_rel = sum(h[10] for h in recent) / avg_n
 
             delta_line_macro = line_macro - avg_line_macro
             delta_line_micro = line_micro - avg_line_micro
@@ -230,6 +247,8 @@ class E2EEvaluationCallback(TrainerCallback):
             delta_rel_macro = rel_macro - avg_rel_macro
             delta_rel_micro = rel_micro - avg_rel_micro
             delta_rel_acc = rel_acc - avg_rel_acc
+            delta_sec_parent = sec_parent_acc - avg_sec_parent
+            delta_sec_rel = sec_rel_acc - avg_sec_rel
 
             logger.info(f"║  Metric          │ Current  │  Avg({avg_n})  │  Delta       ║")
             logger.info("║──────────────────┼──────────┼──────────┼──────────────║")
@@ -237,11 +256,13 @@ class E2EEvaluationCallback(TrainerCallback):
             logger.info(f"║  Line(MicroF1)   │  {line_micro:>5.1f}%  │  {avg_line_micro:>5.1f}%  │  {fmt_delta(delta_line_micro):>6}      ║")
             logger.info(f"║  Line(Acc)       │  {line_acc:>5.1f}%  │  {avg_line_acc:>5.1f}%  │  {fmt_delta(delta_line_acc):>6}      ║")
             logger.info(f"║  Parent(Acc)     │  {parent_acc:>5.1f}%  │  {avg_parent:>5.1f}%  │  {fmt_delta(delta_parent):>6}      ║")
+            logger.info(f"║  Sec-Parent(Acc) │  {sec_parent_acc:>5.1f}%  │  {avg_sec_parent:>5.1f}%  │  {fmt_delta(delta_sec_parent):>6}      ║")
             logger.info(f"║  Rel(MacroF1)    │  {rel_macro:>5.1f}%  │  {avg_rel_macro:>5.1f}%  │  {fmt_delta(delta_rel_macro):>6}      ║")
             logger.info(f"║  Rel(MicroF1)    │  {rel_micro:>5.1f}%  │  {avg_rel_micro:>5.1f}%  │  {fmt_delta(delta_rel_micro):>6}      ║")
             logger.info(f"║  Rel(Acc)        │  {rel_acc:>5.1f}%  │  {avg_rel_acc:>5.1f}%  │  {fmt_delta(delta_rel_acc):>6}      ║")
+            logger.info(f"║  Sec-Rel(Acc)    │  {sec_rel_acc:>5.1f}%  │  {avg_sec_rel:>5.1f}%  │  {fmt_delta(delta_sec_rel):>6}      ║")
 
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel_macro)})"
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel_macro)}) | SecP={sec_parent_acc:.1f}%"
         else:
             logger.info(f"║  Metric          │ Current  │                           ║")
             logger.info("║──────────────────┼──────────┼───────────────────────────║")
@@ -249,10 +270,12 @@ class E2EEvaluationCallback(TrainerCallback):
             logger.info(f"║  Line(MicroF1)   │  {line_micro:>5.1f}%  │                           ║")
             logger.info(f"║  Line(Acc)       │  {line_acc:>5.1f}%  │                           ║")
             logger.info(f"║  Parent(Acc)     │  {parent_acc:>5.1f}%  │                           ║")
+            logger.info(f"║  Sec-Parent(Acc) │  {sec_parent_acc:>5.1f}%  │                           ║")
             logger.info(f"║  Rel(MacroF1)    │  {rel_macro:>5.1f}%  │                           ║")
             logger.info(f"║  Rel(MicroF1)    │  {rel_micro:>5.1f}%  │                           ║")
             logger.info(f"║  Rel(Acc)        │  {rel_acc:>5.1f}%  │                           ║")
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}%"
+            logger.info(f"║  Sec-Rel(Acc)    │  {sec_rel_acc:>5.1f}%  │                           ║")
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}% | SecP={sec_parent_acc:.1f}%"
 
         # TEDS 分数（如果计算了）
         if teds is not None:
@@ -265,7 +288,51 @@ class E2EEvaluationCallback(TrainerCallback):
         logger.info("╚════════════════════════════════════════════════════════════════════════╝")
         logger.info(summary)
 
-        self.history.append((global_step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds))
+        # history: (step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent, sec_rel)
+        self.history.append((global_step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent_acc, sec_rel_acc))
+
+        # Best model 保存
+        if self.trainer is not None:
+            self._maybe_save_best_model(
+                global_step=global_step,
+                metrics={
+                    "parent_accuracy": parent_acc,
+                    "relation_macro_f1": rel_macro,
+                    "section_parent": sec_parent_acc,
+                    "section_edge": sec_edge_acc,  # parent + relation 都对
+                    "teds": teds if teds is not None else 0.0,
+                    "line_macro_f1": line_macro,
+                },
+                model=model,
+            )
+
+    def _maybe_save_best_model(self, global_step: int, metrics: dict, model):
+        """检查是否需要保存 best model（指标越大越好）"""
+        current_value = metrics.get(self.best_model_metric, 0.0)
+
+        if current_value > self.best_metric_value:
+            self.best_metric_value = current_value
+            self.best_step = global_step
+
+            # 保存到 output_dir/best/
+            best_dir = os.path.join(self.output_dir, "best")
+            logger.info(f"")
+            logger.info(f"🏆 New best model! {self.best_model_metric}={current_value:.2f}% at step {global_step}")
+            logger.info(f"   Saving to: {best_dir}")
+
+            # 调用 trainer 的保存方法
+            self.trainer._save(output_dir=best_dir)
+
+            # 保存 best_info.json 记录元信息
+            import json
+            best_info = {
+                "step": global_step,
+                "metric": self.best_model_metric,
+                "value": current_value,
+                "all_metrics": metrics,
+            }
+            with open(os.path.join(best_dir, "best_info.json"), "w") as f:
+                json.dump(best_info, f, indent=2)
 
 
 class Stage1EvaluationCallback(TrainerCallback):
@@ -280,9 +347,23 @@ class Stage1EvaluationCallback(TrainerCallback):
     用于 --mode stage1 训练时。
     """
 
-    def __init__(self, eval_dataloader, id2label: Dict[int, str] = None):
+    def __init__(
+        self,
+        eval_dataloader,
+        id2label: Dict[int, str] = None,
+        output_dir: str = None,
+        trainer=None,  # JointTrainer 实例，用于保存 best model
+    ):
         self.eval_dataloader = eval_dataloader
         self.id2label = id2label
+        self.output_dir = output_dir
+        self.trainer = trainer
+
+        # Best model 配置（stage1 固定用 line_macro_f1）
+        self.best_model_metric = "line_macro_f1"
+        self.best_metric_value = float('-inf')
+        self.best_step = None
+
         self.history = []  # [(step, line_macro, line_micro, line_acc), ...]
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
@@ -357,3 +438,39 @@ class Stage1EvaluationCallback(TrainerCallback):
         logger.info("╚══════════════════════════════════════════════════════════════╝")
 
         self.history.append((global_step, line_macro, line_micro, line_acc))
+
+        # Best model 保存（stage1 用 line_macro_f1）
+        if self.trainer is not None and self.output_dir is not None:
+            self._maybe_save_best_model(
+                global_step=global_step,
+                metrics={"line_macro_f1": line_macro, "line_micro_f1": line_micro, "line_accuracy": line_acc},
+                model=model,
+            )
+
+    def _maybe_save_best_model(self, global_step: int, metrics: dict, model):
+        """检查是否需要保存 best model（指标越大越好）"""
+        current_value = metrics.get(self.best_model_metric, 0.0)
+
+        if current_value > self.best_metric_value:
+            self.best_metric_value = current_value
+            self.best_step = global_step
+
+            # 保存到 output_dir/best/
+            best_dir = os.path.join(self.output_dir, "best")
+            logger.info(f"")
+            logger.info(f"🏆 New best model! {self.best_model_metric}={current_value:.2f}% at step {global_step}")
+            logger.info(f"   Saving to: {best_dir}")
+
+            # 调用 trainer 的保存方法
+            self.trainer._save(output_dir=best_dir)
+
+            # 保存 best_info.json 记录元信息
+            import json
+            best_info = {
+                "step": global_step,
+                "metric": self.best_model_metric,
+                "value": current_value,
+                "all_metrics": metrics,
+            }
+            with open(os.path.join(best_dir, "best_info.json"), "w") as f:
+                json.dump(best_info, f, indent=2)

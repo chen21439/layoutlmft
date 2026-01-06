@@ -168,6 +168,11 @@ class JointTrainingArguments(TrainingArguments):
     # Stage 3/4 学习率
     learning_rate_stage34: float = field(default=5e-4, metadata={"help": "Learning rate for Stage 3/4"})
 
+    # Best model 保存（始终保存，指标越大越好）
+    best_model_metric: str = field(default="section_edge", metadata={
+        "help": "Metric for best model selection: section_edge (default), parent_accuracy, teds, section_parent, relation_macro_f1"
+    })
+
     # 功能开关
     eval_before_train: bool = field(default=False, metadata={"help": "Run evaluation before training"})
     save_predictions: bool = field(default=False, metadata={"help": "Save prediction results"})
@@ -505,21 +510,8 @@ def main():
         )
 
     # 创建 callbacks（根据 mode 选择）
+    # 注意：评估 Callback 需要 trainer 引用用于保存 best model，在 trainer 创建后添加
     callbacks = [JointLoggingCallback(mode=model_args.mode), AMPDiagnosticCallback()]
-    if eval_dataloader is not None:
-        if model_args.mode == "stage1":
-            # Stage1 模式只评估分类指标
-            callbacks.append(Stage1EvaluationCallback(eval_dataloader=eval_dataloader))
-        else:
-            # Joint/Stage34 模式使用 E2E 评估
-            runs_dir = os.path.join(STAGE_ROOT, "runs") if training_args.save_predictions else None
-            callbacks.append(E2EEvaluationCallback(
-                eval_dataloader=eval_dataloader,
-                data_collator=data_collator,
-                compute_teds=not training_args.quick,
-                save_predictions=training_args.save_predictions,
-                output_dir=runs_dir,
-            ))
 
     # 创建 Trainer
     trainer = JointTrainer(
@@ -535,6 +527,30 @@ def main():
         compute_metrics=None,  # 使用 E2EEvaluationCallback 的 line-level 评估
         callbacks=callbacks,
     )
+
+    # 添加评估 Callback（需要 trainer 引用用于保存 best model）
+    if eval_dataloader is not None:
+        if model_args.mode == "stage1":
+            # Stage1 模式：分类评估，best 指标固定为 line_macro_f1
+            stage1_callback = Stage1EvaluationCallback(
+                eval_dataloader=eval_dataloader,
+                output_dir=training_args.output_dir,
+                trainer=trainer,
+            )
+            trainer.add_callback(stage1_callback)
+        else:
+            # Joint/Stage34 模式：E2E 评估，best 指标可配置（默认 parent_accuracy）
+            runs_dir = os.path.join(STAGE_ROOT, "runs") if training_args.save_predictions else None
+            e2e_callback = E2EEvaluationCallback(
+                eval_dataloader=eval_dataloader,
+                data_collator=data_collator,
+                compute_teds=not training_args.quick,
+                save_predictions=training_args.save_predictions,
+                output_dir=runs_dir or training_args.output_dir,
+                best_model_metric=training_args.best_model_metric,
+                trainer=trainer,
+            )
+            trainer.add_callback(e2e_callback)
 
     # 训练前评估
     if training_args.eval_before_train and eval_dataset is not None:
