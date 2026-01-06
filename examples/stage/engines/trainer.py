@@ -188,16 +188,22 @@ class JointTrainer(Trainer):
             # 跳过 prediction_loop，直接调用 callbacks
             self.model.eval()
 
-            # 手动遍历 callbacks 并调用 on_evaluate（传递 model）
+            # 创建共享 metrics dict，让 callback 写入评估结果
+            metrics = {}
+
+            # 手动遍历 callbacks 并调用 on_evaluate（传递 model 和 metrics）
             for callback in self.callback_handler.callbacks:
                 if hasattr(callback, 'on_evaluate'):
                     callback.on_evaluate(
                         self.args, self.state, self.control,
-                        model=self.model, metrics={}
+                        model=self.model, metrics=metrics
                     )
 
+            # 添加 eval_ 前缀（HF 规范）
+            prefixed_metrics = {f"{metric_key_prefix}_{k}": v for k, v in metrics.items()}
+
             self.model.train()
-            return {}
+            return prefixed_metrics
         else:
             # 页面级别 + stage1 模式：正常评估
             return super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)

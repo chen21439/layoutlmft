@@ -495,17 +495,36 @@ class HRDocLayoutXLMCollator:
         self.max_lines = max_lines
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
-        # 复用 stage 的文档级别 tokenization 函数（全局索引）
         from examples.stage.data.hrdoc_data_loader import tokenize_page_with_line_boundary
 
         batch_size = len(batch)
 
+        # ========== Step 1: 构建完整的树 ==========
+        # 用完整文档的 parent_ids + relations 构建树
+        # 得到每个 line 的层级 parent 和 sibling 关系
+        all_hierarchical_parents = []  # [sample_idx][line_id] = parent_line_id
+        all_sibling_groups = []        # [sample_idx] = [[line_ids], ...]
+
+        for sample in batch:
+            n_lines = min(sample['num_lines'], self.max_lines)
+            sample_parent_ids = sample.get('parent_ids', [])[:n_lines]
+            sample_relations = sample.get('relations', [])[:n_lines]
+
+            if sample_parent_ids and sample_relations:
+                hierarchical_parents, sibling_groups = resolve_hierarchical_parents_and_siblings(
+                    sample_parent_ids, sample_relations
+                )
+                all_hierarchical_parents.append(hierarchical_parents)
+                all_sibling_groups.append(sibling_groups)
+            else:
+                all_hierarchical_parents.append([])
+                all_sibling_groups.append([])
+
+        # ========== Step 2: Tokenize + Chunk ==========
         all_input_ids = []
         all_bbox = []
         all_attention_mask = []
         all_line_ids = []
-        all_line_parent_ids = []  # 全局索引
-        all_line_relations = []
 
         for sample in batch:
             texts = sample['texts']
@@ -527,31 +546,27 @@ class HRDocLayoutXLMCollator:
             for cls in sample['class_labels'][:n_lines]:
                 class_labels_int.append(self.CLASS_TO_IDX.get(cls, self.CLASS_TO_IDX['unknown']))
 
-            # 调用 stage 的文档级别 tokenization 函数
+            # Tokenize + Chunk
             chunks = tokenize_page_with_line_boundary(
                 tokenizer=self.tokenizer,
                 tokens=texts[:n_lines],
                 bboxes=normalized_bboxes,
                 labels=class_labels_int,
-                line_ids=list(range(n_lines)),  # 全局 line_id
+                line_ids=list(range(n_lines)),
                 max_length=self.max_length,
                 label2id=None,
-                line_parent_ids=sample.get('parent_ids', [])[:n_lines],
-                line_relations=sample.get('relations', [])[:n_lines],
                 label_all_tokens=True,
             )
 
-            # 使用第一个 chunk
             if chunks:
                 chunk = chunks[0]
                 all_input_ids.append(chunk["input_ids"])
                 all_bbox.append(chunk["bbox"])
                 all_attention_mask.append(chunk["attention_mask"])
                 all_line_ids.append(chunk.get("line_ids", []))
-                all_line_parent_ids.append(chunk.get("line_parent_ids", []))
-                all_line_relations.append(chunk.get("line_relations", []))
 
-        # 确定 batch 内最大行数（基于实际 tokenize 的行数）
+        # ========== Step 3: 构建 tensor ==========
+        # 确定 batch 内最大行数
         max_lines_in_batch = 0
         for line_ids in all_line_ids:
             unique_lines = set(lid for lid in line_ids if lid >= 0)
@@ -560,9 +575,9 @@ class HRDocLayoutXLMCollator:
 
         max_lines_in_batch = min(max_lines_in_batch, self.max_lines)
         if max_lines_in_batch == 0:
-            max_lines_in_batch = 1  # 至少有一行
+            max_lines_in_batch = 1
 
-        # 创建 line-level tensors
+        # 创建 tensors
         region_ids = torch.full((batch_size, max_lines_in_batch), -1, dtype=torch.long)
         successor_labels = torch.full((batch_size, max_lines_in_batch), -1, dtype=torch.long)
         class_labels = torch.full((batch_size, max_lines_in_batch), -1, dtype=torch.long)
@@ -572,91 +587,50 @@ class HRDocLayoutXLMCollator:
         sibling_labels = torch.zeros(batch_size, max_lines_in_batch, max_lines_in_batch, dtype=torch.long)
 
         for i, sample in enumerate(batch):
-            # 找出实际 tokenize 的行
             line_ids_list = all_line_ids[i]
             tokenized_lines = set(lid for lid in line_ids_list if lid >= 0)
 
             if not tokenized_lines:
                 continue
 
-            actual_n_lines = max(tokenized_lines) + 1
+            hierarchical_parents = all_hierarchical_parents[i]
+            sibling_groups = all_sibling_groups[i]
 
             # 填充 line-level tensors
-            for j in tokenized_lines:
-                if j >= max_lines_in_batch:
+            for line_id in tokenized_lines:
+                if line_id >= max_lines_in_batch:
                     continue
 
-                region_ids[i, j] = sample['region_ids'][j] if j < len(sample['region_ids']) else -1
+                # 基础字段
+                region_ids[i, line_id] = sample['region_ids'][line_id] if line_id < len(sample['region_ids']) else -1
 
-                succ = sample['successor_labels'][j] if j < len(sample['successor_labels']) else -1
-                if 0 <= succ < actual_n_lines and succ in tokenized_lines:
-                    successor_labels[i, j] = succ
-                else:
-                    successor_labels[i, j] = -1
+                succ = sample['successor_labels'][line_id] if line_id < len(sample['successor_labels']) else -1
+                successor_labels[i, line_id] = succ if succ in tokenized_lines else -1
 
-                cls = sample['class_labels'][j] if j < len(sample['class_labels']) else 'unknown'
-                class_labels[i, j] = self.CLASS_TO_IDX.get(cls, self.CLASS_TO_IDX['unknown'])
+                cls = sample['class_labels'][line_id] if line_id < len(sample['class_labels']) else 'unknown'
+                class_labels[i, line_id] = self.CLASS_TO_IDX.get(cls, self.CLASS_TO_IDX['unknown'])
 
-                line_mask[i, j] = True
+                line_mask[i, line_id] = True
 
-                # line_bboxes
-                if j < len(sample['bboxes']):
-                    bbox = sample['bboxes'][j]
-                    line_bboxes[i, j] = torch.tensor([
+                if line_id < len(sample['bboxes']):
+                    bbox = sample['bboxes'][line_id]
+                    line_bboxes[i, line_id] = torch.tensor([
                         max(0, min(1000, int(bbox[0]))),
                         max(0, min(1000, int(bbox[1]))),
                         max(0, min(1000, int(bbox[2]))),
                         max(0, min(1000, int(bbox[3]))),
                     ], dtype=torch.float)
 
-            # chunk 返回的 parent_ids：索引是行序号，值是 parent 的 line_id（全局索引）
-            chunk_parent_ids = all_line_parent_ids[i]
-            chunk_relations = all_line_relations[i]
+                # parent_ids：直接用 line_id 从树中查找
+                if line_id < len(hierarchical_parents):
+                    parent_ids[i, line_id] = hierarchical_parents[line_id]
 
-            # 获取 chunk 中的 line_id 列表（按行序号顺序）
-            line_ids_in_chunk = sorted(tokenized_lines)
-
-            # 建立 line_id -> 行序号 的映射（参考 stage/engines/evaluator.py）
-            line_id_to_row = {lid: row for row, lid in enumerate(line_ids_in_chunk)}
-
-            if chunk_parent_ids and chunk_relations:
-                # 把 parent 的 line_id 转换为行序号，tree_utils 需要节点列表索引
-                converted_parent_ids = []
-                for parent_line_id in chunk_parent_ids:
-                    if parent_line_id == -1:
-                        converted_parent_ids.append(-1)
-                    elif parent_line_id in line_id_to_row:
-                        converted_parent_ids.append(line_id_to_row[parent_line_id])
-                    else:
-                        # parent 不在当前 chunk 中，视为 ROOT
-                        converted_parent_ids.append(-1)
-
-                # 使用 tree_utils 处理 equality 关系（行序号）
-                hierarchical_parents, sibling_groups = resolve_hierarchical_parents_and_siblings(
-                    converted_parent_ids, chunk_relations
-                )
-
-                # 填充 parent_ids：行序号 -> line_id
-                for row, hp_row in enumerate(hierarchical_parents):
-                    if row < len(line_ids_in_chunk):
-                        line_id = line_ids_in_chunk[row]
-                        if line_id < max_lines_in_batch:
-                            if hp_row == -1:
-                                parent_ids[i, line_id] = -1
-                            elif hp_row < len(line_ids_in_chunk):
-                                parent_ids[i, line_id] = line_ids_in_chunk[hp_row]
-
-                # 填充 sibling_labels：行序号 -> line_id
-                for group in sibling_groups:
-                    for j_idx in range(len(group)):
-                        for k_idx in range(j_idx + 1, len(group)):
-                            j_row, k_row = group[j_idx], group[k_idx]
-                            if j_row < len(line_ids_in_chunk) and k_row < len(line_ids_in_chunk):
-                                j = line_ids_in_chunk[j_row]
-                                k = line_ids_in_chunk[k_row]
-                                if j < max_lines_in_batch and k < max_lines_in_batch:
-                                    sibling_labels[i, j, k] = 1
-                                    sibling_labels[i, k, j] = 1
+            # sibling_labels：从 sibling_groups 填充
+            for group in sibling_groups:
+                for j in group:
+                    for k in group:
+                        if j != k and j < max_lines_in_batch and k < max_lines_in_batch:
+                            sibling_labels[i, j, k] = 1
 
         # 加载图像
         all_images = []
