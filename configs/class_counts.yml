@@ -1,0 +1,17 @@
+# 类别分布统计（line-level）
+# 由 scripts/compute_class_counts.py 自动生成
+#
+# 类别顺序（LABEL_LIST）:
+# ['title', 'author', 'mail', 'affili', 'section', 'fstline', 'paraline', 'table', 'figure', 'caption', 'equation', 'footer', 'header', 'footnote']
+
+hrds:
+  counts: [1301, 1366, 1436, 2619, 23553, 78204, 568212, 4302, 2977, 21033, 5093, 11191, 0, 11627]
+  total: 732914
+
+hrdh:
+  counts: [1769, 1695, 804, 3395, 15170, 104778, 451267, 2106, 5914, 22954, 21232, 7785, 8853, 5080]
+  total: 652802
+
+tender:
+  counts: [0, 0, 0, 0, 973, 8846, 7410, 967, 0, 0, 0, 0, 0, 0]
+  total: 18196

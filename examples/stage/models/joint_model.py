@@ -192,13 +192,13 @@ class JointModel(nn.Module):
 
         if use_focal_loss:
             from tasks.losses import FocalLoss
-            # FocalLoss 使用 alpha 参数作为类别权重
+            # Stage4 关系分类使用 FocalLoss
             self.relation_criterion = FocalLoss(alpha=weight_tensor, gamma=2.0)
-            # Stage1 分类也使用 FocalLoss（论文设计）
-            self.cls_criterion = FocalLoss(gamma=2.0, ignore_index=-100)
         else:
             self.relation_criterion = nn.CrossEntropyLoss(weight=weight_tensor, ignore_index=-100)
-            self.cls_criterion = nn.CrossEntropyLoss(ignore_index=-100)
+
+        # Stage1 分类使用 CrossEntropy（FocalLoss 效果不佳，后续可配合 alpha 再试）
+        self.cls_criterion = nn.CrossEntropyLoss(ignore_index=-100)
 
     def freeze_stage1(self):
         """
