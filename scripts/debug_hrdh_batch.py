@@ -18,6 +18,8 @@
 已知问题文件（已删除）：
 - 1607.03341.json: page 1 中有 5 个 opara 的 parent_id 指向自己（自环），
   导致 layoutlmft/data/labels.py 中 trans_class 函数的 while 循环无限执行
+
+HRDH数据集需要自己根据数组索引添加line_id
 """
 
 import os
