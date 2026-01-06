@@ -239,6 +239,7 @@ class E2EEvaluationCallback(TrainerCallback):
             avg_rel_acc = sum(h[7] for h in recent) / avg_n
             avg_sec_parent = sum(h[9] for h in recent) / avg_n
             avg_sec_rel = sum(h[10] for h in recent) / avg_n
+            avg_sec_edge = sum(h[11] for h in recent) / avg_n
 
             delta_line_macro = line_macro - avg_line_macro
             delta_line_micro = line_micro - avg_line_micro
@@ -249,6 +250,7 @@ class E2EEvaluationCallback(TrainerCallback):
             delta_rel_acc = rel_acc - avg_rel_acc
             delta_sec_parent = sec_parent_acc - avg_sec_parent
             delta_sec_rel = sec_rel_acc - avg_sec_rel
+            delta_sec_edge = sec_edge_acc - avg_sec_edge
 
             logger.info(f"║  Metric          │ Current  │  Avg({avg_n})  │  Delta       ║")
             logger.info("║──────────────────┼──────────┼──────────┼──────────────║")
@@ -261,8 +263,9 @@ class E2EEvaluationCallback(TrainerCallback):
             logger.info(f"║  Rel(MicroF1)    │  {rel_micro:>5.1f}%  │  {avg_rel_micro:>5.1f}%  │  {fmt_delta(delta_rel_micro):>6}      ║")
             logger.info(f"║  Rel(Acc)        │  {rel_acc:>5.1f}%  │  {avg_rel_acc:>5.1f}%  │  {fmt_delta(delta_rel_acc):>6}      ║")
             logger.info(f"║  Sec-Rel(Acc)    │  {sec_rel_acc:>5.1f}%  │  {avg_sec_rel:>5.1f}%  │  {fmt_delta(delta_sec_rel):>6}      ║")
+            logger.info(f"║  Sec-Edge(Acc) ★ │  {sec_edge_acc:>5.1f}%  │  {avg_sec_edge:>5.1f}%  │  {fmt_delta(delta_sec_edge):>6}      ║")
 
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | Rel={rel_macro:.1f}% ({fmt_delta(delta_rel_macro)}) | SecP={sec_parent_acc:.1f}%"
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% ({fmt_delta(delta_parent)}) | SecEdge={sec_edge_acc:.1f}% ({fmt_delta(delta_sec_edge)})"
         else:
             logger.info(f"║  Metric          │ Current  │                           ║")
             logger.info("║──────────────────┼──────────┼───────────────────────────║")
@@ -275,7 +278,8 @@ class E2EEvaluationCallback(TrainerCallback):
             logger.info(f"║  Rel(MicroF1)    │  {rel_micro:>5.1f}%  │                           ║")
             logger.info(f"║  Rel(Acc)        │  {rel_acc:>5.1f}%  │                           ║")
             logger.info(f"║  Sec-Rel(Acc)    │  {sec_rel_acc:>5.1f}%  │                           ║")
-            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | Rel={rel_macro:.1f}% | SecP={sec_parent_acc:.1f}%"
+            logger.info(f"║  Sec-Edge(Acc) ★ │  {sec_edge_acc:>5.1f}%  │                           ║")
+            summary = f"[Step {global_step}] Line={line_macro:.1f}% | Parent={parent_acc:.1f}% | SecEdge={sec_edge_acc:.1f}%"
 
         # TEDS 分数（如果计算了）
         if teds is not None:
@@ -288,8 +292,8 @@ class E2EEvaluationCallback(TrainerCallback):
         logger.info("╚════════════════════════════════════════════════════════════════════════╝")
         logger.info(summary)
 
-        # history: (step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent, sec_rel)
-        self.history.append((global_step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent_acc, sec_rel_acc))
+        # history: (step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent, sec_rel, sec_edge)
+        self.history.append((global_step, line_macro, line_micro, line_acc, parent_acc, rel_macro, rel_micro, rel_acc, teds, sec_parent_acc, sec_rel_acc, sec_edge_acc))
 
         # Best model 保存
         if self.trainer is not None:
