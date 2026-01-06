@@ -203,7 +203,7 @@ def main():
     if not os.path.exists(model_path):
         print(f"\nError: Model path does not exist: {model_path}")
         print(f"Please run Stage 1 training first:")
-        print(f"  python scripts/train_stage1.py --env {args.env or 'test'} --dataset {args.dataset}")
+        print(f"  python train_joint.py --env {args.env or 'test'} --dataset {args.dataset} --mode stage1")
         sys.exit(1)
 
     # Create output directory

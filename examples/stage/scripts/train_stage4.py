@@ -273,7 +273,7 @@ def main():
         print(f"\nAll stages for {args.dataset.upper()} completed!")
         print("\nTo train on another dataset:")
         other_dataset = 'hrdh' if args.dataset == 'hrds' else 'hrds'
-        print(f"  python examples/stage/scripts/train_stage1.py --env {args.env or 'test'} --dataset {other_dataset}")
+        print(f"  python train_joint.py --env {args.env or 'test'} --dataset {other_dataset} --mode stage1")
     else:
         # Mark stage as failed
         exp_manager.mark_stage_failed(args.exp, "stage4", args.dataset)

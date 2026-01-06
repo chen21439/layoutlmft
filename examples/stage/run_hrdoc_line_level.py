@@ -3,10 +3,10 @@
 """
 HRDoc Line-Level Training Script
 
-Stage 1 训练脚本（Line-level 分类），与联合训练的 Stage 1 逻辑完全对齐。
+Stage 1 独立训练脚本（Line-level 分类），与联合训练的 Stage 1 逻辑完全对齐。
 
-与 run_hrdoc.py 的区别：
-- 使用 LayoutXLMForLineLevelClassification（mean pooling）而非 LayoutXLMForTokenClassification
+特点：
+- 使用 LayoutXLMForLineLevelClassification（mean pooling）
 - 使用 LineLevelDataCollator 提供 line_ids 和 line_labels
 - 损失和评估都在 line-level 进行
 
@@ -14,6 +14,8 @@ Stage 1 训练脚本（Line-level 分类），与联合训练的 Stage 1 逻辑�
 - 使用相同的 LinePooling 模块
 - 使用相同的 LineClassificationHead
 - 使用相同的损失计算方式
+
+注意：推荐使用 train_joint.py --mode stage1 进行训练。
 """
 
 import logging
