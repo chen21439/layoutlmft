@@ -660,7 +660,8 @@ class JointModel(nn.Module):
                                     all_cls_logits.append(logits)
 
                             if all_cls_logits:
-                                max_len = max(l.shape[0] for l in all_cls_logits)
+                                # 使用 line_features 的维度，确保和 stage3 输入一致
+                                max_len = line_features.shape[1]
                                 padded_logits = torch.zeros(num_docs, max_len, self.num_classes, device=device)
                                 for b, logits in enumerate(all_cls_logits):
                                     padded_logits[b, :logits.shape[0]] = logits
