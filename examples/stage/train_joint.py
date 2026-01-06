@@ -141,6 +141,7 @@ class JointDataArguments:
     max_eval_samples: int = field(default=-1, metadata={"help": "Max eval samples (-1 for all)"})
     force_rebuild: bool = field(default=False, metadata={"help": "Force rebuild dataset"})
     document_level: bool = field(default=True, metadata={"help": "Use document-level batching"})
+    max_pages_per_doc: Optional[int] = field(default=None, metadata={"help": "Max pages per document (only for tender dataset with stage1 mode)"})
 
 
 @dataclass
@@ -194,6 +195,14 @@ def prepare_datasets(tokenizer, data_args, training_args, model_args):
     # 所有模式都需要 line info（line-level 分类）
     include_line_info = True
 
+    # 校验 max_pages_per_doc 参数
+    if data_args.max_pages_per_doc is not None:
+        if not (data_args.dataset == "tender" and model_args.mode == "stage1"):
+            raise ValueError(
+                f"max_pages_per_doc is only supported for tender dataset with stage1 mode, "
+                f"got dataset={data_args.dataset}, mode={model_args.mode}"
+            )
+
     loader_config = HRDocDataLoaderConfig(
         data_dir=os.environ.get("HRDOC_DATA_DIR"),
         dataset_name=data_args.dataset,
@@ -203,6 +212,7 @@ def prepare_datasets(tokenizer, data_args, training_args, model_args):
         max_val_samples=data_args.max_eval_samples if data_args.max_eval_samples > 0 else None,
         force_rebuild=data_args.force_rebuild,
         document_level=data_args.document_level,
+        max_pages_per_doc=data_args.max_pages_per_doc,
     )
 
     data_loader = HRDocDataLoader(

@@ -724,6 +724,7 @@ class HRDocDataLoaderConfig:
     pad_to_max_length: bool = True
     force_rebuild: bool = False  # 是否强制重建数据集（删除缓存重新生成）
     document_level: bool = False  # False=页面级别（快速训练），True=文档级别（推理）
+    max_pages_per_doc: Optional[int] = None  # 文档级别模式下，每个子文档最大页数（用于 tender + stage1）
 
 
 class HRDocDataLoader:
@@ -918,6 +919,7 @@ class HRDocDataLoader:
             str(self.config.max_length),
             str(self.config.label_all_tokens),
             self.tokenizer.name_or_path if hasattr(self.tokenizer, 'name_or_path') else "unknown",
+            str(self.config.max_pages_per_doc),  # 包含拆分参数，不同配置用不同缓存
         ]
         cache_key = "_".join(cache_key_parts)
         cache_hash = hashlib.md5(cache_key.encode()).hexdigest()[:12]
@@ -976,14 +978,34 @@ class HRDocDataLoader:
 
             print(f"[DataLoader] Tokenizing {split_name} ({len(doc_names)} documents)...", flush=True)
 
+            # 拆分参数
+            max_pages = self.config.max_pages_per_doc
+            if max_pages:
+                print(f"[DataLoader] max_pages_per_doc={max_pages}, will split large documents", flush=True)
+
             processed_docs = []
             for doc_name in doc_names:
                 pages = doc_pages[doc_name]
                 # 确保按整数排序（防御性处理，以防 page_number 是字符串）
                 pages = sorted(pages, key=lambda p: int(p["page_number"]) if isinstance(p["page_number"], str) else p["page_number"])
-                result = self._process_document_pages(doc_name, pages)
-                if result is not None:
-                    processed_docs.append(result)
+
+                # 按 max_pages_per_doc 拆分大文档
+                if max_pages and len(pages) > max_pages:
+                    # 拆分成多个子文档
+                    num_parts = (len(pages) + max_pages - 1) // max_pages
+                    for part_idx in range(num_parts):
+                        start = part_idx * max_pages
+                        end = min(start + max_pages, len(pages))
+                        page_chunk = pages[start:end]
+                        sub_doc_name = f"{doc_name}_part{part_idx}"
+                        # 传入原始文档名用于查找 JSON 文件
+                        result = self._process_document_pages(sub_doc_name, page_chunk, original_doc_name=doc_name)
+                        if result is not None:
+                            processed_docs.append(result)
+                else:
+                    result = self._process_document_pages(doc_name, pages)
+                    if result is not None:
+                        processed_docs.append(result)
 
             # 保存到缓存
             try:
@@ -1013,8 +1035,14 @@ class HRDocDataLoader:
         self._tokenized_datasets = tokenized_datasets
         return tokenized_datasets
 
-    def _process_document_pages(self, document_name: str, pages: List[Dict]) -> Optional[Dict]:
-        """处理一个文档的所有页面，聚合为文档级别样本"""
+    def _process_document_pages(self, document_name: str, pages: List[Dict], original_doc_name: str = None) -> Optional[Dict]:
+        """处理一个文档的所有页面，聚合为文档级别样本
+
+        Args:
+            document_name: 文档名称（拆分后可能是 doc1_part0）
+            pages: 页面列表
+            original_doc_name: 原始文档名（用于查找 JSON 文件，拆分时传入）
+        """
         all_chunks = []
         all_parent_ids = []
         all_relations = []
@@ -1054,15 +1082,17 @@ class HRDocDataLoader:
             return None
 
         # 构建 json_path（用于错误详情显示文本）
+        # 使用原始文档名查找 JSON 文件（拆分后 document_name 可能是 doc1_part0，但文件名还是 doc1.json）
+        json_lookup_name = original_doc_name or document_name
         json_path = None
         if self.config.data_dir:
             # 尝试 train 目录
-            candidate = os.path.join(self.config.data_dir, "train", f"{document_name}.json")
+            candidate = os.path.join(self.config.data_dir, "train", f"{json_lookup_name}.json")
             if os.path.exists(candidate):
                 json_path = candidate
             else:
                 # 尝试 test 目录
-                candidate = os.path.join(self.config.data_dir, "test", f"{document_name}.json")
+                candidate = os.path.join(self.config.data_dir, "test", f"{json_lookup_name}.json")
                 if os.path.exists(candidate):
                     json_path = candidate
 
