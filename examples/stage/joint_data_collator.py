@@ -6,6 +6,20 @@ HRDoc 联合训练的数据整理器 (Data Collator)
 支持两种模式：
 - 页面级别（document_level=False）：每个样本是一个 chunk，快速训练
 - 文档级别（document_level=True）：每个样本是一个文档，用于推理
+
+=== 训练时 Stage 3/4 处理 ===
+
+    Stage 3 (Parent): 所有行参与
+      parent_id=-1 → target=ROOT,  >=0 → target=parent+1
+
+    Stage 4 (Relation): 根据 relation 字段
+      "meta" → -100 (loss 忽略)
+      其他   → 正常计算 loss
+
+    Meta 类定义见: layoutlmft/data/labels.py
+
+比官方更完整：官方只处理 struct_words=['sec','line','fstline']，
+我们处理所有类别（包括 tab/fig/tabcap/figcap 等）。
 """
 
 import os
@@ -139,8 +153,10 @@ class HRDocJointDataCollator:
 
                 # relations: 转换为索引
                 if len(line_relations[i]) > 0:
-                    # 论文只有 3 类关系：connect=0, contain=1, equality=2
-                    # none/meta 关系映射为 -100，会被 loss 忽略
+                    # Stage 4: 只有 relation!="meta" 的行参与
+                    # - "meta" → -100 (loss 忽略)
+                    # - "contain/connect/equality" → 0/1/2 (正常计算)
+                    # 详见文件头部流程图
                     rel_indices = [
                         self.relation2id.get(rel.lower(), -100) for rel in line_relations[i]
                     ]
@@ -309,6 +325,8 @@ class HRDocDocumentLevelCollator:
                 )
 
                 if relations:
+                    # relation="meta" → -100 (忽略), 其他 → 正常索引
+                    # 详见文件头部流程图
                     rel_indices = [
                         self.relation2id.get(rel.lower(), -100) for rel in relations
                     ]

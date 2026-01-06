@@ -5,6 +5,16 @@ Predictor - 统一推理接口
 
 支持页面级别和文档级别的推理，使用 Batch 抽象层隐藏差异。
 
+=== 推理流程（与训练一致）===
+
+    Stage 1: 所有行预测类别
+         ↓
+    Stage 3: 所有行预测 parent（与训练一致）
+         ↓
+    Stage 4: 根据 Stage 1 预测的 class 判断
+      - meta 类 → 直接填 relation="meta"，不调用模型
+      - 非meta类 → 调用模型预测 relation
+
 设计原则：
 - 接收 Sample，返回 PredictionOutput
 - 不关心 Sample 来自页面级别还是文档级别
@@ -24,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.batch import Sample, BatchBase, wrap_batch
 from tasks import SemanticClassificationTask
 from tasks.parent_finding import ParentFindingTask
+from layoutlmft.data.labels import is_meta_class
 
 
 @dataclass
@@ -179,6 +190,7 @@ class Predictor:
             return PredictionOutput(line_classes=line_classes)
 
         # ==================== Stage 3: Parent Finding ====================
+        # 所有行都参与（与训练一致）
         pred_parents = [-1] * actual_num_lines
         gru_hidden = None
 
@@ -242,9 +254,21 @@ class Predictor:
                 pred_parents[child_idx] = scores.argmax().item()
 
         # ==================== Stage 4: Relation Classification ====================
-        pred_relations = [0] * actual_num_lines  # Default: connect (0)
+        # 根据 Stage 1 预测的 class 判断是否为 meta 类
+        # - meta 类：跳过，不调用模型（输出时直接填 "meta"）
+        # - 非 meta 类：调用模型预测 relation
+        sorted_line_ids = sorted(line_classes.keys())
+        pred_relations = [0] * actual_num_lines  # 默认 connect
 
         for child_idx in range(actual_num_lines):
+            # 获取该行预测的类别
+            line_id = sorted_line_ids[child_idx] if child_idx < len(sorted_line_ids) else child_idx
+            pred_class = line_classes.get(line_id, 0)
+
+            # meta 类跳过模型预测（输出时用 is_meta_class 判断填 "meta"）
+            if is_meta_class(pred_class):
+                continue
+
             parent_idx = pred_parents[child_idx]
             if parent_idx < 0 or parent_idx >= actual_num_lines:
                 continue
@@ -265,7 +289,6 @@ class Predictor:
             pred_relations[child_idx] = rel_logits.argmax(dim=1).item()
 
         # 构建输出
-        sorted_line_ids = sorted(line_classes.keys())
 
         return PredictionOutput(
             line_classes=line_classes,
@@ -487,10 +510,16 @@ class Predictor:
                         pred_parent = pred.line_parents[idx] if idx < len(pred.line_parents) else -1
                         pred_relation = pred.line_relations[idx] if idx < len(pred.line_relations) else 0
 
+                        # meta 类直接填 "meta"，非 meta 类用模型预测值
+                        if is_meta_class(pred_class):
+                            relation_str = "meta"
+                        else:
+                            relation_str = RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}")
+
                         pred_map[line_id] = {
                             "class": ID2LABEL.get(pred_class, f"cls_{pred_class}"),
                             "parent_id": pred_parent,
-                            "relation": RELATION_LABELS.get(pred_relation, f"rel_{pred_relation}"),
+                            "relation": relation_str,
                         }
 
                     # 调试：打印部分 pred_map

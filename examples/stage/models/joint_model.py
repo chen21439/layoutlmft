@@ -37,6 +37,25 @@ JointModel - HRDoc 联合训练模型
 - L_par: 父节点预测损失
 - L_rel: 关系分类损失
 
+=== Meta 类处理（比官方实现更完整）===
+
+官方 HRDoc 代码 (vocab.py) 只定义 struct_words=['sec','line','fstline']，
+仅这 3 类参与 Stage 3/4 预测。我们处理 HRDS 数据中所有类别。
+
+    Meta 类定义 (layoutlmft/data/labels.py):
+      title, author, mail, affili, footer, header, footnote
+
+    训练/推理统一流程：
+    ┌────────────────────────────────────────────────────────────┐
+    │ Stage 3 (Parent): 所有行都参与                             │
+    │   训练: parent_id=-1 → target=ROOT                        │
+    │   推理: 正常预测 parent                                    │
+    ├────────────────────────────────────────────────────────────┤
+    │ Stage 4 (Relation): 根据 class 判断是否为 meta             │
+    │   训练: relation="meta" → -100 (loss 忽略)                │
+    │   推理: is_meta_class(pred_class) → 直接填 "meta"         │
+    └────────────────────────────────────────────────────────────┘
+
 此文件只包含模型定义，不包含训练循环、数据加载等。
 """
 
@@ -703,12 +722,19 @@ class JointModel(nn.Module):
                         else:
                             pred_parent_ids[b][child_idx] = -1  # 无法预测时默认 ROOT
 
-                        # 以下是损失计算，需要有效的 gt_parent
+                        # Stage 3: 所有行都参与 parent 预测
+                        # - gt_parent=-100: padding，跳过
+                        # - gt_parent>=child: 无效（父在子后），跳过
+                        # - gt_parent=-1: ROOT，target_idx=0
+                        # - gt_parent>=0: 正常父节点，target_idx=parent+1
+                        # 详见文件头部流程图
                         if gt_parent == -100:
                             continue
                         if gt_parent >= child_idx:
                             continue
 
+                        # parent_id=-1 表示 ROOT，映射到 target_idx=0
+                        # parent_id>=0 表示具体行索引，映射到 target_idx=parent+1
                         target_idx = gt_parent + 1 if gt_parent >= 0 else 0
                         child_logits = child_logits_raw
 

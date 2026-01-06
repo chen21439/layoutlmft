@@ -37,6 +37,30 @@ LABEL_LIST = [
 NUM_LABELS = len(LABEL_LIST)  # 14
 
 # ============================================================
+# Meta 类别定义
+# ============================================================
+# 数据中这些类别的 parent_id=-1, relation="meta"
+# 训练时: Stage 3 所有行参与, Stage 4 relation="meta" → loss 忽略
+# 推理时: Stage 3 所有行参与, Stage 4 is_meta_class → 直接填 "meta"
+META_CLASSES = [
+    "title",     # 0
+    "author",    # 1
+    "mail",      # 2
+    "affili",    # 3
+    "footer",    # 11
+    "header",    # 12
+    "footnote",  # 13
+]
+META_CLASS_IDS = [LABEL_LIST.index(c) for c in META_CLASSES]  # [0,1,2,3,11,12,13]
+
+
+def is_meta_class(class_id_or_name) -> bool:
+    """判断是否为 meta 类（不参与树结构预测）"""
+    if isinstance(class_id_or_name, int):
+        return class_id_or_name in META_CLASS_IDS
+    return class_id_or_name.lower() in META_CLASSES
+
+# ============================================================
 # ID <-> Label 映射（模型输出数字 <-> 标签名）
 # ============================================================
 def id2label(label_id: int) -> str:
