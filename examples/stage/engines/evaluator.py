@@ -56,6 +56,7 @@ class EvaluationOutput:
     line_accuracy: float = 0.0
     line_macro_f1: float = 0.0
     line_micro_f1: float = 0.0
+    focus_macro_f1: float = 0.0  # mean(F1_section, F1_fstline, F1_paraline)
 
     # Stage 3: Parent 准确率
     parent_accuracy: float = 0.0
@@ -886,6 +887,12 @@ class Evaluator:
             output.line_accuracy = self._accuracy(gt_classes, pred_classes)
             output.line_macro_f1 = self._macro_f1(gt_classes, pred_classes)
             output.line_micro_f1 = self._micro_f1(gt_classes, pred_classes)
+            # Focus Macro F1: mean(F1_section, F1_fstline, F1_paraline)
+            # section=4, fstline=5, paraline=6
+            per_class_f1 = self._per_class_f1(gt_classes, pred_classes)
+            focus_classes = [4, 5, 6]  # section, fstline, paraline
+            focus_f1s = [per_class_f1.get(c, 0.0) for c in focus_classes]
+            output.focus_macro_f1 = sum(focus_f1s) / len(focus_f1s) if focus_f1s else 0.0
 
         # Stage 3: Parent 准确率
         if gt_parents:
@@ -908,20 +915,20 @@ class Evaluator:
         correct = sum(g == p for g, p in zip(gt, pred))
         return correct / len(gt)
 
-    def _macro_f1(
+    def _per_class_f1(
         self,
         gt: List[int],
         pred: List[int],
         num_classes: int = None
-    ) -> float:
-        """计算 Macro F1"""
+    ) -> Dict[int, float]:
+        """计算每个类别的 F1 分数"""
         if not gt:
-            return 0.0
+            return {}
 
         if num_classes is None:
             num_classes = max(max(gt), max(pred)) + 1
 
-        f1_scores = []
+        per_class_f1 = {}
         for c in range(num_classes):
             tp = sum(1 for g, p in zip(gt, pred) if g == c and p == c)
             fp = sum(1 for g, p in zip(gt, pred) if g != c and p == c)
@@ -935,10 +942,22 @@ class Evaluator:
             else:
                 f1 = 0.0
 
-            if tp + fn > 0:  # 只计算有样本的类别
-                f1_scores.append(f1)
+            if tp + fn > 0:  # 只记录有样本的类别
+                per_class_f1[c] = f1
 
-        return sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+        return per_class_f1
+
+    def _macro_f1(
+        self,
+        gt: List[int],
+        pred: List[int],
+        num_classes: int = None
+    ) -> float:
+        """计算 Macro F1"""
+        per_class_f1 = self._per_class_f1(gt, pred, num_classes)
+        if not per_class_f1:
+            return 0.0
+        return sum(per_class_f1.values()) / len(per_class_f1)
 
     def _micro_f1(self, gt: List[int], pred: List[int]) -> float:
         """计算 Micro F1（等于 accuracy）"""

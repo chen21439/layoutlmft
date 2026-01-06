@@ -306,6 +306,21 @@ class E2EEvaluationCallback(TrainerCallback):
                 model=model,
             )
 
+        # 写回 metrics dict（供 Trainer.evaluate() 返回，HF 用于选 best）
+        metrics_dict = kwargs.get("metrics", {})
+        metrics_dict.update({
+            "line_macro_f1": line_macro / 100,
+            "line_micro_f1": line_micro / 100,
+            "line_accuracy": line_acc / 100,
+            "parent_accuracy": parent_acc / 100,
+            "relation_macro_f1": rel_macro / 100,
+            "relation_accuracy": rel_acc / 100,
+            "section_parent": sec_parent_acc / 100,
+            "section_edge": sec_edge_acc / 100,
+        })
+        if teds is not None:
+            metrics_dict["teds"] = teds / 100
+
     def _maybe_save_best_model(self, global_step: int, metrics: dict, model):
         """检查是否需要保存 best model（指标越大越好）"""
         current_value = metrics.get(self.best_model_metric, 0.0)
@@ -359,12 +374,12 @@ class Stage1EvaluationCallback(TrainerCallback):
         self.output_dir = output_dir
         self.trainer = trainer
 
-        # Best model 配置（stage1 固定用 line_macro_f1）
-        self.best_model_metric = "line_macro_f1"
+        # Best model 配置（stage1 用 focus_macro_f1 = mean(F1_section, F1_fstline, F1_paraline)）
+        self.best_model_metric = "focus_macro_f1"
         self.best_metric_value = float('-inf')
         self.best_step = None
 
-        self.history = []  # [(step, line_macro, line_micro, line_acc), ...]
+        self.history = []  # [(step, line_macro, line_micro, line_acc, focus_macro), ...]
 
     def on_evaluate(self, args, state, control, model=None, **kwargs):
         """运行 Stage1 分类评估（Line-level）"""
@@ -395,6 +410,7 @@ class Stage1EvaluationCallback(TrainerCallback):
         line_macro = output.line_macro_f1 * 100
         line_micro = output.line_micro_f1 * 100
         line_acc = output.line_accuracy * 100
+        focus_macro = output.focus_macro_f1 * 100  # mean(F1_section, F1_fstline, F1_paraline)
         num_lines = output.num_lines
 
         def fmt_delta(d, threshold=0.5):
@@ -417,35 +433,54 @@ class Stage1EvaluationCallback(TrainerCallback):
             avg_macro = sum(h[1] for h in recent) / avg_n
             avg_micro = sum(h[2] for h in recent) / avg_n
             avg_acc = sum(h[3] for h in recent) / avg_n
+            avg_focus = sum(h[4] for h in recent) / avg_n
             delta_macro = line_macro - avg_macro
             delta_micro = line_micro - avg_micro
             delta_acc = line_acc - avg_acc
+            delta_focus = focus_macro - avg_focus
 
             logger.info(f"║  Metric       │ Current  │  Avg({avg_n})  │  Delta       ║")
             logger.info("║───────────────┼──────────┼──────────┼──────────────║")
             logger.info(f"║  Macro F1     │  {line_macro:>5.1f}%  │  {avg_macro:>5.1f}%  │  {fmt_delta(delta_macro):>6}      ║")
+            logger.info(f"║  Focus F1 ★   │  {focus_macro:>5.1f}%  │  {avg_focus:>5.1f}%  │  {fmt_delta(delta_focus):>6}      ║")
             logger.info(f"║  Micro F1     │  {line_micro:>5.1f}%  │  {avg_micro:>5.1f}%  │  {fmt_delta(delta_micro):>6}      ║")
             logger.info(f"║  Accuracy     │  {line_acc:>5.1f}%  │  {avg_acc:>5.1f}%  │  {fmt_delta(delta_acc):>6}      ║")
         else:
             logger.info(f"║  Metric       │ Current  │                           ║")
             logger.info("║───────────────┼──────────┼───────────────────────────║")
             logger.info(f"║  Macro F1     │  {line_macro:>5.1f}%  │                           ║")
+            logger.info(f"║  Focus F1 ★   │  {focus_macro:>5.1f}%  │                           ║")
             logger.info(f"║  Micro F1     │  {line_micro:>5.1f}%  │                           ║")
             logger.info(f"║  Accuracy     │  {line_acc:>5.1f}%  │                           ║")
 
         logger.info("╠══════════════════════════════════════════════════════════════╣")
+        logger.info(f"║  Focus F1 = mean(section, fstline, paraline)                 ║")
         logger.info(f"║  Lines evaluated: {num_lines:<43} ║")
         logger.info("╚══════════════════════════════════════════════════════════════╝")
 
-        self.history.append((global_step, line_macro, line_micro, line_acc))
+        self.history.append((global_step, line_macro, line_micro, line_acc, focus_macro))
 
-        # Best model 保存（stage1 用 line_macro_f1）
+        # Best model 保存（stage1 用 focus_macro_f1）
         if self.trainer is not None and self.output_dir is not None:
             self._maybe_save_best_model(
                 global_step=global_step,
-                metrics={"line_macro_f1": line_macro, "line_micro_f1": line_micro, "line_accuracy": line_acc},
+                metrics={
+                    "focus_macro_f1": focus_macro,
+                    "line_macro_f1": line_macro,
+                    "line_micro_f1": line_micro,
+                    "line_accuracy": line_acc,
+                },
                 model=model,
             )
+
+        # 写回 metrics dict（供 Trainer.evaluate() 返回）
+        metrics_dict = kwargs.get("metrics", {})
+        metrics_dict.update({
+            "focus_macro_f1": focus_macro / 100,
+            "line_macro_f1": line_macro / 100,
+            "line_micro_f1": line_micro / 100,
+            "line_accuracy": line_acc / 100,
+        })
 
     def _maybe_save_best_model(self, global_step: int, metrics: dict, model):
         """检查是否需要保存 best model（指标越大越好）"""
