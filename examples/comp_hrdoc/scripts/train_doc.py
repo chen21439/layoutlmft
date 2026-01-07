@@ -569,6 +569,82 @@ def train_epoch_with_stage_features(
     }
 
 
+def compute_prf1(tp: int, fp: int, fn: int) -> Dict[str, float]:
+    """计算 Precision, Recall, F1"""
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return {"precision": precision, "recall": recall, "f1": f1}
+
+
+def visualize_toc(
+    texts: list,
+    pred_parents: list,
+    gt_parents: list,
+    mask: list = None,
+    sample_id: str = "",
+) -> str:
+    """可视化 TOC 树结构
+
+    Args:
+        texts: 节点文本列表
+        pred_parents: 预测的父节点索引列表（-1 表示 root）
+        gt_parents: 真实的父节点索引列表（-1 表示 root）
+        mask: 有效节点掩码
+        sample_id: 样本 ID
+
+    Returns:
+        可视化字符串
+    """
+    lines = [f"\n{'='*60}", f"Sample: {sample_id}", f"{'='*60}"]
+
+    # 构建 GT 树
+    def build_tree_str(parents, prefix=""):
+        """递归构建树形字符串"""
+        n = len(parents)
+        children = {i: [] for i in range(-1, n)}
+        for i, p in enumerate(parents):
+            if mask is None or mask[i]:
+                children[p].append(i)
+
+        def _format(node_idx, indent=0):
+            result = []
+            for child in children.get(node_idx, []):
+                text = texts[child] if child < len(texts) else f"[{child}]"
+                if len(text) > 40:
+                    text = text[:37] + "..."
+                result.append("  " * indent + f"├── [{child}] {text}")
+                result.extend(_format(child, indent + 1))
+            return result
+
+        return _format(-1)  # 从 root (-1) 开始
+
+    lines.append("\n[Ground Truth TOC]")
+    lines.extend(build_tree_str(gt_parents))
+
+    lines.append("\n[Predicted TOC]")
+    lines.extend(build_tree_str(pred_parents))
+
+    # 标记差异
+    lines.append("\n[Differences]")
+    diffs = []
+    for i, (p, g) in enumerate(zip(pred_parents, gt_parents)):
+        if mask is None or mask[i]:
+            if p != g:
+                text = texts[i] if i < len(texts) else f"[{i}]"
+                if len(text) > 30:
+                    text = text[:27] + "..."
+                diffs.append(f"  Node [{i}] '{text}': pred_parent={p}, gt_parent={g}")
+    if diffs:
+        lines.extend(diffs[:10])  # 最多显示 10 个差异
+        if len(diffs) > 10:
+            lines.append(f"  ... and {len(diffs) - 10} more differences")
+    else:
+        lines.append("  (No differences - Perfect match!)")
+
+    return "\n".join(lines)
+
+
 @torch.no_grad()
 def evaluate_with_stage_features(
     model: torch.nn.Module,
@@ -576,12 +652,15 @@ def evaluate_with_stage_features(
     feature_extractor,
     device: torch.device,
     args=None,
+    visualize_samples: int = 0,  # 可视化的样本数量
 ) -> Dict[str, float]:
     """Evaluate ConstructFromFeatures model using stage features."""
     from examples.comp_hrdoc.models.construct_only import (
         compute_construct_metrics,
         generate_sibling_labels,
     )
+    from examples.comp_hrdoc.utils.tree_utils import generate_doc_tree
+    from examples.comp_hrdoc.metrics.teds import tree_edit_distance, HAS_APTED
 
     model.eval()
 
@@ -596,6 +675,17 @@ def evaluate_with_stage_features(
     all_parent_total = 0
     all_root_correct = 0
     all_root_total = 0
+
+    # Sibling metrics (TP/FP/FN for P/R/F1)
+    sibling_tp = 0
+    sibling_fp = 0
+    sibling_fn = 0
+
+    # TEDS
+    teds_scores = []
+
+    # 用于可视化的样本
+    vis_samples = []
 
     # Check toc_only mode
     toc_only = args.toc_only if args else False
@@ -677,22 +767,95 @@ def evaluate_with_stage_features(
                 region_mask=line_mask,
             )
 
-            # Aggregate
+            # Aggregate parent metrics
             has_parent = (line_parent_ids >= 0) & line_mask
             pred_parents = outputs["parent_logits"].argmax(dim=-1)
             correct = (pred_parents == line_parent_ids) & has_parent
             all_parent_correct += correct.sum().item()
             all_parent_total += has_parent.sum().item()
 
+            # Root metrics
             is_root_gt = (line_parent_ids == -1) & line_mask
             is_root_pred = (outputs["root_logits"] > 0) & line_mask
             root_correct = ((is_root_pred == is_root_gt) & line_mask).sum().item()
             all_root_correct += root_correct
             all_root_total += line_mask.sum().item()
 
+            # Sibling metrics (P/R/F1)
+            if sibling_labels is not None and "sibling_logits" in outputs:
+                pred_siblings = (outputs["sibling_logits"] > 0)  # [B, N, N]
+                gt_siblings = sibling_labels.bool()  # [B, N, N]
+                # 只计算有效节点对（上三角，排除对角线）
+                B, N, _ = pred_siblings.shape
+                triu_mask = torch.triu(torch.ones(N, N, dtype=torch.bool, device=device), diagonal=1)
+                valid_mask = line_mask.unsqueeze(-1) & line_mask.unsqueeze(-2) & triu_mask.unsqueeze(0)
+
+                tp = ((pred_siblings & gt_siblings) & valid_mask).sum().item()
+                fp = ((pred_siblings & ~gt_siblings) & valid_mask).sum().item()
+                fn = ((~pred_siblings & gt_siblings) & valid_mask).sum().item()
+                sibling_tp += tp
+                sibling_fp += fp
+                sibling_fn += fn
+
+            # TEDS 计算（每个样本）
+            if HAS_APTED:
+                batch_size = line_parent_ids.shape[0]
+                for b in range(batch_size):
+                    mask_b = line_mask[b].cpu().tolist()
+                    pred_parents_b = pred_parents[b].cpu().tolist()
+                    gt_parents_b = line_parent_ids[b].cpu().tolist()
+
+                    # 只取有效节点
+                    valid_indices = [i for i, m in enumerate(mask_b) if m]
+                    if len(valid_indices) == 0:
+                        continue
+
+                    # 构建树
+                    texts = [f"node_{i}" for i in valid_indices]
+                    # 重新映射 parent_ids 到压缩后的索引
+                    idx_map = {old: new for new, old in enumerate(valid_indices)}
+                    idx_map[-1] = -1  # root 保持 -1
+
+                    pred_parents_mapped = []
+                    gt_parents_mapped = []
+                    for i in valid_indices:
+                        p_pred = pred_parents_b[i]
+                        p_gt = gt_parents_b[i]
+                        pred_parents_mapped.append(idx_map.get(p_pred, -1))
+                        gt_parents_mapped.append(idx_map.get(p_gt, -1))
+
+                    try:
+                        pred_tree = generate_doc_tree(texts, pred_parents_mapped, ["child"] * len(texts))
+                        gt_tree = generate_doc_tree(texts, gt_parents_mapped, ["child"] * len(texts))
+                        _, teds = tree_edit_distance(pred_tree, gt_tree)
+                        teds_scores.append(teds)
+                    except Exception as e:
+                        pass  # 跳过无法构建的树
+
+            # 收集可视化样本
+            if len(vis_samples) < visualize_samples:
+                batch_size = line_parent_ids.shape[0]
+                for b in range(batch_size):
+                    if len(vis_samples) >= visualize_samples:
+                        break
+                    mask_b = line_mask[b].cpu().tolist()
+                    valid_indices = [i for i, m in enumerate(mask_b) if m]
+                    if len(valid_indices) < 2:
+                        continue
+                    # 获取文本（如果有）
+                    texts = batch.get("texts", [[f"node_{i}" for i in range(128)]])[b] if "texts" in batch else [f"node_{i}" for i in range(128)]
+                    vis_samples.append({
+                        "sample_id": f"batch{num_batches}_sample{b}",
+                        "texts": [texts[i] if i < len(texts) else f"[{i}]" for i in valid_indices],
+                        "pred_parents": [pred_parents[b, i].item() for i in valid_indices],
+                        "gt_parents": [line_parent_ids[b, i].item() for i in valid_indices],
+                        "mask": [True] * len(valid_indices),
+                    })
+
         num_batches += 1
 
-    return {
+    # 计算最终指标
+    results = {
         "loss": total_loss / max(num_batches, 1),
         "parent_loss": total_parent_loss / max(num_batches, 1),
         "sibling_loss": total_sibling_loss / max(num_batches, 1),
@@ -700,6 +863,23 @@ def evaluate_with_stage_features(
         "parent_accuracy": all_parent_correct / max(all_parent_total, 1),
         "root_accuracy": all_root_correct / max(all_root_total, 1),
     }
+
+    # Sibling P/R/F1
+    sibling_prf = compute_prf1(sibling_tp, sibling_fp, sibling_fn)
+    results["sibling_precision"] = sibling_prf["precision"]
+    results["sibling_recall"] = sibling_prf["recall"]
+    results["sibling_f1"] = sibling_prf["f1"]
+
+    # TEDS
+    if teds_scores:
+        results["teds_macro"] = sum(teds_scores) / len(teds_scores)
+        results["teds_samples"] = len(teds_scores)
+
+    # TOC 可视化
+    if vis_samples:
+        results["_vis_samples"] = vis_samples
+
+    return results
 
 
 def main():
@@ -1046,7 +1226,8 @@ def main():
         # Evaluate
         if args.use_stage_features:
             val_metrics = evaluate_with_stage_features(
-                model, val_loader, stage_feature_extractor, device, args
+                model, val_loader, stage_feature_extractor, device, args,
+                visualize_samples=3,  # 每个 epoch 可视化 3 个样本
             )
         else:
             val_metrics = evaluate(model, val_loader, device)
@@ -1065,6 +1246,33 @@ def main():
                 f"[4.4 Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
                 f"Root Acc: {val_metrics['root_accuracy']:.4f}"
             )
+            # Sibling P/R/F1
+            logger.info(
+                f"[4.4 Construct] Sibling P: {val_metrics.get('sibling_precision', 0):.4f}, "
+                f"R: {val_metrics.get('sibling_recall', 0):.4f}, "
+                f"F1: {val_metrics.get('sibling_f1', 0):.4f}"
+            )
+            # TEDS
+            if 'teds_macro' in val_metrics:
+                logger.info(
+                    f"[4.4 Construct] TEDS: {val_metrics['teds_macro']:.4f} "
+                    f"(n={val_metrics.get('teds_samples', 0)})"
+                )
+
+            # TOC 可视化
+            if "_vis_samples" in val_metrics:
+                logger.info("\n" + "="*60)
+                logger.info("TOC Visualization (3 samples)")
+                logger.info("="*60)
+                for sample in val_metrics["_vis_samples"]:
+                    vis_str = visualize_toc(
+                        texts=sample["texts"],
+                        pred_parents=sample["pred_parents"],
+                        gt_parents=sample["gt_parents"],
+                        mask=sample["mask"],
+                        sample_id=sample["sample_id"],
+                    )
+                    logger.info(vis_str)
         else:
             val_log = (
                 f"Val - Loss: {val_metrics['loss']:.4f}, "
