@@ -426,14 +426,15 @@ def convert_stage_labels_to_construct(
 
     Returns:
         parent_ids: [num_docs, max_lines] 层级父节点（自指向方案）
-        sibling_labels: [num_docs, max_lines, max_lines] 兄弟关系矩阵
+        sibling_labels: [num_docs, max_lines] 左兄弟索引（-1 表示无左兄弟）
         class_labels: [num_docs, max_lines] 类别标签（如果有）
     """
     num_docs = batch["num_docs"]
 
     # 初始化输出 tensors
     parent_ids = torch.full((num_docs, max_lines), -1, dtype=torch.long, device=device)
-    sibling_labels = torch.zeros((num_docs, max_lines, max_lines), dtype=torch.long, device=device)
+    # sibling_labels: 索引形式 [B, N]，存储每个节点的左兄弟索引，-1 表示无左兄弟
+    sibling_labels = torch.full((num_docs, max_lines), -1, dtype=torch.long, device=device)
 
     # 转换每个文档的标签
     raw_parent_ids = batch["line_parent_ids"]  # [num_docs, N]
@@ -470,12 +471,17 @@ def convert_stage_labels_to_construct(
                 else:
                     parent_ids[b, i] = hp
 
-        # 填充 sibling_labels 矩阵
+        # 填充 sibling_labels（索引形式：每个节点的左兄弟索引）
+        # sibling_groups 是兄弟组列表，按节点索引排序后，后续节点的左兄弟是前一个
         for group in sibling_groups:
-            for i in group:
-                for j in group:
-                    if i != j and i < max_lines and j < max_lines:
-                        sibling_labels[b, i, j] = 1
+            sorted_group = sorted(group)  # 按索引排序
+            for idx, node_idx in enumerate(sorted_group):
+                if node_idx < max_lines:
+                    if idx == 0:
+                        sibling_labels[b, node_idx] = -1  # 第一个节点无左兄弟
+                    else:
+                        left_sibling = sorted_group[idx - 1]
+                        sibling_labels[b, node_idx] = left_sibling
 
     # 提取 class_labels（如果有）
     class_labels = None
