@@ -107,45 +107,71 @@ class JointTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
 
+        # DEBUG: 在 step 20-25 打印输入信息以捕获出错的 batch
+        current_step = self.state.global_step
+        if 20 <= current_step <= 25:
+            try:
+                doc_id = inputs.get("doc_id", "unknown")
+                logger.warning(f"[DEBUG step={current_step}] doc_id={doc_id}")
+                if "input_ids" in inputs:
+                    ids = inputs["input_ids"]
+                    logger.warning(f"[DEBUG step={current_step}] input_ids: shape={ids.shape}, min={ids.min().item()}, max={ids.max().item()}")
+                if "bbox" in inputs:
+                    bbox = inputs["bbox"]
+                    logger.warning(f"[DEBUG step={current_step}] bbox: shape={bbox.shape}, min={bbox.min().item()}, max={bbox.max().item()}")
+                if "image" in inputs:
+                    img = inputs["image"]
+                    if isinstance(img, list):
+                        logger.warning(f"[DEBUG step={current_step}] image: list len={len(img)}")
+                    elif hasattr(img, 'shape'):
+                        logger.warning(f"[DEBUG step={current_step}] image: shape={img.shape}")
+            except Exception as debug_e:
+                logger.warning(f"[DEBUG step={current_step}] Failed to log inputs: {debug_e}")
+
         try:
             outputs = model(**inputs)
         except Exception as e:
-            # 记录出错时的文档信息
+            # 记录出错时的文档信息（先转到 CPU 避免 CUDA 错误）
             logger.error(f"[ERROR] Forward pass failed at step {self.state.global_step}")
             logger.error(f"[ERROR] Input keys: {inputs.keys()}")
             if "doc_id" in inputs:
                 logger.error(f"[ERROR] doc_id: {inputs['doc_id']}")
-            if "input_ids" in inputs:
-                ids = inputs["input_ids"]
-                logger.error(f"[ERROR] input_ids shape: {ids.shape}, min: {ids.min()}, max: {ids.max()}")
-            if "bbox" in inputs:
-                bbox = inputs["bbox"]
-                logger.error(f"[ERROR] bbox shape: {bbox.shape}")
-                logger.error(f"[ERROR] bbox x min/max: {bbox[:,:,0].min()}/{bbox[:,:,0].max()}, y min/max: {bbox[:,:,1].min()}/{bbox[:,:,1].max()}")
-                logger.error(f"[ERROR] bbox x2 min/max: {bbox[:,:,2].min()}/{bbox[:,:,2].max()}, y2 min/max: {bbox[:,:,3].min()}/{bbox[:,:,3].max()}")
-                # 检查是否有超出 0-1000 范围的坐标
-                if bbox.max() > 1000 or bbox.min() < 0:
-                    logger.error(f"[ERROR] bbox has out-of-range values! Valid range: 0-1000")
-            if "image" in inputs:
-                img = inputs["image"]
-                if hasattr(img, 'shape'):
-                    logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
-                elif hasattr(img, 'tensor'):
-                    logger.error(f"[ERROR] image (ImageList) tensor shape: {img.tensor.shape}")
-                elif isinstance(img, list):
-                    logger.error(f"[ERROR] image is list, len={len(img)}")
-                    if img:
-                        first_img = img[0]
-                        if hasattr(first_img, 'shape'):
-                            logger.error(f"[ERROR] first image shape: {first_img.shape}")
-                else:
-                    logger.error(f"[ERROR] image type: {type(img)}")
-            if "line_ids" in inputs:
-                line_ids = inputs["line_ids"]
-                if hasattr(line_ids, 'shape'):
-                    logger.error(f"[ERROR] line_ids shape: {line_ids.shape}, max: {line_ids.max()}")
-                else:
-                    logger.error(f"[ERROR] line_ids type: {type(line_ids)}")
+            # 包在 try 中避免 CUDA 错误时的二次报错
+            try:
+                if "input_ids" in inputs:
+                    ids = inputs["input_ids"].cpu()
+                    logger.error(f"[ERROR] input_ids shape: {ids.shape}, min: {ids.min()}, max: {ids.max()}")
+                if "bbox" in inputs:
+                    bbox = inputs["bbox"].cpu()
+                    logger.error(f"[ERROR] bbox shape: {bbox.shape}")
+                    logger.error(f"[ERROR] bbox x min/max: {bbox[:,:,0].min()}/{bbox[:,:,0].max()}, y min/max: {bbox[:,:,1].min()}/{bbox[:,:,1].max()}")
+                    logger.error(f"[ERROR] bbox x2 min/max: {bbox[:,:,2].min()}/{bbox[:,:,2].max()}, y2 min/max: {bbox[:,:,3].min()}/{bbox[:,:,3].max()}")
+                    # 检查是否有超出 0-1000 范围的坐标
+                    if bbox.max() > 1000 or bbox.min() < 0:
+                        logger.error(f"[ERROR] bbox has out-of-range values! Valid range: 0-1000")
+                if "image" in inputs:
+                    img = inputs["image"]
+                    if hasattr(img, 'shape'):
+                        logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
+                    elif hasattr(img, 'tensor'):
+                        logger.error(f"[ERROR] image (ImageList) tensor shape: {img.tensor.shape}")
+                    elif isinstance(img, list):
+                        logger.error(f"[ERROR] image is list, len={len(img)}")
+                        if img:
+                            first_img = img[0]
+                            if hasattr(first_img, 'shape'):
+                                logger.error(f"[ERROR] first image shape: {first_img.shape}")
+                    else:
+                        logger.error(f"[ERROR] image type: {type(img)}")
+                if "line_ids" in inputs:
+                    line_ids = inputs["line_ids"]
+                    if hasattr(line_ids, 'shape'):
+                        line_ids_cpu = line_ids.cpu()
+                        logger.error(f"[ERROR] line_ids shape: {line_ids_cpu.shape}, max: {line_ids_cpu.max()}")
+                    else:
+                        logger.error(f"[ERROR] line_ids type: {type(line_ids)}")
+            except Exception as log_e:
+                logger.error(f"[ERROR] Failed to log input details: {log_e}")
             raise e
         loss = outputs.loss  # TokenClassifierOutput 使用属性访问
 
