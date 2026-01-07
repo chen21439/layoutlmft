@@ -5,8 +5,8 @@ LOG=/data/LLM_group/layoutlmft/examples/comp_hrdoc/logs/train_doc_$(date +%Y%m%d
 
 cmd=(python examples/comp_hrdoc/scripts/train_doc.py
   --env test
-  # --use-stage-features
-  # --stage-checkpoint  /data/LLM_group/layoutlmft/artifact/joint_train/stage1_hrds/checkpoint-1300
+  --use-stage-features
+  --stage-checkpoint  /data/LLM_group/layoutlmft/artifact/joint_train/stage1_hrds/checkpoint-1300
   --dataset hrds
   --max-regions 128
   --batch-size 1
