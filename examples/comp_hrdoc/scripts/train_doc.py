@@ -40,11 +40,12 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
 
-# 数据加载使用 hrdoc_loader (统一的 HRDS/HRDH 加载器)
-from examples.comp_hrdoc.data.hrdoc_loader import (
-    HRDocDataset,
-    HRDocLayoutXLMCollator,
-)
+# 数据加载：复用 stage 的 DataLoader（支持多 chunk 文档级别处理）
+from examples.stage.data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
+from examples.stage.joint_data_collator import HRDocDocumentLevelCollator
+
+# 标签转换：使用 tree_utils 计算层级 parent 和 sibling
+from examples.comp_hrdoc.utils.tree_utils import resolve_hierarchical_parents_and_siblings
 from examples.comp_hrdoc.models import (
     DOCModel,
     build_doc_model,
@@ -409,6 +410,85 @@ def evaluate(
 
 # ==================== Stage Feature Training ====================
 
+def convert_stage_labels_to_construct(
+    batch: Dict,
+    max_lines: int,
+    device: torch.device,
+) -> tuple:
+    """将 stage collator 的输出转换为 Construct 模块需要的标签
+
+    Args:
+        batch: stage DocumentLevelCollator 的输出，包含:
+            - line_parent_ids: [num_docs, max_lines] 原始 parent_id
+            - line_relations: [num_docs, max_lines] 原始 relation
+        max_lines: 最大行数（来自 feature_extractor 输出）
+        device: 计算设备
+
+    Returns:
+        parent_ids: [num_docs, max_lines] 层级父节点（自指向方案）
+        sibling_labels: [num_docs, max_lines, max_lines] 兄弟关系矩阵
+        class_labels: [num_docs, max_lines] 类别标签（如果有）
+    """
+    num_docs = batch["num_docs"]
+
+    # 初始化输出 tensors
+    parent_ids = torch.full((num_docs, max_lines), -1, dtype=torch.long, device=device)
+    sibling_labels = torch.zeros((num_docs, max_lines, max_lines), dtype=torch.long, device=device)
+
+    # 转换每个文档的标签
+    raw_parent_ids = batch["line_parent_ids"]  # [num_docs, N]
+    raw_relations = batch["line_relations"]    # [num_docs, N]
+
+    for b in range(num_docs):
+        # 获取原始标签（转为 list）
+        raw_parents = raw_parent_ids[b].tolist()
+        raw_rels = raw_relations[b].tolist()
+
+        # 过滤 padding (-100)
+        valid_len = 0
+        for p in raw_parents:
+            if p == -100:
+                break
+            valid_len += 1
+
+        if valid_len == 0:
+            continue
+
+        raw_parents = raw_parents[:valid_len]
+        raw_rels = raw_rels[:valid_len]
+
+        # 使用 tree_utils 转换为层级 parent 和 sibling
+        hier_parents, sibling_groups = resolve_hierarchical_parents_and_siblings(
+            raw_parents, raw_rels
+        )
+
+        # 填充 parent_ids（自指向方案：root 节点 parent == self）
+        for i, hp in enumerate(hier_parents):
+            if i < max_lines:
+                if hp == -1:
+                    parent_ids[b, i] = i  # root 自指向
+                else:
+                    parent_ids[b, i] = hp
+
+        # 填充 sibling_labels 矩阵
+        for group in sibling_groups:
+            for i in group:
+                for j in group:
+                    if i != j and i < max_lines and j < max_lines:
+                        sibling_labels[b, i, j] = 1
+
+    # 提取 class_labels（如果有）
+    class_labels = None
+    if "line_labels" in batch:
+        raw_labels = batch["line_labels"]  # [num_docs, N]
+        class_labels = torch.full((num_docs, max_lines), -100, dtype=torch.long, device=device)
+        for b in range(num_docs):
+            n = min(raw_labels.shape[1], max_lines)
+            class_labels[b, :n] = raw_labels[b, :n].to(device)
+
+    return parent_ids, sibling_labels, class_labels
+
+
 def train_epoch_with_stage_features(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -453,23 +533,12 @@ def train_epoch_with_stage_features(
                 chunks_per_doc=batch.get("chunks_per_doc"),
             )
 
-        # Get labels from HRDoc data
-        # parent_ids: [batch_size, max_lines]
-        # class_labels: [batch_size, max_lines]
-        line_parent_ids = batch.get("parent_ids")
-        line_labels = batch.get("class_labels")
-
-        if line_parent_ids is not None:
-            line_parent_ids = line_parent_ids.to(device)
-        if line_labels is not None:
-            line_labels = line_labels.to(device)
-
-        # 对齐 collator 输出和 feature_extractor 输出的形状
+        # 从 stage collator 输出转换为 Construct 标签
+        # 使用 tree_utils 处理 contain/connect/equality 关系
         _, max_lines_from_features = line_mask.shape
-        if line_parent_ids is not None and line_parent_ids.shape[1] > max_lines_from_features:
-            line_parent_ids = line_parent_ids[:, :max_lines_from_features]
-        if line_labels is not None and line_labels.shape[1] > max_lines_from_features:
-            line_labels = line_labels[:, :max_lines_from_features]
+        line_parent_ids, sibling_labels_matrix, line_labels = convert_stage_labels_to_construct(
+            batch, max_lines_from_features, device
+        )
 
         # TOC-only mode: compress to section-only subgraph (align with paper 4.4)
         if args.toc_only and line_labels is not None:
@@ -504,11 +573,8 @@ def train_epoch_with_stage_features(
             batch_size, max_lines = line_mask.shape
             reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
 
-            # Generate sibling labels from parent_ids (requires reading_orders)
-            sibling_labels = None
-            if line_parent_ids is not None:
-                from examples.comp_hrdoc.models.construct_only import generate_sibling_labels
-                sibling_labels = generate_sibling_labels(line_parent_ids, reading_orders, line_mask)
+            # 使用已转换的 sibling_labels_matrix
+            sibling_labels = sibling_labels_matrix
 
         # Forward pass
         if args.fp16 and scaler is not None:
@@ -658,10 +724,7 @@ def evaluate_with_stage_features(
     visualize_samples: int = 0,  # 可视化的样本数量
 ) -> Dict[str, float]:
     """Evaluate ConstructFromFeatures model using stage features."""
-    from examples.comp_hrdoc.models.construct_only import (
-        compute_construct_metrics,
-        generate_sibling_labels,
-    )
+    from examples.comp_hrdoc.models.construct_only import compute_construct_metrics
     from examples.comp_hrdoc.utils.tree_utils import generate_doc_tree
     from examples.comp_hrdoc.metrics.teds import tree_edit_distance, HAS_APTED
 
@@ -705,13 +768,11 @@ def evaluate_with_stage_features(
             chunks_per_doc=batch.get("chunks_per_doc"),
         )
 
-        line_parent_ids = batch.get("parent_ids")
-        line_labels = batch.get("class_labels")
-
-        if line_parent_ids is not None:
-            line_parent_ids = line_parent_ids.to(device)
-        if line_labels is not None:
-            line_labels = line_labels.to(device)
+        # 从 stage collator 输出转换为 Construct 标签
+        _, max_lines_from_features = line_mask.shape
+        line_parent_ids, sibling_labels_matrix, line_labels = convert_stage_labels_to_construct(
+            batch, max_lines_from_features, device
+        )
 
         # TOC-only mode: compress to section-only subgraph
         if toc_only and line_labels is not None:
@@ -741,9 +802,8 @@ def evaluate_with_stage_features(
             batch_size, max_lines = line_mask.shape
             reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
 
-            sibling_labels = None
-            if line_parent_ids is not None:
-                sibling_labels = generate_sibling_labels(line_parent_ids, reading_orders, line_mask)
+            # 使用已转换的 sibling_labels_matrix
+            sibling_labels = sibling_labels_matrix
 
         outputs = model(
             region_features=line_features,
@@ -952,36 +1012,27 @@ def main():
         # 使用 stage_feature_extractor 的 tokenizer
         tokenizer = stage_feature_extractor.tokenizer
 
-        # 创建数据集
-        train_dataset = HRDocDataset(
+        # 复用 stage 的 DataLoader（支持多 chunk 文档级别处理）
+        data_loader_config = HRDocDataLoaderConfig(
             data_dir=data_dir,
             dataset_name=args.dataset,
-            max_lines=args.max_regions,
-            max_samples=args.max_train_samples,
-            split='train',
-            val_split_ratio=args.val_split_ratio,
-            covmatch=covmatch,
-        )
-        val_dataset = HRDocDataset(
-            data_dir=data_dir,
-            dataset_name=args.dataset,
-            max_lines=args.max_regions,
-            max_samples=args.max_val_samples,
-            split='validation',
-            val_split_ratio=args.val_split_ratio,
-            covmatch=covmatch,
-        )
-
-        logger.info(f"Train dataset: {len(train_dataset)} samples")
-        logger.info(f"Val dataset: {len(val_dataset)} samples")
-
-        # 创建 collator (使用 LayoutXLM tokenizer)
-        collator = HRDocLayoutXLMCollator(
-            tokenizer=tokenizer,
+            document_level=True,  # 文档级别模式，支持多 chunk
             max_length=512,
-            max_lines=args.max_regions,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
         )
-        logger.info(f"Using HRDocLayoutXLMCollator with max_lines={args.max_regions}")
+        data_loader = HRDocDataLoader(tokenizer, data_loader_config)
+        datasets = data_loader.prepare_datasets()
+
+        train_dataset = datasets.get("train", [])
+        val_dataset = datasets.get("validation", [])
+
+        logger.info(f"Train dataset: {len(train_dataset)} documents")
+        logger.info(f"Val dataset: {len(val_dataset)} documents")
+
+        # 复用 stage 的 HRDocDocumentLevelCollator
+        collator = HRDocDocumentLevelCollator(tokenizer)
+        logger.info("Using stage HRDocDocumentLevelCollator (multi-chunk support)")
 
         # 创建 DataLoader
         train_loader = DataLoader(
