@@ -222,7 +222,8 @@ class ConstructTask(BaseTask):
     """4.4 Construct 任务 - 层级结构构建 (Paper Section 4.4.1)
 
     预测父节点、兄弟关系（均使用 softmax CE，N选1）。
-    Root 由 parent_label == -1 隐式表示，无需单独预测。
+    采用论文自指向方案：Root 节点的 parent_label 指向自己（而不是 -1）。
+    这样所有 label 都在 [0, N-1] 范围内，可以直接计算 cross_entropy。
     """
 
     def __init__(self, config: Dict[str, Any] = None):
@@ -244,7 +245,7 @@ class ConstructTask(BaseTask):
                 'sibling_logits': [B, N, N]
             }
             targets: {
-                'parent_labels': [B, N],  # -1 for root
+                'parent_labels': [B, N],  # self-index for root (自指向)
                 'sibling_labels': [B, N]  # -1 for no left sibling
             }
             mask: [B, N]
@@ -280,7 +281,10 @@ class ConstructTask(BaseTask):
         labels: Tensor,  # [B, N]
         mask: Optional[Tensor] = None,
     ) -> Tensor:
-        """计算父节点预测损失 (softmax CE)"""
+        """计算父节点预测损失 (softmax CE)
+
+        论文自指向方案：所有有效节点都计算 loss，包括 root（自指向）。
+        """
         B, N, _ = logits.shape
 
         logits_flat = logits.view(B * N, N)
@@ -291,8 +295,8 @@ class ConstructTask(BaseTask):
             logits_flat = logits_flat[mask_flat]
             labels_flat = labels_flat[mask_flat]
 
-        # 只计算有父节点的区域 (parent >= 0)
-        valid = labels_flat >= 0
+        # 论文自指向方案：所有 label 都在 [0, N-1] 范围内
+        valid = (labels_flat >= 0) & (labels_flat < N)
         if not valid.any():
             return torch.tensor(0.0, device=logits.device)
 
@@ -434,7 +438,7 @@ class DOCTask:
                 parent_labels=parent_labels,
                 mask=mask,
             )
-            # Root is implicitly determined by parent_label == -1
+            # 论文自指向方案: Root is determined by parent_label == self_index
             # No separate root prediction head needed
 
         if 'sibling_logits' in outputs:

@@ -173,8 +173,16 @@ class RegionFeatureCollator:
             bboxes[i, :n] = f['bboxes'][:n]
             categories[i, :n] = f['categories'][:n]
             reading_orders[i, :n] = f['reading_orders'][:n]
-            parent_ids[i, :n] = f['parent_ids'][:n]
             relations[i, :n] = f['relations'][:n]
+
+            # 论文自指向方案：-1（root）转换为 self-index
+            sample_parent_ids = f['parent_ids'][:n]
+            for j in range(n):
+                p = sample_parent_ids[j].item() if hasattr(sample_parent_ids[j], 'item') else sample_parent_ids[j]
+                if p == -1:
+                    parent_ids[i, j] = j  # root 自指向
+                else:
+                    parent_ids[i, j] = p
 
         return {
             'region_features': region_features,  # [batch, max_regions, hidden_size]

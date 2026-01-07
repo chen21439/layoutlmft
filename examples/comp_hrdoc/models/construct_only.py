@@ -449,9 +449,11 @@ def compute_construct_metrics(
 ) -> Dict[str, float]:
     """Compute Construct module evaluation metrics.
 
+    论文自指向方案：所有有效节点都计算指标，包括 root（自指向）。
+
     Args:
         parent_logits: Parent prediction logits
-        parent_labels: Ground truth parent indices (-1 for root)
+        parent_labels: Ground truth parent indices (self-index for root)
         region_mask: Valid region mask
         sibling_logits: Sibling prediction logits (optional)
         sibling_labels: Ground truth left sibling indices (optional)
@@ -465,11 +467,11 @@ def compute_construct_metrics(
     # Predict parent for each node
     pred_parents = parent_logits.argmax(dim=-1)  # [batch, N]
 
-    # Parent accuracy (for non-root nodes)
-    has_parent = (parent_labels >= 0) & region_mask
-    if has_parent.any():
-        correct = (pred_parents == parent_labels) & has_parent
-        parent_acc = correct.sum().float() / has_parent.sum().float()
+    # Parent accuracy: 论文自指向方案，所有有效节点都计算
+    valid = (parent_labels >= 0) & (parent_labels < num_regions) & region_mask
+    if valid.any():
+        correct = (pred_parents == parent_labels) & valid
+        parent_acc = correct.sum().float() / valid.sum().float()
     else:
         parent_acc = torch.tensor(0.0, device=device)
 
@@ -499,9 +501,10 @@ def generate_sibling_labels(
     """Generate left sibling labels from parent IDs and reading order.
 
     For each node, find its left sibling (same parent, immediately before in reading order).
+    论文自指向方案：root 节点的 parent_id == self_index。
 
     Args:
-        parent_ids: [batch, N] parent index for each node (-1 for root)
+        parent_ids: [batch, N] parent index for each node (self-index for root)
         reading_orders: [batch, N] reading order positions (0, 1, 2, ...)
         region_mask: [batch, N] valid region mask
 
@@ -524,7 +527,8 @@ def generate_sibling_labels(
             if not region_mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            if parent_i < 0:  # Root has no siblings
+            # 论文自指向方案：root 自指向，跳过
+            if parent_i == i:  # Root (self-pointing) has no siblings
                 continue
             if parent_i not in parent_to_children:
                 parent_to_children[parent_i] = []
@@ -553,9 +557,10 @@ def generate_sibling_matrix(
 
     Two nodes are siblings if they have the same parent.
     This is kept for backward compatibility.
+    论文自指向方案：root 节点的 parent_id == self_index。
 
     Args:
-        parent_ids: [batch, N] parent index for each node (-1 for root)
+        parent_ids: [batch, N] parent index for each node (self-index for root)
         region_mask: [batch, N] valid region mask
 
     Returns:
@@ -574,14 +579,16 @@ def generate_sibling_matrix(
             if not region_mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            if parent_i < 0:  # Root has no siblings
+            # 论文自指向方案：root 自指向，跳过
+            if parent_i == i:  # Root (self-pointing) has no siblings
                 continue
 
             for j in range(num_regions):
                 if i == j or not region_mask[b, j]:
                     continue
                 parent_j = parent_ids[b, j].item()
-                if parent_i == parent_j and parent_j >= 0:
+                # 两个节点有相同的 parent（且都不是 root）则为 sibling
+                if parent_i == parent_j and parent_j != j:
                     sibling_matrix[b, i, j] = 1
 
     return sibling_matrix

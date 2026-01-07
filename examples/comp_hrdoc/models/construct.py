@@ -267,9 +267,10 @@ class TreeRelationHead(nn.Module):
             parent_logits = parent_logits.masked_fill(combined_mask, -1e4)
             sibling_logits = sibling_logits.masked_fill(combined_mask, -1e4)
 
-            # Diagonal: node cannot be its own parent/sibling
+            # Diagonal: node cannot be its own sibling, but CAN be its own parent (root self-pointing)
+            # 论文 Section 4.4.1: "its parent-child relationship is defined as pointing to itself"
             diag = torch.eye(num_nodes, dtype=torch.bool, device=features.device)
-            parent_logits = parent_logits.masked_fill(diag.unsqueeze(0), -1e4)
+            # Note: parent_logits keeps diagonal for root self-pointing
             sibling_logits = sibling_logits.masked_fill(diag.unsqueeze(0), -1e4)
 
         return {
@@ -347,7 +348,8 @@ class ConstructLoss(nn.Module):
     - Parent prediction loss (softmax CE, N选1)
     - Sibling prediction loss (softmax CE, N选1)
 
-    Note: Root is implicitly indicated by parent_label == -1, no separate head needed.
+    Note: 采用论文自指向方案，Root 节点的 parent label 指向自己（而不是 -1）。
+    这样 logits 维度是 [B, N, N]，所有 label 都在 [0, N-1] 范围内。
     """
 
     def __init__(
@@ -363,7 +365,7 @@ class ConstructLoss(nn.Module):
         self,
         parent_logits: torch.Tensor,   # [batch, N, N]
         sibling_logits: torch.Tensor,  # [batch, N, N]
-        parent_labels: torch.Tensor,   # [batch, N] index of parent (-1 for root)
+        parent_labels: torch.Tensor,   # [batch, N] index of parent (self-index for root)
         sibling_labels: torch.Tensor = None,  # [batch, N] index of left sibling (-1 for none)
         mask: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
@@ -371,7 +373,9 @@ class ConstructLoss(nn.Module):
         Args:
             parent_logits: [batch, N, N] parent prediction scores
             sibling_logits: [batch, N, N] sibling prediction scores
-            parent_labels: [batch, N] ground truth parent indices (-1 = root)
+            parent_labels: [batch, N] ground truth parent indices
+                           Root 节点的 parent_label == self_index (自指向)
+                           其他节点指向其父节点
             sibling_labels: [batch, N] ground truth left sibling indices (-1 = no left sibling)
             mask: [batch, N] valid node mask
 
@@ -385,16 +389,13 @@ class ConstructLoss(nn.Module):
         if mask is None:
             mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
 
-        # Non-root mask (nodes that have a parent)
-        has_parent = (parent_labels >= 0) & mask
-
-        # Parent loss (softmax cross-entropy for non-root nodes)
+        # Parent loss: 所有有效节点都计算 loss（包括 root 自指向）
+        # 论文方案：parent_label 在 [0, N-1] 范围内，root 指向自己
         parent_loss = torch.tensor(0.0, device=device)
-        valid_parent = has_parent & (parent_labels < num_nodes)
+        valid_parent = mask & (parent_labels >= 0) & (parent_labels < num_nodes)
         if valid_parent.any():
             parent_logits_flat = parent_logits.view(-1, num_nodes)
-            parent_labels_clamped = parent_labels.clamp(min=0, max=num_nodes-1)
-            parent_labels_flat = parent_labels_clamped.view(-1)
+            parent_labels_flat = parent_labels.view(-1)
             valid_parent_flat = valid_parent.view(-1)
 
             loss_flat = F.cross_entropy(
@@ -445,8 +446,9 @@ def build_tree_from_predictions(
 ) -> List[Dict]:
     """Build tree structure from predictions
 
-    Root is determined by finding the node that is most likely to have no parent
-    (lowest max parent score, or self-loop detection).
+    采用论文自指向方案：
+    - Root 节点预测自己为 parent（parent_pred == self_index）
+    - 其他节点预测其父节点
 
     Args:
         parent_logits: [num_nodes, num_nodes]
@@ -454,6 +456,7 @@ def build_tree_from_predictions(
 
     Returns:
         List of dicts with 'id', 'parent_id', 'children' keys
+        其中 parent_id == -1 表示 root（与外部接口保持一致）
     """
     num_nodes = parent_logits.size(0)
 
@@ -461,14 +464,7 @@ def build_tree_from_predictions(
         mask = torch.ones(num_nodes, dtype=torch.bool, device=parent_logits.device)
 
     # For each node, find its predicted parent
-    # A node is considered root if it has lowest confidence in having a parent
     parent_preds = parent_logits.argmax(dim=-1)  # [num_nodes]
-    parent_confidence = parent_logits.max(dim=-1).values  # [num_nodes]
-
-    # Find root: node with lowest parent confidence among valid nodes
-    parent_confidence_masked = parent_confidence.clone()
-    parent_confidence_masked[~mask] = float('inf')
-    root_idx = parent_confidence_masked.argmin().item()
 
     # Build nodes
     nodes = []
@@ -477,21 +473,24 @@ def build_tree_from_predictions(
             continue
 
         node = {'id': i, 'children': []}
+        pred_parent = parent_preds[i].item()
 
-        if i == root_idx:
-            node['parent_id'] = -1
+        # 论文自指向方案：如果预测指向自己，则为 root
+        if pred_parent == i:
+            node['parent_id'] = -1  # 转换回 -1 以兼容外部接口
+        elif mask[pred_parent]:
+            node['parent_id'] = pred_parent
         else:
-            # Use predicted parent
-            pred_parent = parent_preds[i].item()
-            # Validate parent is valid and not self
-            if mask[pred_parent] and pred_parent != i:
-                node['parent_id'] = pred_parent
-            else:
-                # Fallback: find best valid parent
-                parent_scores = parent_logits[i].clone()
-                parent_scores[i] = float('-inf')
-                parent_scores[~mask] = float('-inf')
+            # Fallback: find best valid parent (excluding self for non-roots)
+            parent_scores = parent_logits[i].clone()
+            parent_scores[~mask] = float('-inf')
+            # 排除自己只在预测明显错误时使用
+            if parent_scores.max() > float('-inf'):
                 node['parent_id'] = parent_scores.argmax().item()
+                if node['parent_id'] == i:
+                    node['parent_id'] = -1  # 自指向 -> root
+            else:
+                node['parent_id'] = -1  # 无有效候选，设为 root
 
         nodes.append(node)
 

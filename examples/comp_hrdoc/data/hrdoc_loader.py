@@ -450,9 +450,13 @@ class HRDocCollator:
                 )
 
                 # 填充 parent_ids
+                # 论文自指向方案：-1（root）转换为 self-index
                 for j, hp in enumerate(hierarchical_parents):
                     if j < max_lines:
-                        parent_ids[i, j] = hp
+                        if hp == -1:
+                            parent_ids[i, j] = j  # root 自指向
+                        else:
+                            parent_ids[i, j] = hp
 
                 # 填充 sibling_labels
                 for group in sibling_groups:
@@ -614,8 +618,13 @@ class HRDocLayoutXLMCollator:
                     ], dtype=torch.float)
 
                 # parent_ids：直接用 line_id 从树中查找
+                # 论文自指向方案：-1（root）转换为 self-index
                 if line_id < len(hierarchical_parents):
-                    parent_ids[i, line_id] = hierarchical_parents[line_id]
+                    hp = hierarchical_parents[line_id]
+                    if hp == -1:
+                        parent_ids[i, line_id] = line_id  # root 自指向
+                    else:
+                        parent_ids[i, line_id] = hp
 
             # sibling_labels：从 sibling_groups 填充
             for group in sibling_groups:

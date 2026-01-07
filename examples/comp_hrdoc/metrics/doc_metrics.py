@@ -200,11 +200,12 @@ class DOCMetricsComputer:
             self.order_labels.extend(labels[mask_flat].tolist())
 
         # Construct - Parent
+        # 论文自指向方案：所有有效节点都计算指标，包括 root（自指向）
         if parent_preds is not None and parent_labels is not None:
             preds = parent_preds.cpu().numpy().flatten()
             labels = parent_labels.cpu().numpy().flatten()
             mask_flat = mask_np.flatten() if mask_np is not None else np.ones_like(preds, dtype=bool)
-            # 只统计有父节点的区域 (parent_label >= 0)
+            # 论文自指向方案：label 在 [0, N-1] 范围内，不再跳过 -1
             valid = mask_flat & (labels >= 0)
             self.parent_preds.extend(preds[valid].tolist())
             self.parent_labels.extend(labels[valid].tolist())

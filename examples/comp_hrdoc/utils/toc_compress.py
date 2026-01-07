@@ -35,12 +35,14 @@ def compress_to_sections(
     """
     将 line-level parent_ids 压缩到 section-only 子图。
 
+    采用论文自指向方案：root 节点的 parent 指向自己。
+
     Args:
         parent_ids: [L] 每个 line 的 parent index，-1 表示 root
         section_mask: [L] bool，True 表示该 line 是 section
 
     Returns:
-        new_parent_ids: [S] section-only 的 parent indices，-1 表示 root
+        new_parent_ids: [S] section-only 的 parent indices，root 自指向
         old2new: dict，old_idx -> new_idx 映射
         kept_old_indices: List[int]，保留的原始索引列表
     """
@@ -63,15 +65,16 @@ def compress_to_sections(
             p = parent_ids[p].item()
         return -1  # root
 
+    # 论文自指向方案：root 节点的 parent 指向自己
     new_parent_ids = []
-    for old_i in kept_old_indices:
+    for new_i, old_i in enumerate(kept_old_indices):
         p = parent_ids[old_i].item()
         if p == -1:
-            new_parent_ids.append(-1)
+            new_parent_ids.append(new_i)  # root 自指向
         else:
             section_ancestor = climb_to_section(p)
             if section_ancestor == -1:
-                new_parent_ids.append(-1)  # 无 section ancestor，视为 root
+                new_parent_ids.append(new_i)  # 无 section ancestor，视为 root（自指向）
             else:
                 new_parent_ids.append(old2new[section_ancestor])
 
@@ -205,7 +208,8 @@ def generate_sibling_labels_from_parents(
             if not mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            if parent_i < 0:  # root has no siblings
+            # 论文自指向方案：root 自指向，所以 parent_i == i 时是 root，跳过
+            if parent_i == i:  # root (self-pointing) has no siblings
                 continue
             if parent_i not in parent_to_children:
                 parent_to_children[parent_i] = []
