@@ -463,6 +463,13 @@ def train_epoch_with_stage_features(
         if line_labels is not None:
             line_labels = line_labels.to(device)
 
+        # 对齐 collator 输出和 feature_extractor 输出的形状
+        _, max_lines_from_features = line_mask.shape
+        if line_parent_ids is not None and line_parent_ids.shape[1] > max_lines_from_features:
+            line_parent_ids = line_parent_ids[:, :max_lines_from_features]
+        if line_labels is not None and line_labels.shape[1] > max_lines_from_features:
+            line_labels = line_labels[:, :max_lines_from_features]
+
         # TOC-only mode: compress to section-only subgraph (align with paper 4.4)
         if args.toc_only and line_labels is not None:
             from examples.comp_hrdoc.utils.toc_compress import (
