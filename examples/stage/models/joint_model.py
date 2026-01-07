@@ -342,23 +342,16 @@ class JointModel(nn.Module):
             sliced_sizes = img_list.image_sizes[start:end]
             return ImageList(sliced_tensor, sliced_sizes)
 
-        if total_chunks <= micro_bs:
-            # 小 batch，直接处理
-            if image_is_list and image:
-                img_tensor = torch.tensor(image[0]) if not isinstance(image[0], torch.Tensor) else image[0]
-                img_tensor = img_tensor.unsqueeze(0).to(device)
-            else:
-                img_tensor = image
+        # 验证：image 数量必须与 chunks 数量匹配
+        if image_is_list and image and len(image) != total_chunks:
+            raise ValueError(
+                f"Image/Chunks mismatch: len(image)={len(image)}, total_chunks={total_chunks}. "
+                f"This usually means some chunks are missing images."
+            )
 
-            if use_no_grad:
-                with torch.no_grad():
-                    outputs = _run_backbone(input_ids, bbox, attention_mask, img_tensor)
-            else:
-                outputs = _run_backbone(input_ids, bbox, attention_mask, img_tensor)
-            return outputs.hidden_states[-1]
-
-        # 大 batch，分批处理
+        # 分批处理（统一逻辑，无论大小批量）
         all_hidden = []
+
         for start_idx in range(0, total_chunks, micro_bs):
             end_idx = min(start_idx + micro_bs, total_chunks)
 
