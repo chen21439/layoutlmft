@@ -229,6 +229,13 @@ class TreeRelationHead(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_size ** -0.5
 
+    def _log_memory(self, tag: str):
+        """Log CUDA memory usage for debugging"""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**3
+            reserved = torch.cuda.memory_reserved() / 1024**3
+            print(f"[MEM] {tag}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
+
     def forward(
         self,
         features: torch.Tensor,  # [batch, num_nodes, hidden_size]
@@ -247,29 +254,38 @@ class TreeRelationHead(nn.Module):
                 - root_logits: [batch, num_nodes]
         """
         batch_size, num_nodes, hidden_size = features.shape
+        print(f"[DEBUG TreeRelationHead] input: B={batch_size}, N={num_nodes}, H={hidden_size}")
+        self._log_memory("TreeRelationHead start")
 
         # Parent prediction
         parent_q = self.parent_query(features)  # [B, N, H] - child queries
         parent_k = self.parent_key(features)    # [B, N, H] - parent keys
+        self._log_memory("after parent_query/key")
 
         # parent_logits[i, j] = likelihood that j is parent of i
         parent_logits = torch.einsum(
             'bih,hd,bjd->bij',
             parent_q, self.parent_biaffine, parent_k
         ) * self.scale
+        self._log_memory("after parent einsum")
 
         # Sibling prediction
         sib_h = self.sibling_head(features)  # [B, N, H]
         sib_t = self.sibling_tail(features)  # [B, N, H]
+        self._log_memory("after sibling_head/tail")
 
         # Expand for pairwise
         sib_h_exp = sib_h.unsqueeze(2).expand(-1, -1, num_nodes, -1)
         sib_t_exp = sib_t.unsqueeze(1).expand(-1, num_nodes, -1, -1)
+        self._log_memory("after expand (should be view, no alloc)")
 
         sib_h_flat = sib_h_exp.reshape(-1, hidden_size)
         sib_t_flat = sib_t_exp.reshape(-1, hidden_size)
+        self._log_memory("after reshape (may trigger contiguous copy)")
 
         sibling_logits = self.sibling_bilinear(sib_h_flat, sib_t_flat)
+        self._log_memory("after sibling_bilinear")
+
         sibling_logits = sibling_logits.view(batch_size, num_nodes, num_nodes, 2)
 
         # Root prediction
