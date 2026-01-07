@@ -116,13 +116,28 @@ class JointTrainer(Trainer):
             if "doc_id" in inputs:
                 logger.error(f"[ERROR] doc_id: {inputs['doc_id']}")
             if "input_ids" in inputs:
-                logger.error(f"[ERROR] input_ids shape: {inputs['input_ids'].shape}")
+                ids = inputs["input_ids"]
+                logger.error(f"[ERROR] input_ids shape: {ids.shape}, min: {ids.min()}, max: {ids.max()}")
+            if "bbox" in inputs:
+                bbox = inputs["bbox"]
+                logger.error(f"[ERROR] bbox shape: {bbox.shape}")
+                logger.error(f"[ERROR] bbox x min/max: {bbox[:,:,0].min()}/{bbox[:,:,0].max()}, y min/max: {bbox[:,:,1].min()}/{bbox[:,:,1].max()}")
+                logger.error(f"[ERROR] bbox x2 min/max: {bbox[:,:,2].min()}/{bbox[:,:,2].max()}, y2 min/max: {bbox[:,:,3].min()}/{bbox[:,:,3].max()}")
+                # 检查是否有超出 0-1000 范围的坐标
+                if bbox.max() > 1000 or bbox.min() < 0:
+                    logger.error(f"[ERROR] bbox has out-of-range values! Valid range: 0-1000")
             if "image" in inputs:
                 img = inputs["image"]
                 if hasattr(img, 'shape'):
                     logger.error(f"[ERROR] image shape: {img.shape}, dtype: {img.dtype}")
                 elif hasattr(img, 'tensor'):
                     logger.error(f"[ERROR] image (ImageList) tensor shape: {img.tensor.shape}")
+                elif isinstance(img, list):
+                    logger.error(f"[ERROR] image is list, len={len(img)}")
+                    if img:
+                        first_img = img[0]
+                        if hasattr(first_img, 'shape'):
+                            logger.error(f"[ERROR] first image shape: {first_img.shape}")
                 else:
                     logger.error(f"[ERROR] image type: {type(img)}")
             if "line_ids" in inputs:
