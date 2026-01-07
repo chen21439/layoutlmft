@@ -566,16 +566,8 @@ class HRDocLayoutXLMCollator:
                 all_line_ids.append(chunk.get("line_ids", []))
 
         # ========== Step 3: 构建 tensor ==========
-        # 确定 batch 内最大行数
-        max_lines_in_batch = 0
-        for line_ids in all_line_ids:
-            unique_lines = set(lid for lid in line_ids if lid >= 0)
-            if unique_lines:
-                max_lines_in_batch = max(max_lines_in_batch, max(unique_lines) + 1)
-
-        max_lines_in_batch = min(max_lines_in_batch, self.max_lines)
-        if max_lines_in_batch == 0:
-            max_lines_in_batch = 1
+        # 使用固定长度（与 feature_extractor 保持一致）
+        max_lines_in_batch = self.max_lines
 
         # 创建 tensors
         region_ids = torch.full((batch_size, max_lines_in_batch), -1, dtype=torch.long)
