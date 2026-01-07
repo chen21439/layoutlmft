@@ -264,13 +264,6 @@ class ConstructFromFeatures(nn.Module):
         # Loss function
         self.loss_fn = ConstructLoss()
 
-    def _log_memory(self, tag: str):
-        """Log CUDA memory usage for debugging"""
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"[MEM] {tag}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
-
     def forward(
         self,
         region_features: torch.Tensor,
@@ -281,16 +274,11 @@ class ConstructFromFeatures(nn.Module):
         sibling_labels: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
         """Forward pass."""
-        B, N, H = region_features.shape
-        print(f"[DEBUG ConstructFromFeatures] input: B={B}, N={N}, H={H}")
-        self._log_memory("ConstructFromFeatures start")
-
         # Add type embedding
         type_emb = self.type_embedding(categories)
         combined = torch.cat([region_features, type_emb], dim=-1)
         features = self.combine(combined)
         features = self.combine_norm(features)
-        self._log_memory("after type_emb + combine")
 
         # Construct with RoPE
         construct_outputs = self.construct_module(
@@ -298,7 +286,6 @@ class ConstructFromFeatures(nn.Module):
             reading_order=reading_orders,
             mask=region_mask,
         )
-        self._log_memory("after construct_module")
 
         outputs = {
             'construct_features': construct_outputs['construct_features'],
@@ -309,7 +296,6 @@ class ConstructFromFeatures(nn.Module):
 
         # Compute loss
         if parent_labels is not None:
-            self._log_memory("before loss computation")
             loss_dict = self.loss_fn(
                 parent_logits=construct_outputs['parent_logits'],
                 sibling_logits=construct_outputs['sibling_logits'],
@@ -318,7 +304,6 @@ class ConstructFromFeatures(nn.Module):
                 sibling_labels=sibling_labels,
                 mask=region_mask,
             )
-            self._log_memory("after loss computation")
             outputs['loss'] = loss_dict['loss']
             outputs['parent_loss'] = loss_dict['parent_loss']
             outputs['sibling_loss'] = loss_dict['sibling_loss']

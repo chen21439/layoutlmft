@@ -219,22 +219,15 @@ class TreeRelationHead(nn.Module):
         nn.init.xavier_uniform_(self.parent_biaffine)
 
         # Sibling prediction: predict if two nodes are siblings
-        self.sibling_head = nn.Linear(hidden_size, hidden_size)
-        self.sibling_tail = nn.Linear(hidden_size, hidden_size)
-        self.sibling_bilinear = nn.Bilinear(hidden_size, hidden_size, 2)  # sibling or not
+        # Paper 公式18-19: f_ij = FC_q(F_Si) ◦ FC_k(F_Sj) - 使用点积而非 Bilinear
+        self.sibling_query = nn.Linear(hidden_size, hidden_size)
+        self.sibling_key = nn.Linear(hidden_size, hidden_size)
 
         # Root prediction: predict if a node is root
         self.root_classifier = nn.Linear(hidden_size, 1)
 
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_size ** -0.5
-
-    def _log_memory(self, tag: str):
-        """Log CUDA memory usage for debugging"""
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"[MEM] {tag}: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
 
     def forward(
         self,
@@ -250,43 +243,29 @@ class TreeRelationHead(nn.Module):
             Dict with:
                 - parent_logits: [batch, num_nodes, num_nodes]
                   parent_logits[i, j] = score that j is parent of i
-                - sibling_logits: [batch, num_nodes, num_nodes, 2]
+                - sibling_logits: [batch, num_nodes, num_nodes]
+                  sibling_logits[i, j] = score that j is next sibling of i (点积)
                 - root_logits: [batch, num_nodes]
         """
         batch_size, num_nodes, hidden_size = features.shape
-        print(f"[DEBUG TreeRelationHead] input: B={batch_size}, N={num_nodes}, H={hidden_size}")
-        self._log_memory("TreeRelationHead start")
 
         # Parent prediction
         parent_q = self.parent_query(features)  # [B, N, H] - child queries
         parent_k = self.parent_key(features)    # [B, N, H] - parent keys
-        self._log_memory("after parent_query/key")
 
         # parent_logits[i, j] = likelihood that j is parent of i
         parent_logits = torch.einsum(
             'bih,hd,bjd->bij',
             parent_q, self.parent_biaffine, parent_k
         ) * self.scale
-        self._log_memory("after parent einsum")
 
-        # Sibling prediction
-        sib_h = self.sibling_head(features)  # [B, N, H]
-        sib_t = self.sibling_tail(features)  # [B, N, H]
-        self._log_memory("after sibling_head/tail")
+        # Sibling prediction - 论文公式18-19: f_ij = FC_q(F_Si) ◦ FC_k(F_Sj)
+        # 使用点积代替 Bilinear，避免 backward 时巨大的显存占用
+        sib_q = self.sibling_query(features)  # [B, N, H]
+        sib_k = self.sibling_key(features)    # [B, N, H]
 
-        # Expand for pairwise
-        sib_h_exp = sib_h.unsqueeze(2).expand(-1, -1, num_nodes, -1)
-        sib_t_exp = sib_t.unsqueeze(1).expand(-1, num_nodes, -1, -1)
-        self._log_memory("after expand (should be view, no alloc)")
-
-        sib_h_flat = sib_h_exp.reshape(-1, hidden_size)
-        sib_t_flat = sib_t_exp.reshape(-1, hidden_size)
-        self._log_memory("after reshape (may trigger contiguous copy)")
-
-        sibling_logits = self.sibling_bilinear(sib_h_flat, sib_t_flat)
-        self._log_memory("after sibling_bilinear")
-
-        sibling_logits = sibling_logits.view(batch_size, num_nodes, num_nodes, 2)
+        # 点积计算: [B, N, H] @ [B, H, N] -> [B, N, N]
+        sibling_logits = torch.bmm(sib_q, sib_k.transpose(1, 2)) * self.scale
 
         # Root prediction
         root_logits = self.root_classifier(features).squeeze(-1)  # [B, N]
@@ -395,7 +374,7 @@ class ConstructLoss(nn.Module):
     def forward(
         self,
         parent_logits: torch.Tensor,   # [batch, N, N]
-        sibling_logits: torch.Tensor,  # [batch, N, N, 2]
+        sibling_logits: torch.Tensor,  # [batch, N, N]
         root_logits: torch.Tensor,     # [batch, N]
         parent_labels: torch.Tensor,   # [batch, N] index of parent (-1 for root)
         sibling_labels: torch.Tensor = None,  # [batch, N, N] 1 if siblings
@@ -404,7 +383,7 @@ class ConstructLoss(nn.Module):
         """
         Args:
             parent_logits: [batch, N, N] parent prediction scores
-            sibling_logits: [batch, N, N, 2] sibling prediction scores
+            sibling_logits: [batch, N, N] sibling prediction scores (点积)
             root_logits: [batch, N] root prediction scores
             parent_labels: [batch, N] ground truth parent indices (-1 = root)
             sibling_labels: [batch, N, N] ground truth sibling matrix
@@ -454,21 +433,18 @@ class ConstructLoss(nn.Module):
         )
         root_loss = (root_loss * mask.float()).sum() / mask.sum().clamp(min=1)
 
-        # Sibling loss (if labels provided)
+        # Sibling loss (if labels provided) - 使用 BCE，对应论文的点积实现
         sibling_loss = torch.tensor(0.0, device=device)
         if sibling_labels is not None and self.sibling_weight > 0:
             valid_pairs = mask.unsqueeze(2) & mask.unsqueeze(1)
-            sibling_logits_flat = sibling_logits.view(-1, 2)
-            sibling_labels_flat = sibling_labels.view(-1).long()
-            valid_pairs_flat = valid_pairs.view(-1)
-
-            loss_flat = F.cross_entropy(
-                sibling_logits_flat,
-                sibling_labels_flat,
+            # 使用 BCEWithLogitsLoss，因为现在 sibling_logits 是 [B, N, N] 的点积分数
+            loss = F.binary_cross_entropy_with_logits(
+                sibling_logits,
+                sibling_labels.float(),
                 reduction='none'
             )
-            loss_flat = loss_flat * valid_pairs_flat.float()
-            sibling_loss = loss_flat.sum() / valid_pairs_flat.sum().clamp(min=1)
+            loss = loss * valid_pairs.float()
+            sibling_loss = loss.sum() / valid_pairs.sum().clamp(min=1)
 
         # Total loss
         total_loss = (

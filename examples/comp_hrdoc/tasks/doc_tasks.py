@@ -241,7 +241,7 @@ class ConstructTask(BaseTask):
         Args:
             outputs: {
                 'parent_logits': [B, N, N],
-                'sibling_logits': [B, N, N, 2],
+                'sibling_logits': [B, N, N],  # 点积分数
                 'root_logits': [B, N]
             }
             targets: {
@@ -310,12 +310,12 @@ class ConstructTask(BaseTask):
 
     def _compute_sibling_loss(
         self,
-        logits: Tensor,  # [B, N, N, 2]
+        logits: Tensor,  # [B, N, N] 点积分数
         labels: Tensor,  # [B, N, N]
         mask: Optional[Tensor] = None,
     ) -> Tensor:
-        """计算兄弟关系损失"""
-        B, N, _, _ = logits.shape
+        """计算兄弟关系损失（BCE）"""
+        B, N, _ = logits.shape
 
         if mask is not None:
             # Create pairwise mask
@@ -327,17 +327,13 @@ class ConstructTask(BaseTask):
         triu_mask = torch.triu(torch.ones(N, N, dtype=torch.bool, device=logits.device), diagonal=1)
         mask_2d = mask_2d & triu_mask.unsqueeze(0)
 
-        logits_flat = logits.view(-1, 2)
-        labels_flat = labels.view(-1).long()
-        mask_flat = mask_2d.view(-1)
-
-        logits_valid = logits_flat[mask_flat]
-        labels_valid = labels_flat[mask_flat]
+        logits_valid = logits[mask_2d]
+        labels_valid = labels[mask_2d].float()
 
         if logits_valid.shape[0] == 0:
             return torch.tensor(0.0, device=logits.device)
 
-        return F.cross_entropy(logits_valid, labels_valid)
+        return F.binary_cross_entropy_with_logits(logits_valid, labels_valid)
 
     def _compute_root_loss(
         self,
@@ -368,7 +364,7 @@ class ConstructTask(BaseTask):
         Args:
             outputs: {
                 'parent_logits': [B, N, N],
-                'sibling_logits': [B, N, N, 2],
+                'sibling_logits': [B, N, N],  # 点积分数
                 'root_logits': [B, N]
             }
 
@@ -381,7 +377,8 @@ class ConstructTask(BaseTask):
             result['pred_parents'] = outputs['parent_logits'].argmax(dim=-1)
 
         if 'sibling_logits' in outputs:
-            result['pred_siblings'] = outputs['sibling_logits'].argmax(dim=-1)
+            # 点积分数 > 0 表示是 sibling
+            result['pred_siblings'] = (outputs['sibling_logits'] > 0).long()
 
         if 'root_logits' in outputs:
             result['pred_roots'] = (outputs['root_logits'] > 0).float()
@@ -486,7 +483,8 @@ class DOCTask:
                 )
 
         if 'sibling_logits' in outputs:
-            sibling_preds = outputs['sibling_logits'].argmax(dim=-1)
+            # 点积分数 > 0 表示是 sibling
+            sibling_preds = (outputs['sibling_logits'] > 0).long()
             self.metrics_computer.update(
                 sibling_preds=sibling_preds,
                 sibling_labels=targets.get('sibling_labels'),

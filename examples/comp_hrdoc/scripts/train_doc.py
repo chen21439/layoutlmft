@@ -533,20 +533,10 @@ def train_epoch_with_stage_features(
             loss = outputs["loss"] / args.gradient_accumulation_steps
 
         # Backward pass
-        if step == 0:  # Only log first step to avoid spam
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"[MEM] before backward: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
-
         if args.fp16 and scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
-
-        if step == 0:
-            allocated = torch.cuda.memory_allocated() / 1024**3
-            reserved = torch.cuda.memory_reserved() / 1024**3
-            print(f"[MEM] after backward: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB")
 
         # Gradient accumulation
         if (step + 1) % args.gradient_accumulation_steps == 0:

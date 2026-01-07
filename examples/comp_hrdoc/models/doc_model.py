@@ -527,7 +527,7 @@ class DOCModel(nn.Module):
                 - relation_logits: [batch, num_regions, num_regions, num_relations]
                 - enhanced_features: [batch, num_regions, hidden_size]
                 - parent_logits: [batch, num_regions, num_regions] (if use_construct)
-                - sibling_logits: [batch, num_regions, num_regions, 2] (if use_construct)
+                - sibling_logits: [batch, num_regions, num_regions] (if use_construct)
                 - root_logits: [batch, num_regions] (if use_construct)
                 - loss: Total loss (if training labels provided)
                 - cls_loss: Semantic classification loss (if use_semantic)
