@@ -120,7 +120,8 @@ class StageFeatureExtractor:
         bbox = bbox.to(self.device)
         attention_mask = attention_mask.to(self.device)
         line_ids = line_ids.to(self.device)
-        if image is not None:
+        # image 可能是 list（来自 DocumentLevelCollator），由模型内部处理
+        if image is not None and isinstance(image, torch.Tensor):
             image = image.to(self.device)
 
         # Step 1: 获取 backbone hidden states
