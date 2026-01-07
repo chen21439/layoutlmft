@@ -53,14 +53,17 @@ class StageFeatureExtractor:
         checkpoint_path: str,
         device: str = None,
         config: Any = None,
+        max_lines: int = 128,
     ):
         """
         Args:
             checkpoint_path: stage JointModel checkpoint 路径
             device: 计算设备 ("cuda" / "cpu")
             config: 配置对象（可选，用于 tokenizer fallback）
+            max_lines: 固定的最大行数（用于 padding）
         """
         self.checkpoint_path = checkpoint_path
+        self.max_lines = max_lines
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
@@ -204,18 +207,18 @@ class StageFeatureExtractor:
         masks_list: list,
         device: torch.device,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """将不同长度的特征填充到相同长度"""
+        """将不同长度的特征填充到固定长度 (self.max_lines)"""
         num_docs = len(features_list)
-        max_lines = max(f.shape[0] for f in features_list)
+        max_lines = self.max_lines  # 使用固定长度
         hidden_dim = features_list[0].shape[1]
 
         line_features = torch.zeros(num_docs, max_lines, hidden_dim, device=device)
         line_mask = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
 
         for b, (features, mask) in enumerate(zip(features_list, masks_list)):
-            num_lines = features.shape[0]
-            line_features[b, :num_lines] = features
-            line_mask[b, :num_lines] = mask
+            num_lines = min(features.shape[0], max_lines)  # 截断超长的
+            line_features[b, :num_lines] = features[:num_lines]
+            line_mask[b, :num_lines] = mask[:num_lines]
 
         return line_features, line_mask
 

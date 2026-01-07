@@ -772,6 +772,7 @@ def main():
         stage_feature_extractor = StageFeatureExtractor(
             checkpoint_path=args.stage_checkpoint,
             device=str(device),
+            max_lines=args.max_regions,
         )
         logger.info(f"Loaded StageFeatureExtractor from: {args.stage_checkpoint}")
 

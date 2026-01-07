@@ -62,11 +62,12 @@ from detectron2.data.transforms import ResizeTransform, TransformList
 
 
 def normalize_bbox(bbox, size):
+    # 归一化到 0-1000 范围，并 clip 防止越界
     return [
-        int(1000 * bbox[0] / size[0]),
-        int(1000 * bbox[1] / size[1]),
-        int(1000 * bbox[2] / size[0]),
-        int(1000 * bbox[3] / size[1]),
+        max(0, min(1000, int(1000 * bbox[0] / size[0]))),
+        max(0, min(1000, int(1000 * bbox[1] / size[1]))),
+        max(0, min(1000, int(1000 * bbox[2] / size[0]))),
+        max(0, min(1000, int(1000 * bbox[3] / size[1]))),
     ]
 
 
