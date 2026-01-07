@@ -395,7 +395,9 @@ class ConstructLoss(nn.Module):
         valid_parent = mask & (parent_labels >= 0) & (parent_labels < num_nodes)
         if valid_parent.any():
             parent_logits_flat = parent_logits.view(-1, num_nodes)
-            parent_labels_flat = parent_labels.view(-1)
+            # Clamp labels to avoid CUDA assert (padding positions have -1)
+            parent_labels_clamped = parent_labels.clamp(min=0, max=num_nodes-1)
+            parent_labels_flat = parent_labels_clamped.view(-1)
             valid_parent_flat = valid_parent.view(-1)
 
             loss_flat = F.cross_entropy(
