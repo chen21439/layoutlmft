@@ -349,6 +349,17 @@ class JointModel(nn.Module):
                 f"This usually means some chunks are missing images."
             )
 
+        # DEBUG: 打印输入信息（仅首次）
+        if not hasattr(self, '_debug_encode_logged'):
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"[DEBUG encode_with_micro_batch] total_chunks={total_chunks}, micro_bs={micro_bs}")
+            logger.warning(f"[DEBUG] input_ids: shape={input_ids.shape}, dtype={input_ids.dtype}, min={input_ids.min()}, max={input_ids.max()}")
+            logger.warning(f"[DEBUG] bbox: shape={bbox.shape}, dtype={bbox.dtype}, min={bbox.min()}, max={bbox.max()}")
+            if image_is_list and image:
+                logger.warning(f"[DEBUG] image: list len={len(image)}, first elem type={type(image[0])}")
+            self._debug_encode_logged = True
+
         # 分批处理（统一逻辑，无论大小批量）
         all_hidden = []
 
