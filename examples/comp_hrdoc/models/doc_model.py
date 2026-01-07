@@ -528,7 +528,6 @@ class DOCModel(nn.Module):
                 - enhanced_features: [batch, num_regions, hidden_size]
                 - parent_logits: [batch, num_regions, num_regions] (if use_construct)
                 - sibling_logits: [batch, num_regions, num_regions] (if use_construct)
-                - root_logits: [batch, num_regions] (if use_construct)
                 - loss: Total loss (if training labels provided)
                 - cls_loss: Semantic classification loss (if use_semantic)
                 - order_loss: Order module loss
@@ -636,14 +635,12 @@ class DOCModel(nn.Module):
             outputs['construct_features'] = construct_outputs['construct_features']
             outputs['parent_logits'] = construct_outputs['parent_logits']
             outputs['sibling_logits'] = construct_outputs['sibling_logits']
-            outputs['root_logits'] = construct_outputs['root_logits']
 
             # Construct loss
             if parent_labels is not None:
                 construct_loss_dict = self.construct_loss_fn(
                     parent_logits=construct_outputs['parent_logits'],
                     sibling_logits=construct_outputs['sibling_logits'],
-                    root_logits=construct_outputs['root_logits'],
                     parent_labels=parent_labels,
                     sibling_labels=sibling_labels,
                     mask=region_mask,
@@ -652,7 +649,6 @@ class DOCModel(nn.Module):
                 outputs['construct_loss'] = construct_loss
                 outputs['parent_loss'] = construct_loss_dict['parent_loss']
                 outputs['sibling_loss'] = construct_loss_dict['sibling_loss']
-                outputs['root_loss'] = construct_loss_dict['root_loss']
 
         # ==================== Total Loss (Weighted Combination) ====================
         total_loss = (
@@ -717,13 +713,12 @@ class DOCModel(nn.Module):
                 for b in range(batch_size):
                     tree = build_tree_from_predictions(
                         parent_logits=outputs['parent_logits'][b],
-                        root_logits=outputs['root_logits'][b],
                         mask=region_mask[b] if region_mask is not None else None,
                     )
                     trees.append(tree)
                 results['tree_structure'] = trees
                 results['parent_logits'] = outputs['parent_logits']
-                results['root_logits'] = outputs['root_logits']
+                results['sibling_logits'] = outputs['sibling_logits']
 
             return results
 
@@ -876,11 +871,13 @@ def compute_tree_accuracy(
     pred_parents: torch.Tensor,  # [batch, N, N] parent logits
     true_parents: torch.Tensor,  # [batch, N] parent indices
     mask: torch.Tensor = None,
+    pred_siblings: torch.Tensor = None,  # [batch, N, N] sibling logits (optional)
+    true_siblings: torch.Tensor = None,  # [batch, N] sibling indices (optional)
 ) -> Dict[str, float]:
     """Compute tree structure accuracy
 
     Returns:
-        Dict with parent_accuracy, root_accuracy
+        Dict with parent_accuracy (and sibling_accuracy if provided)
     """
     batch_size, num_nodes = true_parents.shape
 
@@ -898,17 +895,19 @@ def compute_tree_accuracy(
     else:
         parent_acc = 0.0
 
-    # Root accuracy
-    is_root = (true_parents == -1) & mask
-    pred_is_root = (pred_parent_indices == torch.arange(
-        num_nodes, device=pred_parents.device
-    ).unsqueeze(0))  # diagonal = self-reference = root
-
-    # For root detection, we need to check root_logits separately
-    # This is a simplified version
-    root_acc = 0.0
-
-    return {
+    result = {
         'parent_accuracy': parent_acc.item() if isinstance(parent_acc, torch.Tensor) else parent_acc,
-        'root_accuracy': root_acc,
     }
+
+    # Sibling accuracy (if provided)
+    if pred_siblings is not None and true_siblings is not None:
+        pred_sibling_indices = pred_siblings.argmax(dim=-1)  # [batch, N]
+        has_sibling = (true_siblings >= 0) & mask
+        if has_sibling.any():
+            correct = (pred_sibling_indices == true_siblings) & has_sibling
+            sibling_acc = correct.sum().float() / has_sibling.sum().float()
+        else:
+            sibling_acc = 0.0
+        result['sibling_accuracy'] = sibling_acc.item() if isinstance(sibling_acc, torch.Tensor) else sibling_acc
+
+    return result

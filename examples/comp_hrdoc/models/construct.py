@@ -200,9 +200,10 @@ class RoPETransformerEncoder(nn.Module):
 
 
 class TreeRelationHead(nn.Module):
-    """Tree-aware Relation Prediction Head
+    """Tree-aware Relation Prediction Head (Paper Section 4.4.1)
 
     Predicts parent-child and sibling relationships for TOC generation.
+    Uses dot product scoring (Eq. 18-19): f_ij = FC_q(F_Si) · FC_k(F_Sj)
     """
 
     def __init__(
@@ -212,19 +213,15 @@ class TreeRelationHead(nn.Module):
     ):
         super().__init__()
 
-        # Parent prediction: for each node, predict which node is its parent
+        # Parent prediction (Eq. 18-19): f_ij = FC_q(F_Si) · FC_k(F_Sj)
+        # For each node i, predict which node j is its parent
         self.parent_query = nn.Linear(hidden_size, hidden_size)
         self.parent_key = nn.Linear(hidden_size, hidden_size)
-        self.parent_biaffine = nn.Parameter(torch.zeros(hidden_size, hidden_size))
-        nn.init.xavier_uniform_(self.parent_biaffine)
 
-        # Sibling prediction: predict if two nodes are siblings
-        # Paper 公式18-19: f_ij = FC_q(F_Si) ◦ FC_k(F_Sj) - 使用点积而非 Bilinear
+        # Sibling prediction (same formulation as parent)
+        # For each node i, predict which node j is its left sibling
         self.sibling_query = nn.Linear(hidden_size, hidden_size)
         self.sibling_key = nn.Linear(hidden_size, hidden_size)
-
-        # Root prediction: predict if a node is root
-        self.root_classifier = nn.Linear(hidden_size, 1)
 
         self.dropout = nn.Dropout(dropout)
         self.scale = hidden_size ** -0.5
@@ -244,31 +241,21 @@ class TreeRelationHead(nn.Module):
                 - parent_logits: [batch, num_nodes, num_nodes]
                   parent_logits[i, j] = score that j is parent of i
                 - sibling_logits: [batch, num_nodes, num_nodes]
-                  sibling_logits[i, j] = score that j is next sibling of i (点积)
-                - root_logits: [batch, num_nodes]
+                  sibling_logits[i, j] = score that j is left sibling of i
         """
         batch_size, num_nodes, hidden_size = features.shape
 
-        # Parent prediction
+        # Parent prediction: dot product (Eq. 18-19)
         parent_q = self.parent_query(features)  # [B, N, H] - child queries
         parent_k = self.parent_key(features)    # [B, N, H] - parent keys
-
         # parent_logits[i, j] = likelihood that j is parent of i
-        parent_logits = torch.einsum(
-            'bih,hd,bjd->bij',
-            parent_q, self.parent_biaffine, parent_k
-        ) * self.scale
+        parent_logits = torch.bmm(parent_q, parent_k.transpose(1, 2)) * self.scale
 
-        # Sibling prediction - 论文公式18-19: f_ij = FC_q(F_Si) ◦ FC_k(F_Sj)
-        # 使用点积代替 Bilinear，避免 backward 时巨大的显存占用
+        # Sibling prediction: dot product (same as parent)
         sib_q = self.sibling_query(features)  # [B, N, H]
         sib_k = self.sibling_key(features)    # [B, N, H]
-
-        # 点积计算: [B, N, H] @ [B, H, N] -> [B, N, N]
+        # sibling_logits[i, j] = likelihood that j is left sibling of i
         sibling_logits = torch.bmm(sib_q, sib_k.transpose(1, 2)) * self.scale
-
-        # Root prediction
-        root_logits = self.root_classifier(features).squeeze(-1)  # [B, N]
 
         # Apply mask with large negative value instead of -inf for numerical stability
         if mask is not None:
@@ -278,14 +265,16 @@ class TreeRelationHead(nn.Module):
 
             # Use -1e4 instead of -inf to avoid NaN in softmax (fp16 safe)
             parent_logits = parent_logits.masked_fill(combined_mask, -1e4)
-            # Diagonal: node cannot be its own parent
+            sibling_logits = sibling_logits.masked_fill(combined_mask, -1e4)
+
+            # Diagonal: node cannot be its own parent/sibling
             diag = torch.eye(num_nodes, dtype=torch.bool, device=features.device)
             parent_logits = parent_logits.masked_fill(diag.unsqueeze(0), -1e4)
+            sibling_logits = sibling_logits.masked_fill(diag.unsqueeze(0), -1e4)
 
         return {
             'parent_logits': parent_logits,
             'sibling_logits': sibling_logits,
-            'root_logits': root_logits,
         }
 
 
@@ -352,45 +341,42 @@ class ConstructModule(nn.Module):
 
 
 class ConstructLoss(nn.Module):
-    """Construct Module Loss
+    """Construct Module Loss (Paper Section 4.4.1)
 
-    Combines:
-    - Parent prediction loss (softmax CE)
-    - Sibling prediction loss (BCE)
-    - Root prediction loss (BCE)
+    Combines (using softmax CE as dependency parsing, per paper):
+    - Parent prediction loss (softmax CE, N选1)
+    - Sibling prediction loss (softmax CE, N选1)
+
+    Note: Root is implicitly indicated by parent_label == -1, no separate head needed.
     """
 
     def __init__(
         self,
         parent_weight: float = 1.0,
         sibling_weight: float = 0.5,
-        root_weight: float = 0.3,
     ):
         super().__init__()
         self.parent_weight = parent_weight
         self.sibling_weight = sibling_weight
-        self.root_weight = root_weight
 
     def forward(
         self,
         parent_logits: torch.Tensor,   # [batch, N, N]
         sibling_logits: torch.Tensor,  # [batch, N, N]
-        root_logits: torch.Tensor,     # [batch, N]
         parent_labels: torch.Tensor,   # [batch, N] index of parent (-1 for root)
-        sibling_labels: torch.Tensor = None,  # [batch, N, N] 1 if siblings
+        sibling_labels: torch.Tensor = None,  # [batch, N] index of left sibling (-1 for none)
         mask: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
             parent_logits: [batch, N, N] parent prediction scores
-            sibling_logits: [batch, N, N] sibling prediction scores (点积)
-            root_logits: [batch, N] root prediction scores
+            sibling_logits: [batch, N, N] sibling prediction scores
             parent_labels: [batch, N] ground truth parent indices (-1 = root)
-            sibling_labels: [batch, N, N] ground truth sibling matrix
+            sibling_labels: [batch, N] ground truth left sibling indices (-1 = no left sibling)
             mask: [batch, N] valid node mask
 
         Returns:
-            Dict with parent_loss, sibling_loss, root_loss, total_loss
+            Dict with parent_loss, sibling_loss, total_loss
         """
         batch_size, num_nodes = parent_labels.shape
         device = parent_logits.device
@@ -399,18 +385,13 @@ class ConstructLoss(nn.Module):
         if mask is None:
             mask = torch.ones(batch_size, num_nodes, dtype=torch.bool, device=device)
 
-        # Root labels: 1 if parent_label == -1
-        root_labels = (parent_labels == -1).float()
-
         # Non-root mask (nodes that have a parent)
         has_parent = (parent_labels >= 0) & mask
 
         # Parent loss (softmax cross-entropy for non-root nodes)
         parent_loss = torch.tensor(0.0, device=device)
-        # Valid parent: has_parent AND parent_labels < num_nodes
         valid_parent = has_parent & (parent_labels < num_nodes)
         if valid_parent.any():
-            # For nodes with valid parents, compute CE loss
             parent_logits_flat = parent_logits.view(-1, num_nodes)
             parent_labels_clamped = parent_labels.clamp(min=0, max=num_nodes-1)
             parent_labels_flat = parent_labels_clamped.view(-1)
@@ -421,56 +402,54 @@ class ConstructLoss(nn.Module):
                 parent_labels_flat,
                 reduction='none'
             )
-
             loss_flat = loss_flat * valid_parent_flat.float()
             parent_loss = loss_flat.sum() / valid_parent_flat.sum().clamp(min=1)
 
-        # Root loss (BCE)
-        root_loss = F.binary_cross_entropy_with_logits(
-            root_logits,
-            root_labels,
-            reduction='none'
-        )
-        root_loss = (root_loss * mask.float()).sum() / mask.sum().clamp(min=1)
-
-        # Sibling loss (if labels provided) - 使用 BCE，对应论文的点积实现
+        # Sibling loss (softmax CE, N选1, same as parent)
         sibling_loss = torch.tensor(0.0, device=device)
         if sibling_labels is not None and self.sibling_weight > 0:
-            valid_pairs = mask.unsqueeze(2) & mask.unsqueeze(1)
-            # 使用 BCEWithLogitsLoss，因为现在 sibling_logits 是 [B, N, N] 的点积分数
-            loss = F.binary_cross_entropy_with_logits(
-                sibling_logits,
-                sibling_labels.float(),
-                reduction='none'
-            )
-            loss = loss * valid_pairs.float()
-            sibling_loss = loss.sum() / valid_pairs.sum().clamp(min=1)
+            # Nodes that have a left sibling
+            has_sibling = (sibling_labels >= 0) & mask
+            valid_sibling = has_sibling & (sibling_labels < num_nodes)
+
+            if valid_sibling.any():
+                sibling_logits_flat = sibling_logits.view(-1, num_nodes)
+                sibling_labels_clamped = sibling_labels.clamp(min=0, max=num_nodes-1)
+                sibling_labels_flat = sibling_labels_clamped.view(-1)
+                valid_sibling_flat = valid_sibling.view(-1)
+
+                loss_flat = F.cross_entropy(
+                    sibling_logits_flat,
+                    sibling_labels_flat,
+                    reduction='none'
+                )
+                loss_flat = loss_flat * valid_sibling_flat.float()
+                sibling_loss = loss_flat.sum() / valid_sibling_flat.sum().clamp(min=1)
 
         # Total loss
         total_loss = (
             self.parent_weight * parent_loss +
-            self.sibling_weight * sibling_loss +
-            self.root_weight * root_loss
+            self.sibling_weight * sibling_loss
         )
 
         return {
             'parent_loss': parent_loss,
             'sibling_loss': sibling_loss,
-            'root_loss': root_loss,
             'loss': total_loss,
         }
 
 
 def build_tree_from_predictions(
     parent_logits: torch.Tensor,  # [num_nodes, num_nodes]
-    root_logits: torch.Tensor,    # [num_nodes]
     mask: torch.Tensor = None,    # [num_nodes]
 ) -> List[Dict]:
     """Build tree structure from predictions
 
+    Root is determined by finding the node that is most likely to have no parent
+    (lowest max parent score, or self-loop detection).
+
     Args:
         parent_logits: [num_nodes, num_nodes]
-        root_logits: [num_nodes]
         mask: [num_nodes] valid nodes
 
     Returns:
@@ -481,12 +460,17 @@ def build_tree_from_predictions(
     if mask is None:
         mask = torch.ones(num_nodes, dtype=torch.bool, device=parent_logits.device)
 
-    # Find root (highest root score among valid nodes)
-    root_scores = root_logits.clone()
-    root_scores[~mask] = float('-inf')
-    root_idx = root_scores.argmax().item()
+    # For each node, find its predicted parent
+    # A node is considered root if it has lowest confidence in having a parent
+    parent_preds = parent_logits.argmax(dim=-1)  # [num_nodes]
+    parent_confidence = parent_logits.max(dim=-1).values  # [num_nodes]
 
-    # For each non-root node, find parent
+    # Find root: node with lowest parent confidence among valid nodes
+    parent_confidence_masked = parent_confidence.clone()
+    parent_confidence_masked[~mask] = float('inf')
+    root_idx = parent_confidence_masked.argmin().item()
+
+    # Build nodes
     nodes = []
     for i in range(num_nodes):
         if not mask[i]:
@@ -497,11 +481,17 @@ def build_tree_from_predictions(
         if i == root_idx:
             node['parent_id'] = -1
         else:
-            # Find best parent (exclude self)
-            parent_scores = parent_logits[i].clone()
-            parent_scores[i] = float('-inf')
-            parent_scores[~mask] = float('-inf')
-            node['parent_id'] = parent_scores.argmax().item()
+            # Use predicted parent
+            pred_parent = parent_preds[i].item()
+            # Validate parent is valid and not self
+            if mask[pred_parent] and pred_parent != i:
+                node['parent_id'] = pred_parent
+            else:
+                # Fallback: find best valid parent
+                parent_scores = parent_logits[i].clone()
+                parent_scores[i] = float('-inf')
+                parent_scores[~mask] = float('-inf')
+                node['parent_id'] = parent_scores.argmax().item()
 
         nodes.append(node)
 

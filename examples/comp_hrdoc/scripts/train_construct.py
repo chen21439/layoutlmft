@@ -168,7 +168,6 @@ def train_epoch(
     total_loss = 0.0
     total_parent_loss = 0.0
     total_sibling_loss = 0.0
-    total_root_loss = 0.0
     num_batches = 0
 
     progress_bar = tqdm(dataloader, desc="Training")
@@ -182,8 +181,8 @@ def train_epoch(
         reading_orders = batch['reading_orders'].to(device)
         parent_ids = batch['parent_ids'].to(device)
 
-        # Generate sibling labels from parent_ids
-        sibling_labels = generate_sibling_labels(parent_ids, region_mask)
+        # Generate sibling labels from parent_ids (requires reading_orders)
+        sibling_labels = generate_sibling_labels(parent_ids, reading_orders, region_mask)
 
         # Forward
         if args.fp16 and scaler is not None:
@@ -231,20 +230,18 @@ def train_epoch(
         total_loss += outputs['loss'].item()
         total_parent_loss += outputs['parent_loss'].item()
         total_sibling_loss += outputs['sibling_loss'].item()
-        total_root_loss += outputs['root_loss'].item()
         num_batches += 1
 
         progress_bar.set_postfix({
             'loss': f"{outputs['loss'].item():.4f}",
             'parent': f"{outputs['parent_loss'].item():.4f}",
-            'root': f"{outputs['root_loss'].item():.4f}",
+            'sibling': f"{outputs['sibling_loss'].item():.4f}",
         })
 
     return {
         'loss': total_loss / num_batches,
         'parent_loss': total_parent_loss / num_batches,
         'sibling_loss': total_sibling_loss / num_batches,
-        'root_loss': total_root_loss / num_batches,
     }
 
 
@@ -260,13 +257,11 @@ def evaluate(
     total_loss = 0.0
     total_parent_loss = 0.0
     total_sibling_loss = 0.0
-    total_root_loss = 0.0
     num_batches = 0
 
     all_metrics = {
         'parent_accuracy': 0.0,
-        'root_accuracy': 0.0,
-        'root_f1': 0.0,
+        'sibling_accuracy': 0.0,
     }
     num_metric_batches = 0
 
@@ -278,8 +273,8 @@ def evaluate(
         reading_orders = batch['reading_orders'].to(device)
         parent_ids = batch['parent_ids'].to(device)
 
-        # Generate sibling labels
-        sibling_labels = generate_sibling_labels(parent_ids, region_mask)
+        # Generate sibling labels (requires reading_orders)
+        sibling_labels = generate_sibling_labels(parent_ids, reading_orders, region_mask)
 
         outputs = model(
             region_features=region_features,
@@ -294,26 +289,25 @@ def evaluate(
         total_loss += outputs['loss'].item()
         total_parent_loss += outputs['parent_loss'].item()
         total_sibling_loss += outputs['sibling_loss'].item()
-        total_root_loss += outputs['root_loss'].item()
         num_batches += 1
 
         # Compute metrics
         metrics = compute_construct_metrics(
             parent_logits=outputs['parent_logits'],
-            root_logits=outputs['root_logits'],
             parent_labels=parent_ids,
             region_mask=region_mask,
+            sibling_logits=outputs['sibling_logits'],
+            sibling_labels=sibling_labels,
         )
 
         for k, v in metrics.items():
-            all_metrics[k] += v
+            all_metrics[k] = all_metrics.get(k, 0.0) + v
         num_metric_batches += 1
 
     result = {
         'loss': total_loss / num_batches,
         'parent_loss': total_parent_loss / num_batches,
         'sibling_loss': total_sibling_loss / num_batches,
-        'root_loss': total_root_loss / num_batches,
     }
 
     for k in all_metrics:
@@ -400,7 +394,6 @@ def main():
     # Update loss weights
     model.loss_fn.parent_weight = args.parent_weight
     model.loss_fn.sibling_weight = args.sibling_weight
-    model.loss_fn.root_weight = args.root_weight
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -447,8 +440,7 @@ def main():
         logger.info(
             f"Train - Loss: {train_metrics['loss']:.4f}, "
             f"Parent: {train_metrics['parent_loss']:.4f}, "
-            f"Sibling: {train_metrics['sibling_loss']:.4f}, "
-            f"Root: {train_metrics['root_loss']:.4f}"
+            f"Sibling: {train_metrics['sibling_loss']:.4f}"
         )
 
         # Evaluate
@@ -456,13 +448,11 @@ def main():
         logger.info(
             f"Val - Loss: {val_metrics['loss']:.4f}, "
             f"Parent: {val_metrics['parent_loss']:.4f}, "
-            f"Sibling: {val_metrics['sibling_loss']:.4f}, "
-            f"Root: {val_metrics['root_loss']:.4f}"
+            f"Sibling: {val_metrics['sibling_loss']:.4f}"
         )
         logger.info(
             f"Val - Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
-            f"Root Acc: {val_metrics['root_accuracy']:.4f}, "
-            f"Root F1: {val_metrics['root_f1']:.4f}"
+            f"Sibling Acc: {val_metrics.get('sibling_accuracy', 0):.4f}"
         )
 
         # Save best model

@@ -39,7 +39,7 @@ class ConstructWithOrderFeatures(nn.Module):
             ↓
         ConstructModule (trainable)
             ↓
-        parent/sibling/root predictions
+        parent/sibling predictions
     """
 
     def __init__(
@@ -140,7 +140,6 @@ class ConstructWithOrderFeatures(nn.Module):
             'construct_features': construct_outputs['construct_features'],
             'parent_logits': construct_outputs['parent_logits'],
             'sibling_logits': construct_outputs['sibling_logits'],
-            'root_logits': construct_outputs['root_logits'],
             'order_logits': order_outputs['order_logits'],  # From frozen Order
         }
 
@@ -149,7 +148,6 @@ class ConstructWithOrderFeatures(nn.Module):
             loss_dict = self.loss_fn(
                 parent_logits=construct_outputs['parent_logits'],
                 sibling_logits=construct_outputs['sibling_logits'],
-                root_logits=construct_outputs['root_logits'],
                 parent_labels=parent_labels,
                 sibling_labels=sibling_labels,
                 mask=region_mask,
@@ -157,7 +155,6 @@ class ConstructWithOrderFeatures(nn.Module):
             outputs['loss'] = loss_dict['loss']
             outputs['parent_loss'] = loss_dict['parent_loss']
             outputs['sibling_loss'] = loss_dict['sibling_loss']
-            outputs['root_loss'] = loss_dict['root_loss']
 
         return outputs
 
@@ -202,7 +199,6 @@ class ConstructWithOrderFeatures(nn.Module):
             for b in range(batch_size):
                 tree = build_tree_from_predictions(
                     parent_logits=construct_outputs['parent_logits'][b],
-                    root_logits=construct_outputs['root_logits'][b],
                     mask=region_mask[b] if region_mask is not None else None,
                 )
                 trees.append(tree)
@@ -211,7 +207,7 @@ class ConstructWithOrderFeatures(nn.Module):
                 'reading_order': reading_orders,
                 'trees': trees,
                 'parent_logits': construct_outputs['parent_logits'],
-                'root_logits': construct_outputs['root_logits'],
+                'sibling_logits': construct_outputs['sibling_logits'],
             }
 
 
@@ -228,7 +224,7 @@ class ConstructFromFeatures(nn.Module):
             ↓
         ConstructModule (with RoPE using reading_order)
             ↓
-        parent/sibling/root predictions
+        parent/sibling predictions
     """
 
     def __init__(
@@ -291,7 +287,6 @@ class ConstructFromFeatures(nn.Module):
             'construct_features': construct_outputs['construct_features'],
             'parent_logits': construct_outputs['parent_logits'],
             'sibling_logits': construct_outputs['sibling_logits'],
-            'root_logits': construct_outputs['root_logits'],
         }
 
         # Compute loss
@@ -299,7 +294,6 @@ class ConstructFromFeatures(nn.Module):
             loss_dict = self.loss_fn(
                 parent_logits=construct_outputs['parent_logits'],
                 sibling_logits=construct_outputs['sibling_logits'],
-                root_logits=construct_outputs['root_logits'],
                 parent_labels=parent_labels,
                 sibling_labels=sibling_labels,
                 mask=region_mask,
@@ -307,7 +301,6 @@ class ConstructFromFeatures(nn.Module):
             outputs['loss'] = loss_dict['loss']
             outputs['parent_loss'] = loss_dict['parent_loss']
             outputs['sibling_loss'] = loss_dict['sibling_loss']
-            outputs['root_loss'] = loss_dict['root_loss']
 
         return outputs
 
@@ -449,20 +442,22 @@ def load_construct_model(
 
 def compute_construct_metrics(
     parent_logits: torch.Tensor,  # [batch, N, N]
-    root_logits: torch.Tensor,    # [batch, N]
     parent_labels: torch.Tensor,  # [batch, N]
     region_mask: torch.Tensor,    # [batch, N]
+    sibling_logits: torch.Tensor = None,  # [batch, N, N]
+    sibling_labels: torch.Tensor = None,  # [batch, N]
 ) -> Dict[str, float]:
     """Compute Construct module evaluation metrics.
 
     Args:
         parent_logits: Parent prediction logits
-        root_logits: Root prediction logits
         parent_labels: Ground truth parent indices (-1 for root)
         region_mask: Valid region mask
+        sibling_logits: Sibling prediction logits (optional)
+        sibling_labels: Ground truth left sibling indices (optional)
 
     Returns:
-        Dict with parent_accuracy, root_accuracy, root_f1
+        Dict with parent_accuracy and sibling_accuracy
     """
     batch_size, num_regions = parent_labels.shape
     device = parent_logits.device
@@ -478,50 +473,98 @@ def compute_construct_metrics(
     else:
         parent_acc = torch.tensor(0.0, device=device)
 
-    # Root detection
-    is_root_gt = (parent_labels == -1) & region_mask
-    is_root_pred = (root_logits > 0) & region_mask
-
-    # Root accuracy
-    root_correct = ((is_root_pred == is_root_gt) & region_mask).sum()
-    root_total = region_mask.sum()
-    root_acc = root_correct.float() / root_total.float() if root_total > 0 else 0.0
-
-    # Root F1
-    tp = (is_root_pred & is_root_gt).sum().float()
-    fp = (is_root_pred & ~is_root_gt & region_mask).sum().float()
-    fn = (~is_root_pred & is_root_gt).sum().float()
-
-    precision = tp / (tp + fp).clamp(min=1)
-    recall = tp / (tp + fn).clamp(min=1)
-    root_f1 = 2 * precision * recall / (precision + recall).clamp(min=1e-6)
-
-    return {
+    result = {
         'parent_accuracy': parent_acc.item() if isinstance(parent_acc, torch.Tensor) else parent_acc,
-        'root_accuracy': root_acc.item() if isinstance(root_acc, torch.Tensor) else root_acc,
-        'root_f1': root_f1.item() if isinstance(root_f1, torch.Tensor) else root_f1,
     }
+
+    # Sibling accuracy (if provided)
+    if sibling_logits is not None and sibling_labels is not None:
+        pred_siblings = sibling_logits.argmax(dim=-1)  # [batch, N]
+        has_sibling = (sibling_labels >= 0) & region_mask
+        if has_sibling.any():
+            correct = (pred_siblings == sibling_labels) & has_sibling
+            sibling_acc = correct.sum().float() / has_sibling.sum().float()
+        else:
+            sibling_acc = torch.tensor(0.0, device=device)
+        result['sibling_accuracy'] = sibling_acc.item() if isinstance(sibling_acc, torch.Tensor) else sibling_acc
+
+    return result
 
 
 def generate_sibling_labels(
     parent_ids: torch.Tensor,  # [batch, N]
+    reading_orders: torch.Tensor,  # [batch, N] reading order positions
     region_mask: torch.Tensor,  # [batch, N]
 ) -> torch.Tensor:
-    """Generate sibling labels from parent IDs.
+    """Generate left sibling labels from parent IDs and reading order.
+
+    For each node, find its left sibling (same parent, immediately before in reading order).
+
+    Args:
+        parent_ids: [batch, N] parent index for each node (-1 for root)
+        reading_orders: [batch, N] reading order positions (0, 1, 2, ...)
+        region_mask: [batch, N] valid region mask
+
+    Returns:
+        sibling_labels: [batch, N] index of left sibling (-1 if no left sibling)
+    """
+    batch_size, num_regions = parent_ids.shape
+    device = parent_ids.device
+
+    sibling_labels = torch.full(
+        (batch_size, num_regions),
+        fill_value=-1,
+        dtype=torch.long, device=device
+    )
+
+    for b in range(batch_size):
+        # Group nodes by parent
+        parent_to_children = {}
+        for i in range(num_regions):
+            if not region_mask[b, i]:
+                continue
+            parent_i = parent_ids[b, i].item()
+            if parent_i < 0:  # Root has no siblings
+                continue
+            if parent_i not in parent_to_children:
+                parent_to_children[parent_i] = []
+            parent_to_children[parent_i].append(i)
+
+        # For each group of siblings, sort by reading order and assign left sibling
+        for parent, children in parent_to_children.items():
+            if len(children) < 2:
+                continue
+            # Sort by reading order
+            children_sorted = sorted(children, key=lambda x: reading_orders[b, x].item())
+            # Assign left sibling for each node (except the first one)
+            for idx in range(1, len(children_sorted)):
+                curr_node = children_sorted[idx]
+                left_sibling = children_sorted[idx - 1]
+                sibling_labels[b, curr_node] = left_sibling
+
+    return sibling_labels
+
+
+def generate_sibling_matrix(
+    parent_ids: torch.Tensor,  # [batch, N]
+    region_mask: torch.Tensor,  # [batch, N]
+) -> torch.Tensor:
+    """Generate sibling matrix from parent IDs (legacy format).
 
     Two nodes are siblings if they have the same parent.
+    This is kept for backward compatibility.
 
     Args:
         parent_ids: [batch, N] parent index for each node (-1 for root)
         region_mask: [batch, N] valid region mask
 
     Returns:
-        sibling_labels: [batch, N, N] 1 if siblings, 0 otherwise
+        sibling_matrix: [batch, N, N] 1 if siblings, 0 otherwise
     """
     batch_size, num_regions = parent_ids.shape
     device = parent_ids.device
 
-    sibling_labels = torch.zeros(
+    sibling_matrix = torch.zeros(
         batch_size, num_regions, num_regions,
         dtype=torch.long, device=device
     )
@@ -539,6 +582,6 @@ def generate_sibling_labels(
                     continue
                 parent_j = parent_ids[b, j].item()
                 if parent_i == parent_j and parent_j >= 0:
-                    sibling_labels[b, i, j] = 1
+                    sibling_matrix[b, i, j] = 1
 
-    return sibling_labels
+    return sibling_matrix

@@ -219,16 +219,16 @@ class OrderTask(BaseTask):
 
 
 class ConstructTask(BaseTask):
-    """4.4 Construct 任务 - 层级结构构建
+    """4.4 Construct 任务 - 层级结构构建 (Paper Section 4.4.1)
 
-    预测父节点、兄弟关系、根节点。
+    预测父节点、兄弟关系（均使用 softmax CE，N选1）。
+    Root 由 parent_label == -1 隐式表示，无需单独预测。
     """
 
     def __init__(self, config: Dict[str, Any] = None):
         super().__init__(config or {})
         self.parent_weight = config.get('parent_weight', 1.0) if config else 1.0
-        self.sibling_weight = config.get('sibling_weight', 1.0) if config else 1.0
-        self.root_weight = config.get('root_weight', 1.0) if config else 1.0
+        self.sibling_weight = config.get('sibling_weight', 0.5) if config else 0.5
 
     def compute_loss(
         self,
@@ -241,12 +241,11 @@ class ConstructTask(BaseTask):
         Args:
             outputs: {
                 'parent_logits': [B, N, N],
-                'sibling_logits': [B, N, N],  # 点积分数
-                'root_logits': [B, N]
+                'sibling_logits': [B, N, N]
             }
             targets: {
-                'parent_labels': [B, N],
-                'sibling_labels': [B, N, N]
+                'parent_labels': [B, N],  # -1 for root
+                'sibling_labels': [B, N]  # -1 for no left sibling
             }
             mask: [B, N]
 
@@ -255,7 +254,7 @@ class ConstructTask(BaseTask):
         """
         total_loss = torch.tensor(0.0, device=outputs['parent_logits'].device)
 
-        # Parent loss
+        # Parent loss (softmax CE, N选1)
         if 'parent_logits' in outputs and 'parent_labels' in targets:
             parent_loss = self._compute_parent_loss(
                 outputs['parent_logits'],
@@ -264,7 +263,7 @@ class ConstructTask(BaseTask):
             )
             total_loss = total_loss + self.parent_weight * parent_loss
 
-        # Sibling loss
+        # Sibling loss (softmax CE, N选1, same as parent)
         if 'sibling_logits' in outputs and 'sibling_labels' in targets:
             sibling_loss = self._compute_sibling_loss(
                 outputs['sibling_logits'],
@@ -272,15 +271,6 @@ class ConstructTask(BaseTask):
                 mask,
             )
             total_loss = total_loss + self.sibling_weight * sibling_loss
-
-        # Root loss
-        if 'root_logits' in outputs and 'parent_labels' in targets:
-            root_loss = self._compute_root_loss(
-                outputs['root_logits'],
-                targets['parent_labels'],
-                mask,
-            )
-            total_loss = total_loss + self.root_weight * root_loss
 
         return total_loss
 
@@ -290,7 +280,7 @@ class ConstructTask(BaseTask):
         labels: Tensor,  # [B, N]
         mask: Optional[Tensor] = None,
     ) -> Tensor:
-        """计算父节点预测损失"""
+        """计算父节点预测损失 (softmax CE)"""
         B, N, _ = logits.shape
 
         logits_flat = logits.view(B * N, N)
@@ -310,49 +300,27 @@ class ConstructTask(BaseTask):
 
     def _compute_sibling_loss(
         self,
-        logits: Tensor,  # [B, N, N] 点积分数
-        labels: Tensor,  # [B, N, N]
+        logits: Tensor,  # [B, N, N]
+        labels: Tensor,  # [B, N] index of left sibling (-1 for none)
         mask: Optional[Tensor] = None,
     ) -> Tensor:
-        """计算兄弟关系损失（BCE）"""
+        """计算兄弟关系损失 (softmax CE, N选1)"""
         B, N, _ = logits.shape
 
-        if mask is not None:
-            # Create pairwise mask
-            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)  # [B, N, N]
-        else:
-            mask_2d = torch.ones(B, N, N, dtype=torch.bool, device=logits.device)
-
-        # 上三角（排除对角线）
-        triu_mask = torch.triu(torch.ones(N, N, dtype=torch.bool, device=logits.device), diagonal=1)
-        mask_2d = mask_2d & triu_mask.unsqueeze(0)
-
-        logits_valid = logits[mask_2d]
-        labels_valid = labels[mask_2d].float()
-
-        if logits_valid.shape[0] == 0:
-            return torch.tensor(0.0, device=logits.device)
-
-        return F.binary_cross_entropy_with_logits(logits_valid, labels_valid)
-
-    def _compute_root_loss(
-        self,
-        logits: Tensor,  # [B, N]
-        parent_labels: Tensor,  # [B, N]
-        mask: Optional[Tensor] = None,
-    ) -> Tensor:
-        """计算根节点损失"""
-        # root: parent_label == -1
-        root_labels = (parent_labels == -1).float()
+        logits_flat = logits.view(B * N, N)
+        labels_flat = labels.view(B * N)
 
         if mask is not None:
-            logits = logits[mask]
-            root_labels = root_labels[mask]
+            mask_flat = mask.view(B * N)
+            logits_flat = logits_flat[mask_flat]
+            labels_flat = labels_flat[mask_flat]
 
-        if logits.shape[0] == 0:
+        # 只计算有左兄弟的区域 (sibling >= 0)
+        valid = labels_flat >= 0
+        if not valid.any():
             return torch.tensor(0.0, device=logits.device)
 
-        return F.binary_cross_entropy_with_logits(logits, root_labels)
+        return F.cross_entropy(logits_flat[valid], labels_flat[valid])
 
     def decode(
         self,
@@ -364,8 +332,7 @@ class ConstructTask(BaseTask):
         Args:
             outputs: {
                 'parent_logits': [B, N, N],
-                'sibling_logits': [B, N, N],  # 点积分数
-                'root_logits': [B, N]
+                'sibling_logits': [B, N, N]
             }
 
         Returns:
@@ -377,11 +344,8 @@ class ConstructTask(BaseTask):
             result['pred_parents'] = outputs['parent_logits'].argmax(dim=-1)
 
         if 'sibling_logits' in outputs:
-            # 点积分数 > 0 表示是 sibling
-            result['pred_siblings'] = (outputs['sibling_logits'] > 0).long()
-
-        if 'root_logits' in outputs:
-            result['pred_roots'] = (outputs['root_logits'] > 0).float()
+            # N选1: argmax for left sibling prediction
+            result['pred_siblings'] = outputs['sibling_logits'].argmax(dim=-1)
 
         return result
 
@@ -470,21 +434,12 @@ class DOCTask:
                 parent_labels=parent_labels,
                 mask=mask,
             )
-            # Root: 复用 construct_only.py 的逻辑
-            # is_root_gt = (parent_labels == -1)
-            # is_root_pred = (root_logits > 0)
-            if 'root_logits' in outputs and parent_labels is not None:
-                root_preds = (outputs['root_logits'] > 0).long()
-                root_labels = (parent_labels == -1).long()
-                self.metrics_computer.update(
-                    root_preds=root_preds,
-                    root_labels=root_labels,
-                    mask=mask,
-                )
+            # Root is implicitly determined by parent_label == -1
+            # No separate root prediction head needed
 
         if 'sibling_logits' in outputs:
-            # 点积分数 > 0 表示是 sibling
-            sibling_preds = (outputs['sibling_logits'] > 0).long()
+            # N选1: argmax for left sibling prediction
+            sibling_preds = outputs['sibling_logits'].argmax(dim=-1)
             self.metrics_computer.update(
                 sibling_preds=sibling_preds,
                 sibling_labels=targets.get('sibling_labels'),

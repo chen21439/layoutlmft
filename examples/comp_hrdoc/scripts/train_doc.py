@@ -434,7 +434,6 @@ def train_epoch_with_stage_features(
     total_loss = 0.0
     total_parent_loss = 0.0
     total_sibling_loss = 0.0
-    total_root_loss = 0.0
     num_batches = 0
 
     progress_bar = tqdm(dataloader, desc="Training (stage features)")
@@ -492,22 +491,22 @@ def train_epoch_with_stage_features(
             reading_orders = compressed["reading_orders"]
 
             # Generate sibling labels from compressed parent_ids
-            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask)
+            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask, reading_orders)
 
             # Skip batch if no sections
             if line_mask.sum() == 0:
                 continue
         else:
             # Original logic: all lines
-            # Generate sibling labels from parent_ids
-            sibling_labels = None
-            if line_parent_ids is not None:
-                from examples.comp_hrdoc.models.construct_only import generate_sibling_labels
-                sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
-
             # Get reading order (use line index as reading order for now)
             batch_size, max_lines = line_mask.shape
             reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+
+            # Generate sibling labels from parent_ids (requires reading_orders)
+            sibling_labels = None
+            if line_parent_ids is not None:
+                from examples.comp_hrdoc.models.construct_only import generate_sibling_labels
+                sibling_labels = generate_sibling_labels(line_parent_ids, reading_orders, line_mask)
 
         # Forward pass
         if args.fp16 and scaler is not None:
@@ -552,7 +551,6 @@ def train_epoch_with_stage_features(
         total_loss += outputs["loss"].item()
         total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
         total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
-        total_root_loss += outputs.get("root_loss", torch.tensor(0.0)).item()
         num_batches += 1
 
         # Update progress bar
@@ -565,7 +563,6 @@ def train_epoch_with_stage_features(
         "loss": total_loss / max(num_batches, 1),
         "parent_loss": total_parent_loss / max(num_batches, 1),
         "sibling_loss": total_sibling_loss / max(num_batches, 1),
-        "root_loss": total_root_loss / max(num_batches, 1),
     }
 
 
@@ -667,7 +664,6 @@ def evaluate_with_stage_features(
     total_loss = 0.0
     total_parent_loss = 0.0
     total_sibling_loss = 0.0
-    total_root_loss = 0.0
     num_batches = 0
 
     # Aggregate metrics
@@ -730,18 +726,18 @@ def evaluate_with_stage_features(
             line_parent_ids = compressed["parent_ids"]
             line_labels = compressed["categories"]
             reading_orders = compressed["reading_orders"]
-            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask)
+            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask, reading_orders)
 
             # Skip batch if no sections
             if line_mask.sum() == 0:
                 continue
         else:
-            sibling_labels = None
-            if line_parent_ids is not None:
-                sibling_labels = generate_sibling_labels(line_parent_ids, line_mask)
-
             batch_size, max_lines = line_mask.shape
             reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+
+            sibling_labels = None
+            if line_parent_ids is not None:
+                sibling_labels = generate_sibling_labels(line_parent_ids, reading_orders, line_mask)
 
         outputs = model(
             region_features=line_features,
@@ -756,17 +752,9 @@ def evaluate_with_stage_features(
         total_loss += outputs["loss"].item()
         total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
         total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
-        total_root_loss += outputs.get("root_loss", torch.tensor(0.0)).item()
 
         # Compute metrics
         if line_parent_ids is not None:
-            metrics = compute_construct_metrics(
-                parent_logits=outputs["parent_logits"],
-                root_logits=outputs["root_logits"],
-                parent_labels=line_parent_ids,
-                region_mask=line_mask,
-            )
-
             # Aggregate parent metrics
             has_parent = (line_parent_ids >= 0) & line_mask
             pred_parents = outputs["parent_logits"].argmax(dim=-1)
@@ -774,28 +762,14 @@ def evaluate_with_stage_features(
             all_parent_correct += correct.sum().item()
             all_parent_total += has_parent.sum().item()
 
-            # Root metrics
-            is_root_gt = (line_parent_ids == -1) & line_mask
-            is_root_pred = (outputs["root_logits"] > 0) & line_mask
-            root_correct = ((is_root_pred == is_root_gt) & line_mask).sum().item()
-            all_root_correct += root_correct
-            all_root_total += line_mask.sum().item()
-
-            # Sibling metrics (P/R/F1)
+            # Sibling metrics (accuracy for N选1)
             if sibling_labels is not None and "sibling_logits" in outputs:
-                pred_siblings = (outputs["sibling_logits"] > 0)  # [B, N, N]
-                gt_siblings = sibling_labels.bool()  # [B, N, N]
-                # 只计算有效节点对（上三角，排除对角线）
-                B, N, _ = pred_siblings.shape
-                triu_mask = torch.triu(torch.ones(N, N, dtype=torch.bool, device=device), diagonal=1)
-                valid_mask = line_mask.unsqueeze(-1) & line_mask.unsqueeze(-2) & triu_mask.unsqueeze(0)
-
-                tp = ((pred_siblings & gt_siblings) & valid_mask).sum().item()
-                fp = ((pred_siblings & ~gt_siblings) & valid_mask).sum().item()
-                fn = ((~pred_siblings & gt_siblings) & valid_mask).sum().item()
-                sibling_tp += tp
-                sibling_fp += fp
-                sibling_fn += fn
+                pred_siblings = outputs["sibling_logits"].argmax(dim=-1)  # [B, N]
+                has_sibling = (sibling_labels >= 0) & line_mask
+                correct_sib = (pred_siblings == sibling_labels) & has_sibling
+                sibling_tp += correct_sib.sum().item()
+                sibling_fp += (has_sibling.sum().item() - correct_sib.sum().item())  # For accuracy calc
+                sibling_fn += 0  # Not used for accuracy
 
             # TEDS 计算（每个样本）
             if HAS_APTED:
@@ -859,16 +833,12 @@ def evaluate_with_stage_features(
         "loss": total_loss / max(num_batches, 1),
         "parent_loss": total_parent_loss / max(num_batches, 1),
         "sibling_loss": total_sibling_loss / max(num_batches, 1),
-        "root_loss": total_root_loss / max(num_batches, 1),
         "parent_accuracy": all_parent_correct / max(all_parent_total, 1),
-        "root_accuracy": all_root_correct / max(all_root_total, 1),
     }
 
-    # Sibling P/R/F1
-    sibling_prf = compute_prf1(sibling_tp, sibling_fp, sibling_fn)
-    results["sibling_precision"] = sibling_prf["precision"]
-    results["sibling_recall"] = sibling_prf["recall"]
-    results["sibling_f1"] = sibling_prf["f1"]
+    # Sibling accuracy (for N选1 CE formulation)
+    total_sibling = sibling_tp + sibling_fp  # sibling_tp = correct, sibling_fp = incorrect
+    results["sibling_accuracy"] = sibling_tp / max(total_sibling, 1)
 
     # TEDS
     if teds_scores:
@@ -1201,8 +1171,7 @@ def main():
             train_log = (
                 f"Train - Loss: {train_metrics['loss']:.4f}, "
                 f"Parent: {train_metrics['parent_loss']:.4f}, "
-                f"Sibling: {train_metrics['sibling_loss']:.4f}, "
-                f"Root: {train_metrics['root_loss']:.4f}"
+                f"Sibling: {train_metrics['sibling_loss']:.4f}"
             )
         else:
             train_metrics = train_epoch(
@@ -1236,21 +1205,14 @@ def main():
             val_log = (
                 f"Val - Loss: {val_metrics['loss']:.4f}, "
                 f"Parent: {val_metrics['parent_loss']:.4f}, "
-                f"Sibling: {val_metrics['sibling_loss']:.4f}, "
-                f"Root: {val_metrics['root_loss']:.4f}"
+                f"Sibling: {val_metrics['sibling_loss']:.4f}"
             )
             logger.info(val_log)
 
             # 4.4 Construct metrics (stage feature mode)
             logger.info(
                 f"[4.4 Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
-                f"Root Acc: {val_metrics['root_accuracy']:.4f}"
-            )
-            # Sibling P/R/F1
-            logger.info(
-                f"[4.4 Construct] Sibling P: {val_metrics.get('sibling_precision', 0):.4f}, "
-                f"R: {val_metrics.get('sibling_recall', 0):.4f}, "
-                f"F1: {val_metrics.get('sibling_f1', 0):.4f}"
+                f"Sibling Acc: {val_metrics.get('sibling_accuracy', 0):.4f}"
             )
             # TEDS
             if 'teds_macro' in val_metrics:
