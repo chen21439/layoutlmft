@@ -11,7 +11,7 @@ hostname = socket.gethostname()
 if hostname in ["i-2vc905bm", "ubuntu"]:  # 89_server
     BASE_DIR = "/home/ubuntu/code/layoutlmft"
     DATA_DIR = "/home/ubuntu/data/Tender"
-    MODEL_PATH = "/home/ubuntu/models/layoutxlm-base"
+    MODEL_PATH = "microsoft/layoutxlm-base"  # 使用 HuggingFace 模型
 else:  # 本地
     BASE_DIR = "/root/code/layoutlmft"
     DATA_DIR = "/root/data/Tender"

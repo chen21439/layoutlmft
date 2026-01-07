@@ -455,7 +455,7 @@ def main():
     logger.info(f"Validation dataset: {len(val_dataset)} samples")
 
     # 加载 tokenizer
-    model_name = global_config.model.get("layoutxlm_base", "microsoft/layoutxlm-base")
+    model_name = global_config.model.local_path or global_config.model.name_or_path
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     logger.info(f"Loaded tokenizer from: {model_name}")
 
