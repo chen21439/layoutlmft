@@ -398,7 +398,7 @@ def save_construct_model(
     config = {
         'hidden_size': model.hidden_size,
         'num_layers': model.construct_module.transformer.layers.__len__(),
-        'freeze_order': model.freeze_order,
+        'freeze_order': getattr(model, 'freeze_order', True),  # ConstructFromFeatures 没有此属性
     }
     config_path = os.path.join(save_path, "config.json")
     with open(config_path, 'w') as f:
