@@ -107,27 +107,6 @@ class JointTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """计算 loss，JointModel.forward 已经返回组合后的 loss"""
 
-        # DEBUG: 在 step 20-25 打印输入信息以捕获出错的 batch
-        current_step = self.state.global_step
-        if 20 <= current_step <= 25:
-            try:
-                doc_id = inputs.get("doc_id", "unknown")
-                logger.warning(f"[DEBUG step={current_step}] doc_id={doc_id}")
-                if "input_ids" in inputs:
-                    ids = inputs["input_ids"]
-                    logger.warning(f"[DEBUG step={current_step}] input_ids: shape={ids.shape}, min={ids.min().item()}, max={ids.max().item()}")
-                if "bbox" in inputs:
-                    bbox = inputs["bbox"]
-                    logger.warning(f"[DEBUG step={current_step}] bbox: shape={bbox.shape}, min={bbox.min().item()}, max={bbox.max().item()}")
-                if "image" in inputs:
-                    img = inputs["image"]
-                    if isinstance(img, list):
-                        logger.warning(f"[DEBUG step={current_step}] image: list len={len(img)}")
-                    elif hasattr(img, 'shape'):
-                        logger.warning(f"[DEBUG step={current_step}] image: shape={img.shape}")
-            except Exception as debug_e:
-                logger.warning(f"[DEBUG step={current_step}] Failed to log inputs: {debug_e}")
-
         try:
             outputs = model(**inputs)
         except Exception as e:

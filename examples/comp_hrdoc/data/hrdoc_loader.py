@@ -692,6 +692,7 @@ class HRDocLayoutXLMCollator:
             'line_bboxes': line_bboxes,
             'parent_ids': parent_ids,
             'sibling_labels': sibling_labels,
+            'texts': [s['texts'] for s in batch],  # 用于可视化
         }
 
 

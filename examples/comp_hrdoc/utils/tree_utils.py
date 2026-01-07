@@ -187,12 +187,16 @@ def _build_tree_relations(nodes: List[Node], root: Node,
         ref_parent.add_ref_child(node, relation)
 
         # 建立层级关系
-        if relation in ['contain', 'connect']:
-            # contain/connect: 直接成为 ref_parent 的子节点
-            # TODO: connect 语义上是阅读顺序延续（行与行之间），应该是兄弟关系而非父子关系
-            #       但原作者 CompHRDoc 把 connect 和 contain 一起处理，这里保持一致
-            #       目前 TOC 只使用 section，不会使用 connect 关系，暂不影响
-            node.ref_parent.add_child(node)
+        if relation == 'contain':
+            # contain: 直接成为 ref_parent 的子节点（层级包含）
+            ref_parent.add_child(node)
+        elif relation == 'connect':
+            # connect: 阅读顺序延续，应该与 ref_parent 是兄弟（相同的层级父节点）
+            if ref_parent.parent:
+                ref_parent.parent.add_child(node)
+            else:
+                # ref_parent 是 root 下的顶层节点，当前节点也是
+                root.add_child(node)
         elif relation == 'equality':
             # equality 关系：沿着 ref_parent 链回溯找到最老的兄弟
             # 然后成为最老兄弟的父节点的子节点

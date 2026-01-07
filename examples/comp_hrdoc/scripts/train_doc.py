@@ -602,7 +602,11 @@ def visualize_toc(
         children = {i: [] for i in range(-1, n)}
         for i, p in enumerate(parents):
             if mask is None or mask[i]:
-                children[p].append(i)
+                # 自指向方案：parent == self 表示 root，映射到 -1
+                if p == i:
+                    children[-1].append(i)
+                else:
+                    children[p].append(i)
 
         def _format(node_idx, indent=0):
             result = []
