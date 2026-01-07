@@ -99,13 +99,15 @@ def parse_args():
                         help="Weight for construct loss")
 
     # Data
-    parser.add_argument("--max-regions", type=int, default=128)
+    parser.add_argument("--max-regions", type=int, default=1024,
+                        help="Max lines per document (O(n²) memory, default 1024)")
     parser.add_argument("--val-split-ratio", type=float, default=0.1)
-    parser.add_argument("--document-level", action="store_true", default=False,
+    parser.add_argument("--document-level", action="store_true", default=True,
                         help="Enable document-level training (supports cross-page parent)")
 
     # Training
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Batch size (default 1 for document-level)")
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--num-epochs", type=int, default=20)
