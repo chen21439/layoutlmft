@@ -8,7 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # 激活 conda 环境
-if [ -f "/home/ubuntu/miniconda3/etc/profile.d/conda.sh" ]; then
+if [ -f "/home/ubuntu/envs/miniconda3/etc/profile.d/conda.sh" ]; then
+    source /home/ubuntu/envs/miniconda3/etc/profile.d/conda.sh
+elif [ -f "/home/ubuntu/miniconda3/etc/profile.d/conda.sh" ]; then
     source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
 elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
     source "$HOME/miniconda3/etc/profile.d/conda.sh"
