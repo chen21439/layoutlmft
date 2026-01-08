@@ -177,7 +177,7 @@ def load_hrdoc_raw_datasets_batched(
                             if not words:
                                 words = [{"text": "[EMPTY]", "box": item.get("box", [0,0,0,0])}]
 
-                            item_line_id = item.get("line_id", item.get("id", 0))
+                            item_line_id = int(item.get("line_id", item.get("id", 0)))
                             parent_id = item.get("parent_id", -1)
                             if parent_id == "" or parent_id is None:
                                 parent_id = -1
