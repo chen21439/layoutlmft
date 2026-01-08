@@ -139,7 +139,7 @@ def parse_args():
                         help="Use pre-trained stage model to extract line features for Construct training")
     parser.add_argument("--stage-checkpoint", type=str, default=None,
                         help="Path to stage joint model checkpoint (required if --use-stage-features)")
-    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh"],
+    parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh", "tender"],
                         help="Dataset to use when --use-stage-features is enabled")
     parser.add_argument("--covmatch", type=str, default=None,
                         help="Covmatch split directory name (e.g., 'doc_covmatch_dev10_seed42')")
@@ -636,6 +636,7 @@ def train_epoch_with_stage_features(
         progress_bar.set_postfix({
             "loss": f"{outputs['loss'].item():.4f}",
             "parent": f"{outputs.get('parent_loss', torch.tensor(0.0)).item():.4f}",
+            "sibling": f"{outputs.get('sibling_loss', torch.tensor(0.0)).item():.4f}",
         })
 
     return {
@@ -1072,6 +1073,11 @@ def main():
         # 使用 stage_feature_extractor 的 tokenizer
         tokenizer = stage_feature_extractor.tokenizer
 
+        # tender 数据集默认不使用缓存（数据量小，避免缓存问题）
+        force_rebuild = args.dataset == "tender"
+        if force_rebuild:
+            logger.info("tender dataset: force_rebuild enabled by default")
+
         # 复用 stage 的 DataLoader（支持多 chunk 文档级别处理）
         data_loader_config = HRDocDataLoaderConfig(
             data_dir=data_dir,
@@ -1080,6 +1086,7 @@ def main():
             max_length=512,
             max_train_samples=args.max_train_samples,
             max_val_samples=args.max_val_samples,
+            force_rebuild=force_rebuild,
         )
         data_loader = HRDocDataLoader(tokenizer, data_loader_config)
         datasets = data_loader.prepare_datasets()
