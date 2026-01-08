@@ -70,7 +70,12 @@ def get_inference_config(config: Config) -> tuple:
     if not data_dir_base:
         data_dir_base = config.inference.data_dir_base
 
-    return checkpoint_path, data_dir_base
+    # Construct checkpoint (optional)
+    construct_checkpoint = os.environ.get("CONSTRUCT_CHECKPOINT")
+    if not construct_checkpoint:
+        construct_checkpoint = getattr(config.inference, 'construct_checkpoint', None)
+
+    return checkpoint_path, data_dir_base, construct_checkpoint
 
 
 # Global config
@@ -92,15 +97,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"Loaded config for env: {env}")
 
     # Get inference config
-    checkpoint_path, data_dir_base = get_inference_config(_config)
+    checkpoint_path, data_dir_base, construct_checkpoint = get_inference_config(_config)
 
     if checkpoint_path:
         logger.info(f"Loading model from checkpoint: {checkpoint_path}")
+        if construct_checkpoint:
+            logger.info(f"Loading Construct model from: {construct_checkpoint}")
         try:
             from .service.model_loader import load_model
             from .service.infer_service import get_infer_service
 
-            load_model(checkpoint_path, config=_config)
+            load_model(checkpoint_path, config=_config, construct_checkpoint=construct_checkpoint)
             if data_dir_base:
                 get_infer_service(data_dir_base=data_dir_base)
                 logger.info(f"Default data_dir_base: {data_dir_base}")

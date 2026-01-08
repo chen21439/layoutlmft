@@ -292,6 +292,171 @@ class InferenceService:
         }
 
 
+    def predict_with_construct(
+        self,
+        task_id: str,
+        document_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Run inference with Construct model for TOC generation.
+
+        流程：
+        1. Stage 1: 提取 line_features + 分类
+        2. 保存 features.pt 到 upload/{task_id}/
+        3. Construct: 生成 TOC (toc_parent, toc_sibling)
+        4. 保存 construct.json 到 upload/{task_id}/
+
+        Args:
+            task_id: Task ID (folder under data_dir_base)
+            document_name: Document name (without .json extension)
+
+        Returns:
+            Dict with construct results
+        """
+        import time
+        start_time = time.time()
+
+        # Resolve paths
+        task_dir = self._get_task_dir(task_id)
+        if not os.path.isdir(task_dir):
+            raise FileNotFoundError(f"Task directory not found: {task_dir}")
+
+        json_path = os.path.join(task_dir, f"{document_name}.json")
+        if not os.path.exists(json_path):
+            raise FileNotFoundError(f"JSON file not found: {json_path}")
+
+        img_dir = os.path.join(task_dir, "images")
+        if not os.path.isdir(img_dir):
+            raise FileNotFoundError(f"Image directory not found: {img_dir}")
+
+        # Load document
+        json_info = {
+            "filepath": json_path,
+            "filename": f"{document_name}.json",
+            "doc_name": document_name,
+        }
+        doc_data = load_single_document(json_info, img_dir)
+        if doc_data is None:
+            raise ValueError(f"Failed to load document: {document_name}")
+
+        # Get model loader
+        loader = get_model_loader()
+        if not loader.is_loaded:
+            raise RuntimeError("Model not loaded. Initialize model first.")
+
+        # Process document
+        processed = self._process_document(doc_data, loader.tokenizer)
+        if processed is None:
+            raise ValueError(f"Failed to process document: {document_name}")
+
+        # Create batch
+        collator = HRDocDocumentLevelCollator(
+            tokenizer=loader.tokenizer,
+            max_length=512,
+        )
+        batch = collator([processed])
+
+        # Wrap and move to device
+        batch_wrapped = wrap_batch(batch)
+        batch_wrapped = batch_wrapped.to(loader.device)
+
+        # Stage 1: Extract features only
+        with torch.no_grad():
+            for sample in batch_wrapped:
+                features = loader.predictor.extract_features(sample)
+                break
+
+        # Save features.pt
+        features_path = os.path.join(task_dir, "features.pt")
+        torch.save({
+            "line_features": features["line_features"].cpu(),
+            "line_mask": features["line_mask"].cpu(),
+            "line_classes": features["line_classes"],
+            "num_lines": features["num_lines"],
+            "line_ids": features["line_ids"],
+        }, features_path)
+        logger.info(f"Saved features to: {features_path}")
+
+        # Construct inference (if model available)
+        construct_result = None
+        if loader.has_construct_model:
+            construct_result = self._run_construct_inference(
+                features, loader.construct_model, loader.device
+            )
+
+            # Save construct.json
+            construct_path = os.path.join(task_dir, "construct.json")
+            with open(construct_path, 'w', encoding='utf-8') as f:
+                json.dump(construct_result, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved construct result to: {construct_path}")
+
+        inference_time = (time.time() - start_time) * 1000
+
+        return {
+            "document_name": document_name,
+            "num_lines": features["num_lines"],
+            "features_path": features_path,
+            "construct_result": construct_result,
+            "inference_time_ms": round(inference_time, 2),
+        }
+
+    def _run_construct_inference(
+        self,
+        features: Dict,
+        construct_model,
+        device,
+    ) -> Dict[str, Any]:
+        """Run Construct model inference."""
+        line_features = features["line_features"].to(device)
+        line_mask = features["line_mask"].to(device)
+        num_lines = features["num_lines"]
+        line_ids = features["line_ids"]
+
+        # Prepare input - add batch dimension
+        if line_features.dim() == 2:
+            line_features = line_features.unsqueeze(0)  # [1, N, H]
+            line_mask = line_mask.unsqueeze(0)  # [1, N]
+
+        batch_size, max_lines = line_mask.shape
+
+        # Categories from line_classes
+        categories = torch.zeros(batch_size, max_lines, dtype=torch.long, device=device)
+        for idx, line_id in enumerate(line_ids):
+            if idx < max_lines:
+                categories[0, idx] = features["line_classes"].get(line_id, 0)
+
+        # Reading order (use line index as order)
+        reading_orders = torch.arange(max_lines, device=device).unsqueeze(0)
+
+        # Run Construct model
+        with torch.no_grad():
+            outputs = construct_model(
+                region_features=line_features,
+                categories=categories,
+                region_mask=line_mask,
+                reading_orders=reading_orders,
+            )
+
+        # Decode predictions
+        parent_preds = outputs["parent_logits"].argmax(dim=-1)[0].cpu().tolist()  # [N]
+        sibling_preds = outputs["sibling_logits"].argmax(dim=-1)[0].cpu().tolist()  # [N]
+
+        # Build result
+        results = []
+        for idx, line_id in enumerate(line_ids):
+            if idx < num_lines:
+                results.append({
+                    "line_id": line_id,
+                    "toc_parent": parent_preds[idx],
+                    "toc_sibling": sibling_preds[idx],
+                })
+
+        return {
+            "num_lines": num_lines,
+            "predictions": results,
+        }
+
+
 # Global service instance
 _infer_service: Optional[InferenceService] = None
 

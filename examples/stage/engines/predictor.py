@@ -104,6 +104,79 @@ class Predictor:
         else:
             return self._predict_page(sample)
 
+    def extract_features(self, sample: Sample) -> Dict[str, Any]:
+        """
+        只执行 Stage 1，提取 line_features（不跑 Stage 3/4）
+
+        用于 Construct 模块推理，避免重复加载模型。
+
+        Args:
+            sample: Sample 对象
+
+        Returns:
+            Dict 包含:
+                - line_features: [num_lines, H] tensor
+                - line_mask: [num_lines] tensor
+                - line_classes: {line_id: class_id}
+                - num_lines: int
+                - line_ids: List[int]
+        """
+        sample = sample.to(self.device)
+
+        if sample.is_document_level:
+            input_ids = sample.input_ids
+            bbox = sample.bbox
+            attention_mask = sample.attention_mask
+            image = sample.image
+            line_ids = sample.line_ids
+        else:
+            input_ids = sample.input_ids.unsqueeze(0)
+            bbox = sample.bbox.unsqueeze(0)
+            attention_mask = sample.attention_mask.unsqueeze(0)
+            image = sample.image.unsqueeze(0) if sample.image is not None else None
+            line_ids = sample.line_ids.unsqueeze(0) if sample.line_ids is not None else None
+
+        if line_ids is None:
+            return {
+                "line_features": None,
+                "line_mask": None,
+                "line_classes": {},
+                "num_lines": 0,
+                "line_ids": [],
+            }
+
+        # Stage 1: Backbone encoding
+        hidden_states = self.model.encode_with_micro_batch(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            image=image,
+            micro_batch_size=self.micro_batch_size,
+            no_grad=True,
+        )
+
+        seq_len = input_ids.shape[1]
+        text_hidden = hidden_states[:, :seq_len, :]
+
+        # Stage 1: Classification
+        line_classes = self.cls_task.decode(
+            hidden_states=text_hidden,
+            line_ids=line_ids,
+        )
+
+        # Feature extraction (line pooling)
+        line_features, line_mask = self.model.line_pooling(text_hidden, line_ids)
+        actual_num_lines = int(line_mask.sum().item())
+        sorted_line_ids = sorted(line_classes.keys())
+
+        return {
+            "line_features": line_features,
+            "line_mask": line_mask,
+            "line_classes": line_classes,
+            "num_lines": actual_num_lines,
+            "line_ids": sorted_line_ids,
+        }
+
     def _predict_page(self, sample: Sample) -> PredictionOutput:
         """页面级别推理（单 chunk）"""
         # 添加 batch 维度

@@ -53,13 +53,25 @@ async def predict(request: PredictRequest):
         logger.info(f"[Predict] task_id={request.task_id}, document={request.document_name}")
 
         service = get_infer_service()
+
+        # 1. 原有 Stage 1/3/4 推理
         result = service.predict_single(
             task_id=request.task_id,
             document_name=request.document_name,
             return_original=True,
         )
+        logger.info(f"[Predict] Stage done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
 
-        logger.info(f"[Predict] Done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
+        # 2. Construct 推理（如果模型可用）
+        if model_loader.has_construct_model:
+            try:
+                construct_result = service.predict_with_construct(
+                    task_id=request.task_id,
+                    document_name=request.document_name,
+                )
+                logger.info(f"[Predict] Construct done: {construct_result['inference_time_ms']:.2f}ms")
+            except Exception as e:
+                logger.warning(f"[Predict] Construct failed (non-fatal): {e}")
 
         return PredictResponse(
             document_name=result["document_name"],

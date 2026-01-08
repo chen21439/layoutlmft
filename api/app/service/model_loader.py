@@ -4,6 +4,7 @@
 Model Loader - Singleton pattern for model loading
 
 Loads the joint model once at startup and reuses it for all requests.
+Optionally loads Construct model for TOC generation.
 """
 
 import os
@@ -19,6 +20,8 @@ EXAMPLES_ROOT = os.path.join(PROJECT_ROOT, "examples")
 sys.path.insert(0, EXAMPLES_ROOT)
 STAGE_ROOT = os.path.join(EXAMPLES_ROOT, "stage")
 sys.path.insert(0, STAGE_ROOT)
+COMP_HRDOC_ROOT = os.path.join(EXAMPLES_ROOT, "comp_hrdoc")
+sys.path.insert(0, COMP_HRDOC_ROOT)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +46,10 @@ class ModelLoader:
         self._model = None
         self._tokenizer = None
         self._predictor = None
+        self._construct_model = None  # Construct model for TOC
         self._device = None
         self._checkpoint_path = None
+        self._construct_checkpoint_path = None
         self._initialized = True
 
     def load(
@@ -52,6 +57,7 @@ class ModelLoader:
         checkpoint_path: str,
         device: str = None,
         config: Any = None,
+        construct_checkpoint: str = None,
     ) -> None:
         """
         Load model from checkpoint.
@@ -60,9 +66,13 @@ class ModelLoader:
             checkpoint_path: Path to checkpoint directory
             device: Device to use ('cuda' or 'cpu')
             config: Optional config object
+            construct_checkpoint: Path to Construct model checkpoint (optional)
         """
         if self._model is not None and self._checkpoint_path == checkpoint_path:
             logger.info(f"Model already loaded from: {checkpoint_path}")
+            # Still try to load construct if not loaded
+            if construct_checkpoint and self._construct_model is None:
+                self._load_construct_model(construct_checkpoint, device)
             return
 
         import torch
@@ -83,6 +93,59 @@ class ModelLoader:
         self._checkpoint_path = checkpoint_path
 
         logger.info("Model loaded successfully")
+
+        # Load Construct model if provided
+        if construct_checkpoint:
+            self._load_construct_model(construct_checkpoint, device)
+
+    def _load_construct_model(self, construct_checkpoint: str, device: str) -> None:
+        """Load Construct model for TOC generation."""
+        import torch
+        import json
+
+        if not os.path.exists(construct_checkpoint):
+            logger.warning(f"Construct checkpoint not found: {construct_checkpoint}")
+            return
+
+        logger.info(f"Loading Construct model from: {construct_checkpoint}")
+
+        # Load config
+        config_path = os.path.join(construct_checkpoint, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        else:
+            config = {'hidden_size': 768, 'num_layers': 3, 'num_categories': 14}
+
+        # Build model
+        from models.construct_only import build_construct_from_features
+        model = build_construct_from_features(
+            hidden_size=config.get('hidden_size', 768),
+            num_categories=config.get('num_categories', 14),
+            num_heads=config.get('num_heads', 12),
+            num_layers=config.get('num_layers', 3),
+            dropout=config.get('dropout', 0.1),
+        )
+
+        # Load weights
+        weights_path = os.path.join(construct_checkpoint, "pytorch_model.bin")
+        if os.path.exists(weights_path):
+            state_dict = torch.load(weights_path, map_location=device)
+            model.load_state_dict(state_dict)
+        else:
+            # Fallback to old format
+            construct_weights = os.path.join(construct_checkpoint, "construct_model.pt")
+            if os.path.exists(construct_weights):
+                model.construct_module.load_state_dict(
+                    torch.load(construct_weights, map_location=device)
+                )
+
+        model = model.to(device)
+        model.eval()
+        self._construct_model = model
+        self._construct_checkpoint_path = construct_checkpoint
+
+        logger.info("Construct model loaded successfully")
 
     @property
     def model(self):
@@ -110,6 +173,15 @@ class ModelLoader:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def construct_model(self):
+        """Construct model for TOC generation (may be None)."""
+        return self._construct_model
+
+    @property
+    def has_construct_model(self) -> bool:
+        return self._construct_model is not None
+
 
 # Global singleton instance
 _model_loader: Optional[ModelLoader] = None
@@ -127,6 +199,7 @@ def load_model(
     checkpoint_path: str,
     device: str = None,
     config: Any = None,
+    construct_checkpoint: str = None,
 ) -> ModelLoader:
     """
     Load model (convenience function).
@@ -135,10 +208,11 @@ def load_model(
         checkpoint_path: Path to checkpoint directory
         device: Device to use
         config: Optional config object
+        construct_checkpoint: Path to Construct model checkpoint (optional)
 
     Returns:
         ModelLoader instance
     """
     loader = get_model_loader()
-    loader.load(checkpoint_path, device, config)
+    loader.load(checkpoint_path, device, config, construct_checkpoint)
     return loader
