@@ -470,6 +470,15 @@ class HRDocCollator:
                                 sibling_labels[i, j, k] = 1
                                 sibling_labels[i, k, j] = 1
 
+        # 构建 line_text_maps（line_id -> text 的字典映射）
+        line_text_maps = []
+        for sample in batch:
+            text_map = {}
+            texts = sample.get('texts', [])
+            for line_id, text in enumerate(texts):
+                text_map[line_id] = text
+            line_text_maps.append(text_map)
+
         return {
             'bboxes': bboxes,
             'region_ids': region_ids,
@@ -479,6 +488,7 @@ class HRDocCollator:
             'texts': [s['texts'] for s in batch],
             'parent_ids': parent_ids,
             'sibling_labels': sibling_labels,
+            'line_text_maps': line_text_maps,  # line_id -> text 映射（用于可视化）
         }
 
 
@@ -682,6 +692,15 @@ class HRDocLayoutXLMCollator:
         # Stack images: [batch_size, 3, 224, 224]
         image = torch.tensor(np.stack(all_images), dtype=torch.float) / 255.0
 
+        # 构建 line_text_maps（line_id -> text 的字典映射）
+        line_text_maps = []
+        for sample in batch:
+            text_map = {}
+            texts = sample.get('texts', [])
+            for line_id, text in enumerate(texts):
+                text_map[line_id] = text
+            line_text_maps.append(text_map)
+
         return {
             'input_ids': torch.tensor(all_input_ids, dtype=torch.long),
             'bbox': torch.tensor(all_bbox, dtype=torch.long),
@@ -696,6 +715,7 @@ class HRDocLayoutXLMCollator:
             'parent_ids': parent_ids,
             'sibling_labels': sibling_labels,
             'texts': [s['texts'] for s in batch],  # 用于可视化
+            'line_text_maps': line_text_maps,  # line_id -> text 映射（用于可视化）
         }
 
 
