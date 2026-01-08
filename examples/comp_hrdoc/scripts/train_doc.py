@@ -654,6 +654,8 @@ def visualize_toc(
     gt_parents: list,
     mask: list = None,
     sample_id: str = "",
+    pred_siblings: list = None,
+    gt_siblings: list = None,
 ) -> str:
     """可视化 TOC 树结构
 
@@ -663,6 +665,8 @@ def visualize_toc(
         gt_parents: 真实的父节点索引列表（-1 表示 root）
         mask: 有效节点掩码
         sample_id: 样本 ID
+        pred_siblings: 预测的左兄弟索引列表（可选）
+        gt_siblings: 真实的左兄弟索引列表（可选）
 
     Returns:
         可视化字符串
@@ -700,22 +704,41 @@ def visualize_toc(
     lines.append("\n[Predicted TOC]")
     lines.extend(build_tree_str(pred_parents))
 
-    # 标记差异
-    lines.append("\n[Differences]")
-    diffs = []
+    # 标记 Parent 差异
+    lines.append("\n[Parent Differences]")
+    parent_diffs = []
     for i, (p, g) in enumerate(zip(pred_parents, gt_parents)):
         if mask is None or mask[i]:
             if p != g:
                 text = texts[i] if i < len(texts) else f"[{i}]"
                 if len(text) > 30:
                     text = text[:27] + "..."
-                diffs.append(f"  Node [{i}] '{text}': pred_parent={p}, gt_parent={g}")
-    if diffs:
-        lines.extend(diffs[:10])  # 最多显示 10 个差异
-        if len(diffs) > 10:
-            lines.append(f"  ... and {len(diffs) - 10} more differences")
+                parent_diffs.append(f"  Node [{i}] '{text}': pred={p}, gt={g}")
+    if parent_diffs:
+        lines.extend(parent_diffs[:10])
+        if len(parent_diffs) > 10:
+            lines.append(f"  ... and {len(parent_diffs) - 10} more differences")
     else:
         lines.append("  (No differences - Perfect match!)")
+
+    # 标记 Sibling 差异
+    if pred_siblings is not None and gt_siblings is not None:
+        lines.append("\n[Sibling Differences]")
+        sibling_diffs = []
+        for i, (p, g) in enumerate(zip(pred_siblings, gt_siblings)):
+            if mask is None or mask[i]:
+                # gt_siblings = -1 表示无左兄弟，只比较有左兄弟的节点
+                if g >= 0 and p != g:
+                    text = texts[i] if i < len(texts) else f"[{i}]"
+                    if len(text) > 30:
+                        text = text[:27] + "..."
+                    sibling_diffs.append(f"  Node [{i}] '{text}': pred_left_sibling={p}, gt_left_sibling={g}")
+        if sibling_diffs:
+            lines.extend(sibling_diffs[:10])
+            if len(sibling_diffs) > 10:
+                lines.append(f"  ... and {len(sibling_diffs) - 10} more differences")
+        else:
+            lines.append("  (No differences - Perfect match!)")
 
     return "\n".join(lines)
 
@@ -882,6 +905,8 @@ def evaluate_with_stage_features(
             # 收集可视化样本
             if len(vis_samples) < visualize_samples:
                 batch_size = line_parent_ids.shape[0]
+                # 获取 sibling 预测和标签
+                pred_siblings_batch = outputs["sibling_logits"].argmax(dim=-1) if "sibling_logits" in outputs else None
                 for b in range(batch_size):
                     if len(vis_samples) >= visualize_samples:
                         break
@@ -891,13 +916,18 @@ def evaluate_with_stage_features(
                         continue
                     # 获取文本（如果有）
                     doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
-                    vis_samples.append({
+                    sample = {
                         "sample_id": f"batch{num_batches}_sample{b}",
                         "texts": [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices],
                         "pred_parents": [pred_parents[b, i].item() for i in valid_indices],
                         "gt_parents": [line_parent_ids[b, i].item() for i in valid_indices],
                         "mask": [True] * len(valid_indices),
-                    })
+                    }
+                    # 添加 sibling 信息
+                    if pred_siblings_batch is not None and sibling_labels is not None:
+                        sample["pred_siblings"] = [pred_siblings_batch[b, i].item() for i in valid_indices]
+                        sample["gt_siblings"] = [sibling_labels[b, i].item() for i in valid_indices]
+                    vis_samples.append(sample)
 
         num_batches += 1
 
@@ -1297,6 +1327,8 @@ def main():
                         gt_parents=sample["gt_parents"],
                         mask=sample["mask"],
                         sample_id=sample["sample_id"],
+                        pred_siblings=sample.get("pred_siblings"),
+                        gt_siblings=sample.get("gt_siblings"),
                     )
                     logger.info(vis_str)
         else:
