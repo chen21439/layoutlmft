@@ -888,13 +888,13 @@ def evaluate_with_stage_features(
                         continue
 
                     # 构建树（使用实际文本或占位符）
-                    doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
+                    text_map = batch.get("line_text_maps", [{}])[b] if "line_text_maps" in batch else {}
                     # toc_only 模式下用 original_indices 获取原始 line_id
                     if original_indices is not None:
                         orig_ids = [original_indices[b, i].item() for i in valid_indices]
-                        texts = [doc_texts[oid] if oid < len(doc_texts) else f"node_{oid}" for oid in orig_ids]
+                        texts = [text_map.get(oid, f"node_{oid}") for oid in orig_ids]
                     else:
-                        texts = [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices]
+                        texts = [text_map.get(i, f"node_{i}") for i in valid_indices]
                     # 重新映射 parent_ids 到压缩后的索引
                     idx_map = {old: new for new, old in enumerate(valid_indices)}
                     idx_map[-1] = -1  # root 保持 -1
@@ -928,13 +928,13 @@ def evaluate_with_stage_features(
                     if len(valid_indices) < 2:
                         continue
                     # 获取文本（如果有）
-                    doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
+                    text_map = batch.get("line_text_maps", [{}])[b] if "line_text_maps" in batch else {}
                     # toc_only 模式下用 original_indices 获取原始 line_id
                     if original_indices is not None:
                         orig_ids = [original_indices[b, i].item() for i in valid_indices]
-                        sample_texts = [doc_texts[oid] if oid < len(doc_texts) else f"node_{oid}" for oid in orig_ids]
+                        sample_texts = [text_map.get(oid, f"node_{oid}") for oid in orig_ids]
                     else:
-                        sample_texts = [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices]
+                        sample_texts = [text_map.get(i, f"node_{i}") for i in valid_indices]
                     sample = {
                         "sample_id": f"batch{num_batches}_sample{b}",
                         "texts": sample_texts,

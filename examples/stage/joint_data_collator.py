@@ -235,7 +235,7 @@ class HRDocDocumentLevelCollator:
         json_paths = []
 
         all_line_labels = []  # 从数据源直接获取的行级别标签
-        all_line_texts = []   # 行级别文本（用于可视化）
+        all_line_text_maps = []  # line_id -> text 映射（用于可视化）
 
         for doc in features:
             document_names.append(doc["document_name"])
@@ -246,7 +246,7 @@ class HRDocDocumentLevelCollator:
             all_line_parent_ids.append(doc["line_parent_ids"])
             all_line_relations.append(doc["line_relations"])
             all_line_labels.append(doc.get("line_labels", []))
-            all_line_texts.append(doc.get("line_texts", []))
+            all_line_text_maps.append(doc.get("line_text_map", {}))
 
         num_chunks = len(all_chunks)
         max_seq_len = max(len(chunk["input_ids"]) for chunk in all_chunks)
@@ -379,7 +379,7 @@ class HRDocDocumentLevelCollator:
         # doc_id 用于调试（不转为 tensor，保持字符串列表）
         batch["doc_id"] = document_names
         batch["json_paths"] = json_paths
-        batch["texts"] = all_line_texts  # 行级别文本（用于可视化）
+        batch["line_text_maps"] = all_line_text_maps  # line_id -> text 映射（用于可视化）
 
         return batch
 

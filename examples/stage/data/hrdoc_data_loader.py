@@ -158,7 +158,7 @@ def load_hrdoc_raw_datasets_batched(
                         tokens, bboxes, ner_tags, line_ids = [], [], [], []
                         line_parent_ids, line_relations = [], []
                         line_labels = []  # line-level 标签（每行一个）
-                        line_texts = []   # line-level 文本（用于可视化）
+                        line_text_map = {}  # line_id -> text 映射（用于可视化）
 
                         for item in form_data:
                             label = trans_class(item.get("class", item.get("label", "paraline")),
@@ -191,7 +191,7 @@ def load_hrdoc_raw_datasets_batched(
                             line_parent_ids.append(parent_id)
                             line_relations.append(relation)
                             line_labels.append(label)  # 保存 line-level 标签
-                            line_texts.append(" ".join(w["text"] for w in words))  # 保存行文本
+                            line_text_map[item_line_id] = " ".join(w["text"] for w in words)  # 保存行文本映射
 
                             for w in words:
                                 tokens.append(w.get("text", ""))
@@ -212,7 +212,7 @@ def load_hrdoc_raw_datasets_batched(
                                 "line_parent_ids": line_parent_ids,
                                 "line_relations": line_relations,
                                 "line_labels": line_labels,
-                                "line_texts": line_texts,
+                                "line_text_map": line_text_map,
                             })
 
                 except Exception as e:
@@ -1050,7 +1050,7 @@ class HRDocDataLoader:
         all_parent_ids = []
         all_relations = []
         all_line_labels = []  # 行级别标签
-        all_line_texts = []   # 行级别文本（用于可视化）
+        all_line_text_map = {}  # line_id -> text 映射（用于可视化）
 
         for page in pages:
             page_number = page["page_number"]
@@ -1062,7 +1062,7 @@ class HRDocDataLoader:
             page_parent_ids = page["line_parent_ids"]
             page_relations = page["line_relations"]
             page_line_labels = page.get("line_labels", [])
-            page_line_texts = page.get("line_texts", [])
+            page_line_text_map = page.get("line_text_map", {})
 
             chunks = tokenize_page_with_line_boundary(
                 tokenizer=self.tokenizer,
@@ -1082,7 +1082,7 @@ class HRDocDataLoader:
             all_parent_ids.extend(page_parent_ids)
             all_relations.extend(page_relations)
             all_line_labels.extend(page_line_labels)
-            all_line_texts.extend(page_line_texts)
+            all_line_text_map.update(page_line_text_map)
 
         if len(all_chunks) == 0:
             return None
@@ -1109,7 +1109,7 @@ class HRDocDataLoader:
             "line_parent_ids": all_parent_ids,
             "line_relations": all_relations,
             "line_labels": all_line_labels,  # 行级别标签
-            "line_texts": all_line_texts,    # 行级别文本（用于可视化）
+            "line_text_map": all_line_text_map,  # line_id -> text 映射（用于可视化）
             "json_path": json_path,
         }
 
