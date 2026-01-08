@@ -14,14 +14,15 @@ from typing import Optional, Tuple, Any
 from threading import Lock
 
 # Add project paths
+# 注意顺序：STAGE_ROOT 必须在 COMP_HRDOC_ROOT 之前，因为 load_joint_model 在 stage/models/build.py
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, PROJECT_ROOT)
 EXAMPLES_ROOT = os.path.join(PROJECT_ROOT, "examples")
 sys.path.insert(0, EXAMPLES_ROOT)
-STAGE_ROOT = os.path.join(EXAMPLES_ROOT, "stage")
-sys.path.insert(0, STAGE_ROOT)
 COMP_HRDOC_ROOT = os.path.join(EXAMPLES_ROOT, "comp_hrdoc")
 sys.path.insert(0, COMP_HRDOC_ROOT)
+STAGE_ROOT = os.path.join(EXAMPLES_ROOT, "stage")
+sys.path.insert(0, STAGE_ROOT)  # 最后插入，优先级最高
 
 logger = logging.getLogger(__name__)
 
