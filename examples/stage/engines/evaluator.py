@@ -44,9 +44,12 @@ except ImportError:
     LABEL2ID = {label: i for i, label in enumerate(LABEL_LIST)}
     ID2LABEL = {i: label for i, label in enumerate(LABEL_LIST)}
 
-# 关系映射
-RELATION_LABELS = {"connect": 0, "contain": 1, "equality": 2}
-ID2RELATION = {v: k for k, v in RELATION_LABELS.items()}
+# 关系映射（从 tree_utils 导入，避免重复定义）
+try:
+    from examples.comp_hrdoc.utils.tree_utils import RELATION_LABELS, ID2RELATION
+except ImportError:
+    RELATION_LABELS = {"connect": 0, "contain": 1, "equality": 2}
+    ID2RELATION = {v: k for k, v in RELATION_LABELS.items()}
 
 
 @dataclass

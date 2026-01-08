@@ -73,14 +73,17 @@
 
 from typing import List, Dict, Tuple, Optional, Any, Union
 
-# relation 字符串到整数的映射
-RELATION_STR_TO_INT = {
-    'contain': 0,
-    'equality': 1,
-    'connect': 2,
-}
+# relation 映射从核心库导入，避免多处定义不一致
+try:
+    from layoutlmft.models.relation_classifier import RELATION_LABELS
+except ImportError:
+    RELATION_LABELS = {'connect': 0, 'contain': 1, 'equality': 2}
 
-RELATION_INT_TO_STR = {v: k for k, v in RELATION_STR_TO_INT.items()}
+ID2RELATION = {v: k for k, v in RELATION_LABELS.items()}
+
+# 兼容旧名称
+RELATION_STR_TO_INT = RELATION_LABELS
+RELATION_INT_TO_STR = ID2RELATION
 
 
 class Node:
