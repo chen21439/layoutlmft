@@ -395,7 +395,7 @@ def save_construct_model(
     config = {
         'hidden_size': model.hidden_size,
         'num_layers': model.construct_module.transformer.layers.__len__(),
-        'num_categories': getattr(model, 'type_embedding', None) and model.type_embedding.num_categories or 5,
+        'num_categories': getattr(model, 'type_embedding', None) and model.type_embedding.embedding.num_embeddings or 5,
         'freeze_order': getattr(model, 'freeze_order', True),
         'model_type': model.__class__.__name__,
     }
