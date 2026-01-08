@@ -358,6 +358,76 @@ def build_sibling_matrix(
     return matrix
 
 
+def build_tree_from_parents(
+    predictions: List[Dict],
+    id_key: str = "line_id",
+    parent_key: str = "toc_parent",
+) -> List[Dict]:
+    """从 parent 预测结果构建嵌套树结构
+
+    采用自指向方案：parent == self 表示 root 节点。
+
+    Args:
+        predictions: 预测结果列表，每个元素包含 id_key 和 parent_key
+        id_key: 节点 ID 的字段名
+        parent_key: 父节点 ID 的字段名
+
+    Returns:
+        嵌套树结构列表，每个节点包含 children 数组
+
+    Example:
+        输入:
+        [
+            {"line_id": 0, "toc_parent": 0, "text": "第一章"},  # root (自指向)
+            {"line_id": 5, "toc_parent": 0, "text": "1.1 节"},
+            {"line_id": 10, "toc_parent": 5, "text": "1.1.1 小节"},
+        ]
+
+        输出:
+        [
+            {
+                "line_id": 0, "toc_parent": 0, "text": "第一章",
+                "children": [
+                    {
+                        "line_id": 5, "toc_parent": 0, "text": "1.1 节",
+                        "children": [
+                            {"line_id": 10, "toc_parent": 5, "text": "1.1.1 小节", "children": []}
+                        ]
+                    }
+                ]
+            }
+        ]
+    """
+    if not predictions:
+        return []
+
+    # 构建 id -> node 映射，每个 node 添加 children 字段
+    id_to_node = {}
+    for pred in predictions:
+        node_id = pred[id_key]
+        node = {**pred, "children": []}
+        id_to_node[node_id] = node
+
+    # 构建父子关系
+    roots = []
+    for pred in predictions:
+        node_id = pred[id_key]
+        parent_id = pred[parent_key]
+        node = id_to_node[node_id]
+
+        if parent_id == node_id:
+            # 自指向 = root 节点
+            roots.append(node)
+        elif parent_id in id_to_node:
+            # 添加到父节点的 children
+            id_to_node[parent_id]["children"].append(node)
+        else:
+            # 父节点不存在，作为 root 处理
+            roots.append(node)
+
+    return roots
+
+
 __all__ = [
     'Node',
     'RELATION_STR_TO_INT',
@@ -369,4 +439,5 @@ __all__ = [
     'resolve_hierarchical_parents_and_siblings',
     'resolve_parent_and_sibling_from_tree',  # 向后兼容别名
     'build_sibling_matrix',
+    'build_tree_from_parents',
 ]

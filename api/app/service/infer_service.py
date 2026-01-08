@@ -37,6 +37,7 @@ from data.hrdoc_data_loader import tokenize_page_with_line_boundary, get_label2i
 from data.batch import wrap_batch
 from joint_data_collator import HRDocDocumentLevelCollator
 from layoutlmft.data.labels import ID2LABEL
+from comp_hrdoc.utils.tree_utils import build_tree_from_parents
 
 from .model_loader import get_model_loader
 
@@ -403,6 +404,10 @@ class InferenceService:
             if construct_result and "predictions" in construct_result:
                 for pred in construct_result["predictions"]:
                     pred["text"] = line_text_map.get(pred["line_id"], "")
+
+                # 转换为嵌套树结构
+                toc_tree = build_tree_from_parents(construct_result["predictions"])
+                construct_result["toc_tree"] = toc_tree
 
             # Save construct.json
             construct_path = os.path.join(task_dir, "construct.json")
