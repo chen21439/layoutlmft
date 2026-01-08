@@ -1,10 +1,21 @@
 #!/bin/bash
 APP_NAME="layoutxlm"
 PORT=9197
+CONDA_ENV="layoutxlm"
 
 # 自动检测项目目录（脚本所在目录的父目录）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# 激活 conda 环境
+if [ -f "/home/ubuntu/miniconda3/etc/profile.d/conda.sh" ]; then
+    source /home/ubuntu/miniconda3/etc/profile.d/conda.sh
+elif [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+elif [ -f "/opt/conda/etc/profile.d/conda.sh" ]; then
+    source /opt/conda/etc/profile.d/conda.sh
+fi
+conda activate $CONDA_ENV 2>/dev/null || echo "[${APP_NAME}] Warning: conda env not activated"
 
 LOG_DIR="${PROJECT_DIR}/api/log"
 mkdir -p "$LOG_DIR"
