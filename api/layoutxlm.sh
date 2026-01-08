@@ -61,12 +61,12 @@ stop_service() {
 }
 
 start_service() {
-    echo "[${APP_NAME}] 启动服务 (热重载模式)..."
+    echo "[${APP_NAME}] 启动服务..."
     echo "[${APP_NAME}] 环境: $ENV"
     echo "[${APP_NAME}] 端口: $PORT"
     echo "[${APP_NAME}] 项目目录: $PROJECT_DIR"
 
-    nohup python -m api.app.main --env "$ENV" --reload \
+    nohup python -m api.app.main --env "$ENV" \
         >> "$LOG_FILE" 2>&1 &
 
     NEW_PID=$!
