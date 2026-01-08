@@ -929,6 +929,13 @@ def evaluate_with_stage_features(
                         continue
                     # 获取文本（如果有）
                     text_map = batch.get("line_text_maps", [{}])[b] if "line_text_maps" in batch else {}
+                    # DEBUG: 检查 text_map 内容
+                    if len(vis_samples) == 0 and b == 0:
+                        logger.info(f"[DEBUG] line_text_maps in batch: {'line_text_maps' in batch}")
+                        logger.info(f"[DEBUG] text_map type: {type(text_map)}, len: {len(text_map) if text_map else 0}")
+                        if text_map:
+                            sample_items = list(text_map.items())[:3]
+                            logger.info(f"[DEBUG] text_map sample: {sample_items}")
                     # toc_only 模式下用 original_indices 获取原始 line_id
                     if original_indices is not None:
                         orig_ids = [original_indices[b, i].item() for i in valid_indices]
