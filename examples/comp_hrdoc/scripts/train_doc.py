@@ -153,9 +153,11 @@ def parse_args():
     parser.add_argument("--artifact-dir", type=str, default=None,
                         help="Directory to save model checkpoints (overrides default artifact path)")
 
-    # Resume training
-    parser.add_argument("--resume", type=str, default=None,
-                        help="Path to checkpoint directory to resume training from")
+    # Model checkpoint (HuggingFace style)
+    parser.add_argument("--model-name-or-path", type=str, default=None,
+                        help="Path to pretrained Construct model checkpoint to load weights from")
+    parser.add_argument("--resume-from-checkpoint", type=str, default=None,
+                        help="Path to checkpoint to resume full training state (weights + optimizer + scheduler)")
 
     # GPU
     parser.add_argument("--gpu", type=str, default=None,
@@ -1230,24 +1232,23 @@ def main():
         )
         save_fn = save_doc_model
 
-    # Resume from checkpoint
-    if args.resume:
-        resume_path = Path(args.resume)
-        # 优先加载完整模型权重
-        model_bin = resume_path / "pytorch_model.bin"
+    # Load pretrained weights (model_name_or_path)
+    if args.model_name_or_path:
+        ckpt_path = Path(args.model_name_or_path)
+        model_bin = ckpt_path / "pytorch_model.bin"
         if model_bin.exists():
             logger.info(f"Loading model weights from {model_bin}")
             state_dict = torch.load(model_bin, map_location="cpu")
             model.load_state_dict(state_dict)
         else:
-            # 兼容旧格式：只加载 construct_module
-            construct_pt = resume_path / "construct_model.pt"
+            # 兼容旧格式
+            construct_pt = ckpt_path / "construct_model.pt"
             if construct_pt.exists():
                 logger.info(f"Loading construct_module weights from {construct_pt}")
                 state_dict = torch.load(construct_pt, map_location="cpu")
                 model.construct_module.load_state_dict(state_dict)
             else:
-                raise FileNotFoundError(f"No checkpoint found at {args.resume}")
+                raise FileNotFoundError(f"No model found at {args.model_name_or_path}")
 
     model = model.to(device)
 
@@ -1278,12 +1279,36 @@ def main():
     if args.fp16 and torch.cuda.is_available():
         scaler = torch.cuda.amp.GradScaler()
 
+    # Resume from checkpoint (full training state)
+    start_epoch = 0
+    best_metric = 0.0
+    if args.resume_from_checkpoint:
+        ckpt_path = Path(args.resume_from_checkpoint)
+        training_state = ckpt_path / "training_state.pt"
+        if training_state.exists():
+            logger.info(f"Resuming training from {training_state}")
+            state = torch.load(training_state, map_location=device)
+            model.load_state_dict(state["model"])
+            optimizer.load_state_dict(state["optimizer"])
+            if "scheduler" in state and scheduler is not None:
+                scheduler.load_state_dict(state["scheduler"])
+            if "scaler" in state and scaler is not None:
+                scaler.load_state_dict(state["scaler"])
+            start_epoch = state.get("epoch", 0) + 1
+            best_metric = state.get("best_metric", 0.0)
+            logger.info(f"Resumed from epoch {start_epoch}, best_metric={best_metric:.4f}")
+        else:
+            # Fallback: just load model weights
+            model_bin = ckpt_path / "pytorch_model.bin"
+            if model_bin.exists():
+                logger.info(f"Loading model weights from {model_bin} (no training state)")
+                model.load_state_dict(torch.load(model_bin, map_location=device))
+
     # Training loop
     logger.info("Starting training...")
-    best_metric = 0.0
     best_metric_name = "parent_accuracy" if args.use_stage_features else "order_accuracy"
 
-    for epoch in range(args.num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{args.num_epochs} =====")
 
         # Train
@@ -1406,11 +1431,31 @@ def main():
             best_metric = current_metric
             best_path = output_dir / "best_model"
             save_fn(model, str(best_path))
+            # 保存完整训练状态（用于 resume_from_checkpoint）
+            training_state = {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict() if scheduler else None,
+                "scaler": scaler.state_dict() if scaler else None,
+                "epoch": epoch,
+                "best_metric": best_metric,
+            }
+            torch.save(training_state, str(best_path / "training_state.pt"))
             logger.info(f"Saved best model to {best_path} ({best_metric_name}: {best_metric:.4f})")
 
     # Save final model
     final_path = output_dir / "final_model"
     save_fn(model, str(final_path))
+    # 保存最终训练状态
+    training_state = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler else None,
+        "scaler": scaler.state_dict() if scaler else None,
+        "epoch": args.num_epochs - 1,
+        "best_metric": best_metric,
+    }
+    torch.save(training_state, str(final_path / "training_state.pt"))
     logger.info(f"Saved final model to {final_path}")
 
     # Mark stage as completed
