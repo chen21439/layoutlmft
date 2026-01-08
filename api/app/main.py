@@ -241,7 +241,8 @@ def main():
         host=args.host,
         port=args.port,
         reload=args.reload,
-        reload_dirs=["api"] if args.reload else None,
+        reload_dirs=[os.path.join(PROJECT_ROOT, "api")] if args.reload else None,
+        reload_excludes=["*.log", "*/log/*"] if args.reload else None,
     )
 
 

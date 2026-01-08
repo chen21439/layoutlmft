@@ -137,5 +137,5 @@ quick_test:
 
 # 推理配置 (FastAPI 服务使用)
 inference:
-  checkpoint_path: "/data/LLM_group/layoutlmft/artifact/exp_20251227_161829/joint_tender/checkpoint-375"
+  checkpoint_path: "/data/LLM_group/layoutlmft/artifact/tender/stage34_tender1/best/"
   data_dir_base: "/data/LLM_group/ontology/static/upload"
