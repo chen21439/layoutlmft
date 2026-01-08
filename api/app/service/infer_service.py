@@ -384,6 +384,26 @@ class InferenceService:
                 features, loader.construct_model, loader.device
             )
 
+            # 读取原始 JSON 获取 text
+            with open(json_path, 'r', encoding='utf-8') as f:
+                original_data = json.load(f)
+
+            # 构建 line_id -> text 映射
+            line_text_map = {}
+            for item in original_data:
+                lid = item.get("line_id", item.get("id", -1))
+                if isinstance(lid, str):
+                    try:
+                        lid = int(lid)
+                    except ValueError:
+                        continue
+                line_text_map[lid] = item.get("text", "")
+
+            # 合并 text 到 construct_result
+            if construct_result and "predictions" in construct_result:
+                for pred in construct_result["predictions"]:
+                    pred["text"] = line_text_map.get(pred["line_id"], "")
+
             # Save construct.json
             construct_path = os.path.join(task_dir, "construct.json")
             with open(construct_path, 'w', encoding='utf-8') as f:
