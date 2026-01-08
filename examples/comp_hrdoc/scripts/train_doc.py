@@ -1070,6 +1070,26 @@ def main():
         covmatch = args.covmatch or global_config.dataset.covmatch
         logger.info(f"Covmatch: {covmatch}")
 
+        # 设置 covmatch 环境变量（复用 stage 的方式）
+        if covmatch:
+            covmatch_dir = global_config.dataset.get_covmatch_dir(args.dataset)
+            if args.covmatch:
+                # 命令行指定的 covmatch，覆盖配置
+                global_config.dataset.covmatch = args.covmatch
+                covmatch_dir = global_config.dataset.get_covmatch_dir(args.dataset)
+            if os.path.exists(covmatch_dir):
+                os.environ["HRDOC_SPLIT_DIR"] = covmatch_dir
+                logger.info(f"Covmatch directory: {covmatch_dir}")
+            else:
+                logger.error(f"Covmatch directory not found: {covmatch_dir}")
+                # 列出可用的 covmatch 目录
+                parent_dir = os.path.dirname(covmatch_dir)
+                if os.path.exists(parent_dir):
+                    available = [d for d in os.listdir(parent_dir) if d.startswith("doc_")]
+                    if available:
+                        logger.error(f"Available: {', '.join(sorted(available)[:5])}")
+                raise FileNotFoundError(f"Covmatch directory not found: {covmatch_dir}")
+
         # 使用 stage_feature_extractor 的 tokenizer
         tokenizer = stage_feature_extractor.tokenizer
 
