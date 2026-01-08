@@ -140,7 +140,10 @@ class HRDocDataset(Dataset):
                     dev_doc_ids = set(json.load(f))
                 logger.info(f"[{self.dataset_name}] Using covmatch split: {len(train_doc_ids)} train, {len(dev_doc_ids)} dev")
             else:
-                logger.warning(f"[{self.dataset_name}] Covmatch files not found in {covmatch_dir}, falling back to ratio split")
+                raise FileNotFoundError(
+                    f"Covmatch files not found in {covmatch_dir}. "
+                    f"Expected: {train_ids_file} and {dev_ids_file}"
+                )
 
         # Process each file and filter by split
         all_samples = []
