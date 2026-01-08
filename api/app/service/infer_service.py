@@ -405,54 +405,84 @@ class InferenceService:
         features: Dict,
         construct_model,
         device,
+        section_label_id: int = 4,  # section 类的 label id
     ) -> Dict[str, Any]:
-        """Run Construct model inference."""
+        """Run Construct model inference.
+
+        只对 section 类的行进行 TOC 构建，与训练保持一致。
+        """
         line_features = features["line_features"].to(device)
         line_mask = features["line_mask"].to(device)
         num_lines = features["num_lines"]
         line_ids = features["line_ids"]
+        line_classes = features["line_classes"]
 
-        # Prepare input - add batch dimension
-        if line_features.dim() == 2:
-            line_features = line_features.unsqueeze(0)  # [1, N, H]
-            line_mask = line_mask.unsqueeze(0)  # [1, N]
-
-        batch_size, max_lines = line_mask.shape
-
-        # Categories from line_classes
-        categories = torch.zeros(batch_size, max_lines, dtype=torch.long, device=device)
+        # 过滤只保留 section 类 (与训练一致)
+        section_indices = []  # 原始索引
+        section_line_ids = []  # line_id
         for idx, line_id in enumerate(line_ids):
-            if idx < max_lines:
-                categories[0, idx] = features["line_classes"].get(line_id, 0)
+            if idx < num_lines:
+                cls_id = line_classes.get(line_id, 0)
+                if cls_id == section_label_id:
+                    section_indices.append(idx)
+                    section_line_ids.append(line_id)
 
-        # Reading order (use line index as order)
-        reading_orders = torch.arange(max_lines, device=device).unsqueeze(0)
+        num_sections = len(section_indices)
+        if num_sections == 0:
+            logger.info("[Construct] No sections found, skipping TOC inference")
+            return {
+                "num_lines": 0,
+                "num_sections": 0,
+                "predictions": [],
+            }
+
+        # 提取 section 的特征
+        section_features = line_features[section_indices]  # [S, H]
+        section_features = section_features.unsqueeze(0)  # [1, S, H]
+        section_mask = torch.ones(1, num_sections, dtype=torch.bool, device=device)
+
+        # Categories (all sections)
+        categories = torch.full((1, num_sections), section_label_id, dtype=torch.long, device=device)
+
+        # Reading order (按 section 在文档中的顺序)
+        reading_orders = torch.arange(num_sections, device=device).unsqueeze(0)
 
         # Run Construct model
         with torch.no_grad():
             outputs = construct_model(
-                region_features=line_features,
+                region_features=section_features,
                 categories=categories,
-                region_mask=line_mask,
+                region_mask=section_mask,
                 reading_orders=reading_orders,
             )
 
         # Decode predictions
-        parent_preds = outputs["parent_logits"].argmax(dim=-1)[0].cpu().tolist()  # [N]
-        sibling_preds = outputs["sibling_logits"].argmax(dim=-1)[0].cpu().tolist()  # [N]
+        parent_preds = outputs["parent_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
+        sibling_preds = outputs["sibling_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
 
-        # Build result
+        # Build result - 映射回原始 line_id
+        # toc_parent/toc_sibling 是 section 空间的索引，需要映射回 line_id
         results = []
-        for idx, line_id in enumerate(line_ids):
-            if idx < num_lines:
-                results.append({
-                    "line_id": line_id,
-                    "toc_parent": parent_preds[idx],
-                    "toc_sibling": sibling_preds[idx],
-                })
+        for sec_idx, line_id in enumerate(section_line_ids):
+            parent_sec_idx = parent_preds[sec_idx]
+            sibling_sec_idx = sibling_preds[sec_idx]
+
+            # 映射回 line_id (-1 表示无)
+            toc_parent_line_id = section_line_ids[parent_sec_idx] if 0 <= parent_sec_idx < num_sections else -1
+            toc_sibling_line_id = section_line_ids[sibling_sec_idx] if 0 <= sibling_sec_idx < num_sections else -1
+
+            results.append({
+                "line_id": line_id,
+                "toc_parent": toc_parent_line_id,
+                "toc_sibling": toc_sibling_line_id,
+                "section_index": sec_idx,  # section 空间的索引
+            })
+
+        logger.info(f"[Construct] TOC inference done: {num_sections} sections")
 
         return {
             "num_lines": num_lines,
+            "num_sections": num_sections,
             "predictions": results,
         }
 
