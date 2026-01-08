@@ -856,8 +856,9 @@ def evaluate_with_stage_features(
                     if len(valid_indices) == 0:
                         continue
 
-                    # 构建树
-                    texts = [f"node_{i}" for i in valid_indices]
+                    # 构建树（使用实际文本或占位符）
+                    doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
+                    texts = [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices]
                     # 重新映射 parent_ids 到压缩后的索引
                     idx_map = {old: new for new, old in enumerate(valid_indices)}
                     idx_map[-1] = -1  # root 保持 -1
@@ -889,10 +890,10 @@ def evaluate_with_stage_features(
                     if len(valid_indices) < 2:
                         continue
                     # 获取文本（如果有）
-                    texts = batch.get("texts", [[f"node_{i}" for i in range(128)]])[b] if "texts" in batch else [f"node_{i}" for i in range(128)]
+                    doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
                     vis_samples.append({
                         "sample_id": f"batch{num_batches}_sample{b}",
-                        "texts": [texts[i] if i < len(texts) else f"[{i}]" for i in valid_indices],
+                        "texts": [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices],
                         "pred_parents": [pred_parents[b, i].item() for i in valid_indices],
                         "gt_parents": [line_parent_ids[b, i].item() for i in valid_indices],
                         "mask": [True] * len(valid_indices),
