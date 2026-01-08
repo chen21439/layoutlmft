@@ -151,9 +151,7 @@ def parse_args():
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
-                        help="Root directory for experiments (uses exp_manager structure)")
-    parser.add_argument("--output-dir", type=str, default=None,
-                        help="Direct output directory (skips exp_manager, saves directly here)")
+                        help="Output directory (saves directly here, skips exp_manager)")
 
     # Model checkpoint (HuggingFace style)
     parser.add_argument("--model-name-or-path", type=str, default=None,
@@ -1006,15 +1004,15 @@ def main():
     # Setup experiment directory
     stage_name = "doc" if args.use_construct else "order"
 
-    if args.output_dir:
-        # 直接使用指定的输出目录
-        output_dir = Path(args.output_dir)
+    if args.artifact_dir:
+        # 直接使用指定的输出目录（和 stage 目录保持一致）
+        output_dir = Path(args.artifact_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         exp_manager = None
         logger.info(f"Output directory: {output_dir}")
     else:
         # 使用 exp_manager 管理目录结构
-        artifact_root = args.artifact_dir if args.artifact_dir else get_artifact_path(args.env)
+        artifact_root = get_artifact_path(args.env)
         exp_manager, exp_dir = ensure_experiment(
             artifact_root=artifact_root,
             exp=args.exp,
