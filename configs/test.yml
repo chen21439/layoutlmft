@@ -140,4 +140,4 @@ inference:
   checkpoint_path: "/data/LLM_group/layoutlmft/artifact/tender/stage34_tender1/best/"
   data_dir_base: "/data/LLM_group/ontology/static/upload"
   # Construct 模型路径 (可选，用于 TOC 生成)
-  construct_checkpoint: ""
+  construct_checkpoint: "/data/LLM_group/layoutlmft/artifact_comp_hrdoc/tender/best_model"

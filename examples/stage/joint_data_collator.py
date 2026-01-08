@@ -24,6 +24,7 @@ HRDoc 联合训练的数据整理器 (Data Collator)
 
 import os
 import sys
+import json
 import torch
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
@@ -246,7 +247,12 @@ class HRDocDocumentLevelCollator:
             all_line_parent_ids.append(doc["line_parent_ids"])
             all_line_relations.append(doc["line_relations"])
             all_line_labels.append(doc.get("line_labels", []))
-            all_line_text_maps.append(doc.get("line_text_map", {}))
+            # 从 JSON 字符串解析 text_map（避免 Dataset 序列化问题）
+            text_map_json = doc.get("line_text_map_json", "{}")
+            text_map = json.loads(text_map_json) if text_map_json else {}
+            # 确保 key 是 int 类型
+            text_map = {int(k): v for k, v in text_map.items()}
+            all_line_text_maps.append(text_map)
 
         num_chunks = len(all_chunks)
         max_seq_len = max(len(chunk["input_ids"]) for chunk in all_chunks)

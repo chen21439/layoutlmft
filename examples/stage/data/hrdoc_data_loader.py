@@ -212,7 +212,7 @@ def load_hrdoc_raw_datasets_batched(
                                 "line_parent_ids": line_parent_ids,
                                 "line_relations": line_relations,
                                 "line_labels": line_labels,
-                                "line_text_map": line_text_map,
+                                "line_text_map_json": json.dumps(line_text_map, ensure_ascii=False),  # dict 转 JSON 字符串
                             })
 
                 except Exception as e:
@@ -1062,7 +1062,7 @@ class HRDocDataLoader:
             page_parent_ids = page["line_parent_ids"]
             page_relations = page["line_relations"]
             page_line_labels = page.get("line_labels", [])
-            page_line_text_map = page.get("line_text_map", {})
+            page_line_text_map_json = page.get("line_text_map_json", "{}")
 
             chunks = tokenize_page_with_line_boundary(
                 tokenizer=self.tokenizer,
@@ -1082,7 +1082,9 @@ class HRDocDataLoader:
             all_parent_ids.extend(page_parent_ids)
             all_relations.extend(page_relations)
             all_line_labels.extend(page_line_labels)
-            all_line_text_map.update(page_line_text_map)
+            # 合并 JSON 字符串中的 text_map
+            page_text_map = json.loads(page_line_text_map_json) if page_line_text_map_json else {}
+            all_line_text_map.update(page_text_map)
 
         if len(all_chunks) == 0:
             return None
@@ -1109,7 +1111,7 @@ class HRDocDataLoader:
             "line_parent_ids": all_parent_ids,
             "line_relations": all_relations,
             "line_labels": all_line_labels,  # 行级别标签
-            "line_text_map": all_line_text_map,  # line_id -> text 映射（用于可视化）
+            "line_text_map_json": json.dumps(all_line_text_map, ensure_ascii=False),  # JSON 字符串（避免 Dataset 序列化问题）
             "json_path": json_path,
         }
 
