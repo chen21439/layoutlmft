@@ -372,18 +372,22 @@ def save_construct_model(
     """Save Construct model checkpoint.
 
     Args:
-        model: Construct model to save
+        model: Construct model to save (ConstructFromFeatures or ConstructWithOrderFeatures)
         save_path: Directory to save to
-        save_order: Whether to also save Order model weights
+        save_order: Whether to also save Order model weights (only for ConstructWithOrderFeatures)
     """
     os.makedirs(save_path, exist_ok=True)
 
-    # Save Construct module weights only
+    # 保存完整模型权重（包括 type_embedding, combine 等）
+    model_path = os.path.join(save_path, "pytorch_model.bin")
+    torch.save(model.state_dict(), model_path)
+
+    # 兼容旧格式：也保存 construct_module 权重
     construct_path = os.path.join(save_path, "construct_model.pt")
     torch.save(model.construct_module.state_dict(), construct_path)
 
-    # Optionally save full model (including Order)
-    if save_order:
+    # Optionally save full model (including Order) for ConstructWithOrderFeatures
+    if save_order and hasattr(model, 'order_model'):
         full_path = os.path.join(save_path, "full_model.pt")
         torch.save(model.state_dict(), full_path)
 
@@ -391,7 +395,9 @@ def save_construct_model(
     config = {
         'hidden_size': model.hidden_size,
         'num_layers': model.construct_module.transformer.layers.__len__(),
-        'freeze_order': getattr(model, 'freeze_order', True),  # ConstructFromFeatures 没有此属性
+        'num_categories': getattr(model, 'type_embedding', None) and model.type_embedding.num_categories or 5,
+        'freeze_order': getattr(model, 'freeze_order', True),
+        'model_type': model.__class__.__name__,
     }
     config_path = os.path.join(save_path, "config.json")
     with open(config_path, 'w') as f:

@@ -153,6 +153,10 @@ def parse_args():
     parser.add_argument("--artifact-dir", type=str, default=None,
                         help="Directory to save model checkpoints (overrides default artifact path)")
 
+    # Resume training
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint directory to resume training from")
+
     # GPU
     parser.add_argument("--gpu", type=str, default=None,
                         help="GPU device ID(s) to use, e.g., '0' or '0,1' (sets CUDA_VISIBLE_DEVICES)")
@@ -1225,6 +1229,25 @@ def main():
             construct_weight=args.construct_weight,
         )
         save_fn = save_doc_model
+
+    # Resume from checkpoint
+    if args.resume:
+        resume_path = Path(args.resume)
+        # 优先加载完整模型权重
+        model_bin = resume_path / "pytorch_model.bin"
+        if model_bin.exists():
+            logger.info(f"Loading model weights from {model_bin}")
+            state_dict = torch.load(model_bin, map_location="cpu")
+            model.load_state_dict(state_dict)
+        else:
+            # 兼容旧格式：只加载 construct_module
+            construct_pt = resume_path / "construct_model.pt"
+            if construct_pt.exists():
+                logger.info(f"Loading construct_module weights from {construct_pt}")
+                state_dict = torch.load(construct_pt, map_location="cpu")
+                model.construct_module.load_state_dict(state_dict)
+            else:
+                raise FileNotFoundError(f"No checkpoint found at {args.resume}")
 
     model = model.to(device)
 
