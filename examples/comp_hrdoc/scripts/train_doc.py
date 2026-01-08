@@ -151,7 +151,9 @@ def parse_args():
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
-                        help="Directory to save model checkpoints (overrides default artifact path)")
+                        help="Root directory for experiments (uses exp_manager structure)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Direct output directory (skips exp_manager, saves directly here)")
 
     # Model checkpoint (HuggingFace style)
     parser.add_argument("--model-name-or-path", type=str, default=None,
@@ -1003,23 +1005,28 @@ def main():
 
     # Setup experiment directory
     stage_name = "doc" if args.use_construct else "order"
-    artifact_root = args.artifact_dir if args.artifact_dir else get_artifact_path(args.env)
-    exp_manager, exp_dir = ensure_experiment(
-        artifact_root=artifact_root,
-        exp=args.exp,
-        new_exp=args.new_exp,
-        name=args.exp_name or f"DOC Model Training ({stage_name})",
-        description=f"Train DOC model with lr={args.learning_rate}, epochs={args.num_epochs}, construct={args.use_construct}",
-        config=vars(args),
-    )
 
-    # Get stage output directory
-    output_dir = Path(exp_manager.get_stage_dir(args.exp, stage_name, "comp_hrdoc"))
-    logger.info(f"Experiment directory: {exp_dir}")
-    logger.info(f"Stage output directory: {output_dir}")
-
-    # Mark stage as started
-    exp_manager.mark_stage_started(args.exp, stage_name, "comp_hrdoc")
+    if args.output_dir:
+        # 直接使用指定的输出目录
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        exp_manager = None
+        logger.info(f"Output directory: {output_dir}")
+    else:
+        # 使用 exp_manager 管理目录结构
+        artifact_root = args.artifact_dir if args.artifact_dir else get_artifact_path(args.env)
+        exp_manager, exp_dir = ensure_experiment(
+            artifact_root=artifact_root,
+            exp=args.exp,
+            new_exp=args.new_exp,
+            name=args.exp_name or f"DOC Model Training ({stage_name})",
+            description=f"Train DOC model with lr={args.learning_rate}, epochs={args.num_epochs}, construct={args.use_construct}",
+            config=vars(args),
+        )
+        output_dir = Path(exp_manager.get_stage_dir(args.exp, stage_name, "comp_hrdoc"))
+        logger.info(f"Experiment directory: {exp_dir}")
+        logger.info(f"Stage output directory: {output_dir}")
+        exp_manager.mark_stage_started(args.exp, stage_name, "comp_hrdoc")
 
     # Quick test mode
     if args.quick:
@@ -1459,11 +1466,12 @@ def main():
     logger.info(f"Saved final model to {final_path}")
 
     # Mark stage as completed
-    exp_manager.mark_stage_completed(
-        args.exp, stage_name, "comp_hrdoc",
-        best_checkpoint=str(output_dir / "best_model"),
-        metrics={f"best_{best_metric_name}": best_metric},
-    )
+    if exp_manager is not None:
+        exp_manager.mark_stage_completed(
+            args.exp, stage_name, "comp_hrdoc",
+            best_checkpoint=str(output_dir / "best_model"),
+            metrics={f"best_{best_metric_name}": best_metric},
+        )
 
     logger.info("Training complete!")
     logger.info(f"Best {best_metric_name}: {best_metric:.4f}")
