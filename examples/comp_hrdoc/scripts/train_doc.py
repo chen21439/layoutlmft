@@ -102,7 +102,6 @@ def parse_args():
     # Data
     parser.add_argument("--max-regions", type=int, default=1024,
                         help="Max lines per document (O(n²) memory, default 1024)")
-    parser.add_argument("--val-split-ratio", type=float, default=0.1)
     parser.add_argument("--document-level", action="store_true", default=True,
                         help="Enable document-level training (supports cross-page parent)")
 
@@ -1127,6 +1126,8 @@ def main():
 
         # 获取 covmatch (命令行参数优先于配置文件)
         covmatch = args.covmatch or global_config.dataset.covmatch
+        if not covmatch:
+            raise ValueError("--covmatch is required. Please specify a covmatch split name.")
         logger.info(f"Covmatch: {covmatch}")
 
         mode = "document-level" if args.document_level else "page-level"
@@ -1139,7 +1140,6 @@ def main():
             max_lines=args.max_regions,
             max_samples=args.max_train_samples,
             split='train',
-            val_split_ratio=args.val_split_ratio,
             covmatch=covmatch,
         )
         val_dataset = HRDocDataset(
@@ -1148,7 +1148,6 @@ def main():
             max_lines=args.max_regions,
             max_samples=args.max_val_samples,
             split='validation',
-            val_split_ratio=args.val_split_ratio,
             covmatch=covmatch,
         )
 
