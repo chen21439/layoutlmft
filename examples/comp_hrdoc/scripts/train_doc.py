@@ -43,6 +43,7 @@ from tqdm import tqdm
 # 数据加载：复用 stage 的 DataLoader（支持多 chunk 文档级别处理）
 from examples.stage.data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
 from examples.stage.joint_data_collator import HRDocDocumentLevelCollator
+from examples.comp_hrdoc.data.hrdoc_loader import HRDocDataset
 
 # 标签转换：使用 tree_utils 计算层级 parent 和 sibling
 from examples.comp_hrdoc.utils.tree_utils import resolve_hierarchical_parents_and_siblings
