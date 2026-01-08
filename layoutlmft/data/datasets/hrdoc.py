@@ -81,6 +81,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             "line_parent_ids": datasets.Sequence(datasets.Value("int64")),
             "line_relations": datasets.Sequence(datasets.Value("string")),
             "line_labels": datasets.Sequence(datasets.Value("int64")),  # 行级别标签（每行一个）
+            "line_text_map_json": datasets.Value("string"),  # line_id -> text 映射（JSON 字符串）
         })
 
         return datasets.DatasetInfo(
@@ -317,6 +318,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                 page_parent_ids = []  # 该页行的 parent_id
                 page_relations = []   # 该页行的 relation
                 page_line_labels = []  # 该页行的分类标签（每行一个）
+                page_line_text_map = {}  # line_id -> text 映射（用于可视化）
 
                 for line_idx, item in enumerate(form_data):
                     # 使用 trans_class 将细粒度标签转换为论文14类
@@ -375,6 +377,9 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                     page_relations.append(relation)
                     page_line_labels.append(label)
 
+                    # 记录 line_id -> text 映射（用于可视化）
+                    page_line_text_map[item_line_id] = " ".join(w["text"] for w in words)
+
                     # 构建当前页的 tokens 列表
                     for w in words:
                         page_tokens.append(w["text"])
@@ -396,6 +401,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
                         "line_parent_ids": page_parent_ids,  # 该页行的 parent_id（全局索引）
                         "line_relations": page_relations,
                         "line_labels": page_line_labels,  # 该页行的分类标签
+                        "line_text_map_json": json.dumps(page_line_text_map, ensure_ascii=False),  # line_id -> text
                     }
                     guid += 1
                     doc_has_valid_page = True
