@@ -118,8 +118,8 @@ class ModelLoader:
         else:
             config = {'hidden_size': 768, 'num_layers': 3, 'num_categories': 14}
 
-        # Build model
-        from models.construct_only import build_construct_from_features
+        # Build model (从 comp_hrdoc 导入，避免与 stage/models 冲突)
+        from comp_hrdoc.models.construct_only import build_construct_from_features
         model = build_construct_from_features(
             hidden_size=config.get('hidden_size', 768),
             num_categories=config.get('num_categories', 14),
