@@ -13,6 +13,7 @@ HRDoc 统一数据加载模块
 """
 
 import os
+import json
 import logging
 import pickle
 import hashlib
