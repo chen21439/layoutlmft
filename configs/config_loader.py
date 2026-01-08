@@ -147,6 +147,7 @@ class InferenceConfig:
     """Inference configuration (FastAPI service)"""
     checkpoint_path: Optional[str] = None
     data_dir_base: Optional[str] = None
+    construct_checkpoint: Optional[str] = None  # Construct 模型路径（可选）
 
 
 # Import dataset configuration from examples/dataset_config
