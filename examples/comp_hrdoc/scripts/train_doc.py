@@ -144,7 +144,7 @@ def parse_args():
                         help="Dataset to use when --use-stage-features is enabled")
     parser.add_argument("--covmatch", type=str, default=None,
                         help="Covmatch split directory name (e.g., 'doc_covmatch_dev10_seed42')")
-    parser.add_argument("--toc-only", action="store_true", default=False,
+    parser.add_argument("--toc-only", action="store_true", default=True,
                         help="Only train on section headings (align with paper 4.4 TOC generation)")
     parser.add_argument("--section-label-id", type=int, default=4,
                         help="Label ID for section headings (default=4 per labels.py: section)")
