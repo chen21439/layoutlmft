@@ -822,6 +822,7 @@ def evaluate_with_stage_features(
             line_parent_ids = compressed["parent_ids"]
             line_labels = compressed["categories"]
             reading_orders = compressed["reading_orders"]
+            original_indices = compressed["original_indices"]  # 原始 line_id
             sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask, reading_orders)
 
             # Skip batch if no sections
@@ -830,6 +831,7 @@ def evaluate_with_stage_features(
         else:
             batch_size, max_lines = line_mask.shape
             reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
+            original_indices = None  # 非 toc_only 模式，索引不变
 
             # 使用已转换的 sibling_labels_matrix
             sibling_labels = sibling_labels_matrix
@@ -881,7 +883,12 @@ def evaluate_with_stage_features(
 
                     # 构建树（使用实际文本或占位符）
                     doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
-                    texts = [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices]
+                    # toc_only 模式下用 original_indices 获取原始 line_id
+                    if original_indices is not None:
+                        orig_ids = [original_indices[b, i].item() for i in valid_indices]
+                        texts = [doc_texts[oid] if oid < len(doc_texts) else f"node_{oid}" for oid in orig_ids]
+                    else:
+                        texts = [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices]
                     # 重新映射 parent_ids 到压缩后的索引
                     idx_map = {old: new for new, old in enumerate(valid_indices)}
                     idx_map[-1] = -1  # root 保持 -1
@@ -916,9 +923,15 @@ def evaluate_with_stage_features(
                         continue
                     # 获取文本（如果有）
                     doc_texts = batch.get("texts", [[]])[b] if "texts" in batch else []
+                    # toc_only 模式下用 original_indices 获取原始 line_id
+                    if original_indices is not None:
+                        orig_ids = [original_indices[b, i].item() for i in valid_indices]
+                        sample_texts = [doc_texts[oid] if oid < len(doc_texts) else f"node_{oid}" for oid in orig_ids]
+                    else:
+                        sample_texts = [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices]
                     sample = {
                         "sample_id": f"batch{num_batches}_sample{b}",
-                        "texts": [doc_texts[i] if i < len(doc_texts) else f"node_{i}" for i in valid_indices],
+                        "texts": sample_texts,
                         "pred_parents": [pred_parents[b, i].item() for i in valid_indices],
                         "gt_parents": [line_parent_ids[b, i].item() for i in valid_indices],
                         "mask": [True] * len(valid_indices),

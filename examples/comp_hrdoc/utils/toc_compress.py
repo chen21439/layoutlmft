@@ -130,6 +130,8 @@ def compress_to_sections_batch(
     new_parent_ids = torch.full((B, max_sections), -1, dtype=torch.long, device=device)
     new_categories = torch.full((B, max_sections), section_label_id, dtype=torch.long, device=device)
     new_reading_orders = torch.zeros(B, max_sections, dtype=torch.long, device=device)
+    # 保存原始行索引，用于查找文本等
+    original_indices = torch.full((B, max_sections), -1, dtype=torch.long, device=device)
 
     for b in range(B):
         sample_section_mask = section_masks[b]
@@ -151,6 +153,8 @@ def compress_to_sections_batch(
         # 设置 mask 和 parent_ids
         new_mask[b, :S] = True
         new_parent_ids[b, :S] = new_pids
+        # 保存原始行索引（line_id）
+        original_indices[b, :S] = torch.tensor(kept_indices, dtype=torch.long, device=device)
 
         # 处理 reading_orders
         if reading_orders is not None:
@@ -171,6 +175,7 @@ def compress_to_sections_batch(
         "categories": new_categories,
         "reading_orders": new_reading_orders,
         "num_sections": num_sections_list,
+        "original_indices": original_indices,  # 原始 line_id，用于查找 texts
     }
 
 
