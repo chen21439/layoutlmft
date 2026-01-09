@@ -489,6 +489,7 @@ class HRDocCollator:
             'parent_ids': parent_ids,
             'sibling_labels': sibling_labels,
             'line_text_maps': line_text_maps,  # line_id -> text 映射（用于可视化）
+            'doc_names': [s['doc_name'] for s in batch],  # 文档名列表（用于保存结果）
         }
 
 
