@@ -437,6 +437,7 @@ def format_tree_from_parents(
     """从 parent 列表构建树形可视化字符串
 
     复用自 train_doc.py 的 build_tree_str 逻辑。
+    注意：parents 的值应该是 0-based 索引，不是原始 line_id。
 
     Args:
         parents: 父节点索引列表，自指向(parent==self)表示 root
@@ -477,6 +478,49 @@ def format_tree_from_parents(
     return _format(-1)  # 从 root (-1) 开始
 
 
+def format_toc_tree(
+    toc_tree: List[Dict],
+    id_key: str = "line_id",
+    text_key: str = "text",
+    max_text_len: int = 40,
+) -> List[str]:
+    """从嵌套树结构格式化为可视化字符串
+
+    用于 API 推理输出，直接从 build_tree_from_parents 生成的嵌套结构格式化。
+
+    Args:
+        toc_tree: 嵌套树结构（由 build_tree_from_parents 生成）
+        id_key: 节点 ID 字段名
+        text_key: 文本字段名
+        max_text_len: 文本最大显示长度
+
+    Returns:
+        树形字符串列表
+
+    Example:
+        ├── [5] 第一章 总则
+          ├── [12] 一、适用范围
+          ├── [25] 二、定义
+        ├── [30] 第二章 招标内容
+    """
+    lines = []
+
+    def _format(node: Dict, indent: int = 0):
+        node_id = node.get(id_key, "?")
+        text = node.get(text_key, "")
+        if len(text) > max_text_len:
+            text = text[:max_text_len - 3] + "..."
+        lines.append("  " * indent + f"├── [{node_id}] {text}")
+
+        for child in node.get("children", []):
+            _format(child, indent + 1)
+
+    for root in toc_tree:
+        _format(root, 0)
+
+    return lines
+
+
 __all__ = [
     'Node',
     'RELATION_STR_TO_INT',
@@ -490,4 +534,5 @@ __all__ = [
     'build_sibling_matrix',
     'build_tree_from_parents',
     'format_tree_from_parents',
+    'format_toc_tree',
 ]
