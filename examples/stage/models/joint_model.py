@@ -83,6 +83,11 @@ if _stage_dir not in sys.path:
 try:
     from models.modules import LinePooling
     from models.heads import LineClassificationHead
+    # 从 comp_hrdoc 导入 LineFeatureEnhancer
+    _comp_hrdoc_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "comp_hrdoc"))
+    if _comp_hrdoc_dir not in sys.path:
+        sys.path.insert(0, _comp_hrdoc_dir)
+    from models.modules import LineFeatureEnhancer
 except ImportError:
     # 备用导入方式：如果上面失败，尝试从当前目录相对导入
     import importlib.util
@@ -100,6 +105,14 @@ except ImportError:
     classification_head_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(classification_head_module)
     LineClassificationHead = classification_head_module.LineClassificationHead
+
+    # 加载 line_transformer.py (LineFeatureEnhancer)
+    _comp_hrdoc_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "comp_hrdoc"))
+    lt_path = os.path.join(_comp_hrdoc_dir, "models", "modules", "line_transformer.py")
+    spec = importlib.util.spec_from_file_location("line_transformer", lt_path)
+    line_transformer_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(line_transformer_module)
+    LineFeatureEnhancer = line_transformer_module.LineFeatureEnhancer
 
 
 class JointModel(nn.Module):
@@ -133,6 +146,7 @@ class JointModel(nn.Module):
         cls_dropout: float = 0.1,  # 分类头 dropout
         teacher_forcing: bool = True,  # 使用 GT labels 训练 Stage3/4（True=稳定训练, False=贴近推理）
         relation_class_weights: list = None,  # 关系分类的类别权重 [connect, contain, equality]
+        use_line_enhancer: bool = False,  # 是否启用行间特征增强
     ):
         super().__init__()
 
@@ -152,6 +166,23 @@ class JointModel(nn.Module):
             num_classes=num_classes,
             dropout=cls_dropout,
         )
+
+        # ========== 行间特征增强（可选）==========
+        # 参考论文 4.2.2 Multi-modal Feature Enhancement Module
+        # 使用轻量级 Transformer Encoder 增强行级特征的上下文信息
+        self.use_line_enhancer = use_line_enhancer
+        if use_line_enhancer:
+            self.line_enhancer = LineFeatureEnhancer(
+                hidden_size=hidden_size,
+                num_heads=12,  # 论文配置
+                ffn_dim=2048,  # 论文配置
+                dropout=0.1,
+                num_layers=1,  # 论文配置
+                enabled=True,
+            )
+            print(f"[JointModel] LineFeatureEnhancer enabled (1 layer, 12 heads, FFN=2048)")
+        else:
+            self.line_enhancer = None
 
         # ========== Stage 3 & 4 ==========
         self.stage3 = stage3_model
@@ -506,6 +537,11 @@ class JointModel(nn.Module):
                 num_lines_in_doc = features.shape[0]
                 line_features[doc_idx, :num_lines_in_doc] = features
                 line_mask[doc_idx, :num_lines_in_doc] = mask
+
+        # ==================== 行间特征增强（可选）====================
+        # 在 LinePooling 之后、分类之前应用 Transformer 增强
+        if self.line_enhancer is not None:
+            line_features = self.line_enhancer(line_features, line_mask)
 
         # ==================== Stage 1: 分类 ====================
         # 初始化 outputs 字典

@@ -128,6 +128,7 @@ class JointModelArguments:
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Enable gradient checkpointing for Stage1"})
     freeze_visual: bool = field(default=False, metadata={"help": "Freeze visual encoder (ResNet)"})
     teacher_forcing: bool = field(default=True, metadata={"help": "Use GT labels for Stage3/4 training (True=stable, False=matches inference)"})
+    use_line_enhancer: bool = field(default=False, metadata={"help": "Enable line-level feature enhancement (Transformer between lines)"})
 
 
 @dataclass
@@ -338,6 +339,7 @@ def build_model(model_args, config, raw_train_dataset, device):
         freeze_visual=model_args.freeze_visual,
         stage1_no_grad=stage1_no_grad,
         teacher_forcing=model_args.teacher_forcing,
+        use_line_enhancer=model_args.use_line_enhancer,
     )
 
     if model_args.mode == "stage1":
@@ -446,6 +448,7 @@ def main():
         logger.info(f"Loss Weights:   cls=0.0 (frozen), parent={model_args.lambda_parent}, rel={model_args.lambda_rel}")
     else:
         logger.info(f"Loss Weights:   cls={model_args.lambda_cls}, parent={model_args.lambda_parent}, rel={model_args.lambda_rel}")
+    logger.info(f"Line Enhancer:  {'enabled' if model_args.use_line_enhancer else 'disabled'}")
     logger.info("=" * 60)
 
     if training_args.dry_run:
