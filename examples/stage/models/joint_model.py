@@ -104,19 +104,15 @@ except ImportError:
     spec.loader.exec_module(classification_head_module)
     LineClassificationHead = classification_head_module.LineClassificationHead
 
-# 从 comp_hrdoc 导入 LineFeatureEnhancer（独立 try-except，避免影响上面的导入）
-try:
-    if _comp_hrdoc_dir not in sys.path:
-        sys.path.insert(0, _comp_hrdoc_dir)
-    from models.modules import LineFeatureEnhancer
-except ImportError:
-    # 备用导入方式
-    import importlib.util
-    lt_path = os.path.join(_comp_hrdoc_dir, "models", "modules", "line_transformer.py")
-    spec = importlib.util.spec_from_file_location("line_transformer", lt_path)
-    line_transformer_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(line_transformer_module)
-    LineFeatureEnhancer = line_transformer_module.LineFeatureEnhancer
+# 从 comp_hrdoc 导入 LineFeatureEnhancer
+# 注意：不能将 comp_hrdoc 加入 sys.path，否则会与 stage 的 engines 目录冲突
+# 使用 importlib.util 直接加载文件
+import importlib.util
+_lt_path = os.path.join(_comp_hrdoc_dir, "models", "modules", "line_transformer.py")
+_lt_spec = importlib.util.spec_from_file_location("line_transformer", _lt_path)
+_line_transformer_module = importlib.util.module_from_spec(_lt_spec)
+_lt_spec.loader.exec_module(_line_transformer_module)
+LineFeatureEnhancer = _line_transformer_module.LineFeatureEnhancer
 
 
 class JointModel(nn.Module):
