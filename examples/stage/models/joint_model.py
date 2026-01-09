@@ -76,18 +76,16 @@ import sys
 import os
 
 # 使用绝对路径导入 stage/models 模块
-_stage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "stage"))
+# joint_model.py 位于 examples/stage/models/，需要导入同目录下的 modules 和 heads
+_stage_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))  # examples/stage
+_comp_hrdoc_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "comp_hrdoc"))  # examples/comp_hrdoc
+
 if _stage_dir not in sys.path:
     sys.path.insert(0, _stage_dir)
 
 try:
     from models.modules import LinePooling
     from models.heads import LineClassificationHead
-    # 从 comp_hrdoc 导入 LineFeatureEnhancer
-    _comp_hrdoc_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "comp_hrdoc"))
-    if _comp_hrdoc_dir not in sys.path:
-        sys.path.insert(0, _comp_hrdoc_dir)
-    from models.modules import LineFeatureEnhancer
 except ImportError:
     # 备用导入方式：如果上面失败，尝试从当前目录相对导入
     import importlib.util
@@ -106,8 +104,14 @@ except ImportError:
     spec.loader.exec_module(classification_head_module)
     LineClassificationHead = classification_head_module.LineClassificationHead
 
-    # 加载 line_transformer.py (LineFeatureEnhancer)
-    _comp_hrdoc_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "comp_hrdoc"))
+# 从 comp_hrdoc 导入 LineFeatureEnhancer（独立 try-except，避免影响上面的导入）
+try:
+    if _comp_hrdoc_dir not in sys.path:
+        sys.path.insert(0, _comp_hrdoc_dir)
+    from models.modules import LineFeatureEnhancer
+except ImportError:
+    # 备用导入方式
+    import importlib.util
     lt_path = os.path.join(_comp_hrdoc_dir, "models", "modules", "line_transformer.py")
     spec = importlib.util.spec_from_file_location("line_transformer", lt_path)
     line_transformer_module = importlib.util.module_from_spec(spec)
