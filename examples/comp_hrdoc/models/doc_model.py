@@ -812,6 +812,22 @@ def load_doc_model(
     # Override with provided config
     config.update(override_config)
 
+    # 兼容旧配置：num_layers -> order_num_layers, construct_num_layers
+    if 'num_layers' in config:
+        num_layers = config.pop('num_layers')
+        config.setdefault('order_num_layers', num_layers)
+        config.setdefault('construct_num_layers', num_layers)
+
+    # 过滤掉 build_doc_model 不支持的参数
+    valid_keys = {
+        'hidden_size', 'num_categories', 'num_heads',
+        'order_num_layers', 'construct_num_layers', 'num_relations',
+        'dropout', 'use_spatial', 'use_visual', 'use_text',
+        'use_construct', 'use_semantic', 'semantic_num_layers',
+        'cls_weight', 'order_weight', 'construct_weight',
+    }
+    config = {k: v for k, v in config.items() if k in valid_keys}
+
     # Build model
     model = build_doc_model(**config)
 
