@@ -46,7 +46,7 @@ from examples.stage.joint_data_collator import HRDocDocumentLevelCollator
 from examples.comp_hrdoc.data.hrdoc_loader import HRDocDataset
 
 # 标签转换：使用 tree_utils 计算层级 parent 和 sibling
-from examples.comp_hrdoc.utils.tree_utils import resolve_hierarchical_parents_and_siblings
+from examples.comp_hrdoc.utils.tree_utils import resolve_hierarchical_parents_and_siblings, format_tree_from_parents
 from examples.comp_hrdoc.models import (
     DOCModel,
     build_doc_model,
@@ -680,36 +680,12 @@ def visualize_toc(
     """
     lines = [f"\n{'='*60}", f"Sample: {sample_id}", f"{'='*60}"]
 
-    # 构建 GT 树
-    def build_tree_str(parents, prefix=""):
-        """递归构建树形字符串"""
-        n = len(parents)
-        children = {i: [] for i in range(-1, n)}
-        for i, p in enumerate(parents):
-            if mask is None or mask[i]:
-                # 自指向方案：parent == self 表示 root，映射到 -1
-                if p == i:
-                    children[-1].append(i)
-                else:
-                    children[p].append(i)
-
-        def _format(node_idx, indent=0):
-            result = []
-            for child in children.get(node_idx, []):
-                text = texts[child] if child < len(texts) else f"[{child}]"
-                if len(text) > 40:
-                    text = text[:37] + "..."
-                result.append("  " * indent + f"├── [{child}] {text}")
-                result.extend(_format(child, indent + 1))
-            return result
-
-        return _format(-1)  # 从 root (-1) 开始
-
+    # 使用 tree_utils 中的通用函数构建树形字符串
     lines.append("\n[Ground Truth TOC]")
-    lines.extend(build_tree_str(gt_parents))
+    lines.extend(format_tree_from_parents(gt_parents, texts, mask))
 
     lines.append("\n[Predicted TOC]")
-    lines.extend(build_tree_str(pred_parents))
+    lines.extend(format_tree_from_parents(pred_parents, texts, mask))
 
     # 标记 Parent 差异
     lines.append("\n[Parent Differences]")

@@ -428,6 +428,55 @@ def build_tree_from_parents(
     return roots
 
 
+def format_tree_from_parents(
+    parents: List[int],
+    texts: List[str],
+    mask: Optional[List[bool]] = None,
+    max_text_len: int = 40,
+) -> List[str]:
+    """从 parent 列表构建树形可视化字符串
+
+    复用自 train_doc.py 的 build_tree_str 逻辑。
+
+    Args:
+        parents: 父节点索引列表，自指向(parent==self)表示 root
+        texts: 节点文本列表
+        mask: 可选的掩码，True 表示包含该节点
+        max_text_len: 文本最大显示长度
+
+    Returns:
+        树形字符串列表
+
+    Example:
+        ├── [0] 第一章 总则
+          ├── [1] 一、适用范围
+          ├── [2] 二、定义
+        ├── [3] 第二章 招标内容
+    """
+    n = len(parents)
+    children = {i: [] for i in range(-1, n)}
+
+    for i, p in enumerate(parents):
+        if mask is None or mask[i]:
+            # 自指向方案：parent == self 表示 root，映射到 -1
+            if p == i:
+                children[-1].append(i)
+            else:
+                children[p].append(i)
+
+    def _format(node_idx, indent=0):
+        result = []
+        for child in children.get(node_idx, []):
+            text = texts[child] if child < len(texts) else f"[{child}]"
+            if len(text) > max_text_len:
+                text = text[:max_text_len - 3] + "..."
+            result.append("  " * indent + f"├── [{child}] {text}")
+            result.extend(_format(child, indent + 1))
+        return result
+
+    return _format(-1)  # 从 root (-1) 开始
+
+
 __all__ = [
     'Node',
     'RELATION_STR_TO_INT',
@@ -440,4 +489,5 @@ __all__ = [
     'resolve_parent_and_sibling_from_tree',  # 向后兼容别名
     'build_sibling_matrix',
     'build_tree_from_parents',
+    'format_tree_from_parents',
 ]

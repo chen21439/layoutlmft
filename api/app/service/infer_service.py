@@ -37,7 +37,7 @@ from data.hrdoc_data_loader import tokenize_page_with_line_boundary, get_label2i
 from data.batch import wrap_batch
 from joint_data_collator import HRDocDocumentLevelCollator
 from layoutlmft.data.labels import ID2LABEL
-from comp_hrdoc.utils.tree_utils import build_tree_from_parents
+from comp_hrdoc.utils.tree_utils import build_tree_from_parents, format_tree_from_parents
 
 from .model_loader import get_model_loader
 
@@ -414,6 +414,13 @@ class InferenceService:
             with open(construct_path, 'w', encoding='utf-8') as f:
                 json.dump(construct_result, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved construct result to: {construct_path}")
+
+            # 打印 TOC 树结构
+            predictions = construct_result["predictions"]
+            parents = [p["toc_parent"] for p in predictions]
+            texts = [p.get("text", "") for p in predictions]
+            tree_lines = format_tree_from_parents(parents, texts)
+            logger.info(f"\n{'='*60}\n TOC Tree ({document_name})\n{'='*60}\n" + "\n".join(tree_lines))
 
         inference_time = (time.time() - start_time) * 1000
 
