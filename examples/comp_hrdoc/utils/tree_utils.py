@@ -204,8 +204,13 @@ def _build_tree_relations(nodes: List[Node], root: Node,
             # equality 关系：沿着 ref_parent 链回溯找到最老的兄弟
             # 然后成为最老兄弟的父节点的子节点
             oldest_bro = node.ref_parent
+            visited = {id(oldest_bro)}  # 防止循环引用导致死循环
             while oldest_bro.ref_parent_relation == 'equality':
                 oldest_bro = oldest_bro.ref_parent
+                if id(oldest_bro) in visited:
+                    # 检测到循环引用，跳出
+                    break
+                visited.add(id(oldest_bro))
             if oldest_bro.parent:
                 oldest_bro.parent.add_child(node)
 
