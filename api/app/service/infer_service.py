@@ -40,8 +40,10 @@ from layoutlmft.data.labels import ID2LABEL
 from comp_hrdoc.utils.tree_utils import (
     build_tree_from_parents,
     format_toc_tree,
+    format_tree_from_parents,  # 训练时的打印格式
     resolve_ref_parents_and_relations,  # 反向转换: 格式B → 格式A
     flatten_full_tree_to_format_a,  # 完整树转扁平格式A
+    visualize_toc,  # 可视化 TOC 树（和训练一致）
 )
 
 from .model_loader import get_model_loader
@@ -455,9 +457,20 @@ class InferenceService:
                 json.dump(construct_result, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved construct result to: {construct_path}")
 
-            # 打印 TOC 树结构（使用嵌套的 toc_tree）
-            tree_lines = format_toc_tree(toc_tree)
-            logger.info(f"\n{'='*60}\n TOC Tree ({document_name})\n{'='*60}\n" + "\n".join(tree_lines))
+            # 打印 TOC 树结构（使用 visualize_toc，和训练一致）
+            format_b = construct_result.get("format_b", {})
+            if format_b and format_b.get("pred_parents"):
+                # 获取 section 文本（只取 section，和 format_b 对应）
+                section_preds = [p for p in construct_result["predictions"] if p.get("is_section", True)]
+                section_texts = [p.get("text", f"[{p['line_id']}]") for p in section_preds]
+                vis_str = visualize_toc(
+                    texts=section_texts,
+                    pred_parents=format_b["pred_parents"],
+                    gt_parents=None,  # 推理模式，无 ground truth
+                    sample_id=document_name,
+                    pred_siblings=format_b.get("pred_siblings"),
+                )
+                logger.info(vis_str)
 
         inference_time = (time.time() - start_time) * 1000
 
@@ -555,6 +568,12 @@ class InferenceService:
             "num_lines": num_lines,
             "num_sections": num_sections,
             "predictions": results,
+            # Format B 数据（用于可视化）
+            "format_b": {
+                "pred_parents": parent_preds,
+                "pred_siblings": sibling_preds,
+                "section_line_ids": section_line_ids,
+            },
         }
 
 

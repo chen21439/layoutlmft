@@ -957,6 +957,79 @@ def insert_content_to_toc_tree(
     return toc_tree
 
 
+def visualize_toc(
+    texts: list,
+    pred_parents: list,
+    gt_parents: list = None,
+    mask: list = None,
+    sample_id: str = "",
+    pred_siblings: list = None,
+    gt_siblings: list = None,
+) -> str:
+    """可视化 TOC 树结构
+
+    Args:
+        texts: 节点文本列表
+        pred_parents: 预测的父节点索引列表（-1 表示 root）
+        gt_parents: 真实的父节点索引列表（-1 表示 root），None 表示无 ground truth（推理模式）
+        mask: 有效节点掩码
+        sample_id: 样本 ID
+        pred_siblings: 预测的左兄弟索引列表（可选）
+        gt_siblings: 真实的左兄弟索引列表（可选）
+
+    Returns:
+        可视化字符串
+    """
+    lines = [f"\n{'='*60}", f"Sample: {sample_id}", f"{'='*60}"]
+
+    # 使用 tree_utils 中的通用函数构建树形字符串
+    if gt_parents is not None:
+        lines.append("\n[Ground Truth TOC]")
+        lines.extend(format_tree_from_parents(gt_parents, texts, mask))
+
+    lines.append("\n[Predicted TOC]")
+    lines.extend(format_tree_from_parents(pred_parents, texts, mask))
+
+    # 标记 Parent 差异（仅在有 ground truth 时）
+    if gt_parents is not None:
+        lines.append("\n[Parent Differences]")
+        parent_diffs = []
+        for i, (p, g) in enumerate(zip(pred_parents, gt_parents)):
+            if mask is None or mask[i]:
+                if p != g:
+                    text = texts[i] if i < len(texts) else f"[{i}]"
+                    if len(text) > 30:
+                        text = text[:27] + "..."
+                    parent_diffs.append(f"  Node [{i}] '{text}': pred={p}, gt={g}")
+        if parent_diffs:
+            lines.extend(parent_diffs[:10])
+            if len(parent_diffs) > 10:
+                lines.append(f"  ... and {len(parent_diffs) - 10} more differences")
+        else:
+            lines.append("  (No differences - Perfect match!)")
+
+    # 标记 Sibling 差异
+    if pred_siblings is not None and gt_siblings is not None:
+        lines.append("\n[Sibling Differences]")
+        sibling_diffs = []
+        for i, (p, g) in enumerate(zip(pred_siblings, gt_siblings)):
+            if mask is None or mask[i]:
+                # gt_siblings = -1 表示无左兄弟，只比较有左兄弟的节点
+                if g >= 0 and p != g:
+                    text = texts[i] if i < len(texts) else f"[{i}]"
+                    if len(text) > 30:
+                        text = text[:27] + "..."
+                    sibling_diffs.append(f"  Node [{i}] '{text}': pred_left_sibling={p}, gt_left_sibling={g}")
+        if sibling_diffs:
+            lines.extend(sibling_diffs[:10])
+            if len(sibling_diffs) > 10:
+                lines.append(f"  ... and {len(sibling_diffs) - 10} more differences")
+        else:
+            lines.append("  (No differences - Perfect match!)")
+
+    return "\n".join(lines)
+
+
 __all__ = [
     'Node',
     'RELATION_STR_TO_INT',
@@ -986,6 +1059,7 @@ __all__ = [
     'format_toc_tree',
     'build_complete_tree',
     'format_complete_tree',
+    'visualize_toc',
     # 非 section 内容插入
     'insert_content_to_toc_tree',
     # 完整树转扁平格式A
