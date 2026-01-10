@@ -302,7 +302,7 @@ class InferenceService:
         self,
         task_id: str,
         document_name: str,
-        full_tree: bool = False,
+        full_tree: bool = True,
     ) -> Dict[str, Any]:
         """
         Run inference with Construct model for TOC generation.
@@ -316,7 +316,7 @@ class InferenceService:
         Args:
             task_id: Task ID (folder under data_dir_base)
             document_name: Document name (without .json extension)
-            full_tree: 是否构建完整树（包含非 section 内容），默认 False
+            full_tree: 是否构建完整树（包含非 section 内容），默认 True
 
         Returns:
             Dict with construct results
