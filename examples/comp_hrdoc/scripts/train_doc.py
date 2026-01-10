@@ -902,12 +902,25 @@ def evaluate_with_stage_features(
                     gt_siblings_b = sibling_labels[b].cpu().tolist() if sibling_labels is not None else None
 
                     # 提取有效节点的 sibling 并映射索引
+                    # 注意：无效的 sibling 应该映射为当前节点的压缩索引（自指向）
                     pred_siblings_mapped = None
                     gt_siblings_mapped = None
                     if pred_siblings_b is not None:
-                        pred_siblings_mapped = [idx_map.get(pred_siblings_b[i], i) for i in valid_indices]
+                        pred_siblings_mapped = []
+                        for new_idx, old_idx in enumerate(valid_indices):
+                            old_sibling = pred_siblings_b[old_idx]
+                            if old_sibling in idx_map:
+                                pred_siblings_mapped.append(idx_map[old_sibling])
+                            else:
+                                pred_siblings_mapped.append(new_idx)  # 自指向
                     if gt_siblings_b is not None:
-                        gt_siblings_mapped = [idx_map.get(gt_siblings_b[i], i) for i in valid_indices]
+                        gt_siblings_mapped = []
+                        for new_idx, old_idx in enumerate(valid_indices):
+                            old_sibling = gt_siblings_b[old_idx]
+                            if old_sibling in idx_map:
+                                gt_siblings_mapped.append(idx_map[old_sibling])
+                            else:
+                                gt_siblings_mapped.append(new_idx)  # 自指向
 
                     # 使用 predictor 的反向转换：格式B → 格式A
                     pred_ref_parents, pred_relations = convert_to_format_a(
