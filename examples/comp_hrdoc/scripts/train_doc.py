@@ -912,6 +912,7 @@ def evaluate_with_stage_features(
                             if old_sibling in idx_map:
                                 pred_siblings_mapped.append(idx_map[old_sibling])
                             else:
+                                logger.debug(f"[TEDS] pred_sibling={old_sibling} not in valid_indices, node {old_idx} -> self-pointing")
                                 pred_siblings_mapped.append(new_idx)  # 自指向
                     if gt_siblings_b is not None:
                         gt_siblings_mapped = []
@@ -920,6 +921,7 @@ def evaluate_with_stage_features(
                             if old_sibling in idx_map:
                                 gt_siblings_mapped.append(idx_map[old_sibling])
                             else:
+                                logger.warning(f"[TEDS] gt_sibling={old_sibling} not in valid_indices, node {old_idx} -> self-pointing (unexpected!)")
                                 gt_siblings_mapped.append(new_idx)  # 自指向
 
                     # 使用 predictor 的反向转换：格式B → 格式A
