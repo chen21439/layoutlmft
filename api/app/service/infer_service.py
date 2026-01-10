@@ -311,7 +311,7 @@ class InferenceService:
         1. Stage 1: 提取 line_features + 分类
         2. 保存 features.pt 到 upload/{task_id}/
         3. Construct: 生成 TOC (toc_parent, toc_sibling)
-        4. 保存 construct.json 到 upload/{task_id}/
+        4. 保存 {document_name}_construct.json 到 upload/{task_id}/
 
         Args:
             task_id: Task ID (folder under data_dir_base)
@@ -449,8 +449,8 @@ class InferenceService:
                 construct_result["toc_tree"] = toc_tree
                 construct_result["full_tree"] = full_tree
 
-            # Save construct.json
-            construct_path = os.path.join(task_dir, "construct.json")
+            # Save {document_name}_construct.json
+            construct_path = os.path.join(task_dir, f"{document_name}_construct.json")
             with open(construct_path, 'w', encoding='utf-8') as f:
                 json.dump(construct_result, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved construct result to: {construct_path}")
