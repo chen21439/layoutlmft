@@ -41,6 +41,7 @@ from comp_hrdoc.utils.tree_utils import (
     build_tree_from_parents,
     format_toc_tree,
     resolve_ref_parents_and_relations,  # 反向转换: 格式B → 格式A
+    flatten_full_tree_to_format_a,  # 完整树转扁平格式A
 )
 
 from .model_loader import get_model_loader
@@ -301,6 +302,7 @@ class InferenceService:
         self,
         task_id: str,
         document_name: str,
+        full_tree: bool = False,
     ) -> Dict[str, Any]:
         """
         Run inference with Construct model for TOC generation.
@@ -314,6 +316,7 @@ class InferenceService:
         Args:
             task_id: Task ID (folder under data_dir_base)
             document_name: Document name (without .json extension)
+            full_tree: 是否构建完整树（包含非 section 内容），默认 False
 
         Returns:
             Dict with construct results
@@ -409,13 +412,42 @@ class InferenceService:
                 for pred in construct_result["predictions"]:
                     pred["text"] = line_text_map.get(pred["line_id"], "")
 
-                # 转换为嵌套树结构（格式A使用 parent_id 字段）
+                # 构建 section_ids 集合
+                section_ids = set(pred["line_id"] for pred in construct_result["predictions"])
+
+                # 准备全量数据（按 line_id 排序，作为阅读顺序）
+                all_lines = []
+                for item in original_data:
+                    lid = item.get("line_id", item.get("id", -1))
+                    if isinstance(lid, str):
+                        try:
+                            lid = int(lid)
+                        except ValueError:
+                            continue
+                    all_lines.append({
+                        "line_id": lid,
+                        "text": item.get("text", ""),
+                        "class": item.get("class", item.get("category", "")),
+                    })
+                all_lines.sort(key=lambda x: x["line_id"])
+
+                if full_tree:
+                    # full_tree=True: 返回包含所有行的扁平格式A
+                    full_predictions = flatten_full_tree_to_format_a(
+                        section_predictions=construct_result["predictions"],
+                        all_lines=all_lines,
+                        section_ids=section_ids,
+                    )
+                    construct_result["predictions"] = full_predictions
+
+                # 转换为嵌套树结构（用于可视化/日志）
                 toc_tree = build_tree_from_parents(
-                    construct_result["predictions"],
+                    [p for p in construct_result["predictions"] if p.get("is_section", True)],
                     id_key="line_id",
                     parent_key="parent_id",
                 )
                 construct_result["toc_tree"] = toc_tree
+                construct_result["full_tree"] = full_tree
 
             # Save construct.json
             construct_path = os.path.join(task_dir, "construct.json")

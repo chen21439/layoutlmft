@@ -368,11 +368,14 @@ def build_tree_from_parents(
     id_key: str = "line_id",
     parent_key: str = "toc_parent",
 ) -> List[Dict]:
-    """从 parent 预测结果构建嵌套树结构
+    """从 parent 预测结果构建嵌套树结构（用于可视化/日志）
 
     支持两种方案判断顶层节点：
     - 格式A: parent_id == -1 表示顶层节点
     - 格式B: parent_id == node_id（自指向）表示顶层节点
+
+    注意：此函数只构建嵌套树用于可视化。
+    如需完整的扁平格式A（包含所有行），请使用 flatten_full_tree_to_format_a()
 
     Args:
         predictions: 预测结果列表，每个元素包含 id_key 和 parent_key
@@ -814,6 +817,146 @@ def resolve_ref_parents_and_relations(
     return extract_ref_parents_and_relations(nodes, ls_converted)
 
 
+def flatten_full_tree_to_format_a(
+    section_predictions: List[Dict],
+    all_lines: List[Dict],
+    section_ids: set,
+    id_key: str = "line_id",
+) -> List[Dict]:
+    """将完整树转换为扁平的格式A
+
+    根据论文 Figure 2：非 section 节点按阅读顺序挂载到其前面最近的 section 下。
+
+    Args:
+        section_predictions: section 的预测结果（格式A）
+            每个: {"line_id": int, "parent_id": int, "relation": str, ...}
+        all_lines: 全量数据（按阅读顺序）
+            每行: {"line_id": int, "text": str, "class": ..., ...}
+        section_ids: section 的 line_id 集合
+        id_key: 节点 ID 字段名
+
+    Returns:
+        完整的格式A列表，包含所有行
+            section: 保持原有的 parent_id 和 relation
+            非 section: parent_id 指向所属 section，relation 为 "contain"
+    """
+    # 构建 section line_id -> prediction 映射
+    section_pred_map = {pred[id_key]: pred for pred in section_predictions}
+
+    # 按阅读顺序遍历，确定每行的 parent
+    results = []
+    current_section_id = None  # 当前最近的 section 的 line_id
+
+    for line in all_lines:
+        line_id = line.get(id_key)
+        if line_id is None:
+            continue
+
+        if line_id in section_ids:
+            # section 节点：使用模型预测的 parent_id 和 relation
+            pred = section_pred_map.get(line_id, {})
+            results.append({
+                id_key: line_id,
+                "parent_id": pred.get("parent_id", -1),
+                "relation": pred.get("relation", "contain"),
+                "text": line.get("text", pred.get("text", "")),
+                "class": line.get("class", line.get("category", "")),
+                "is_section": True,
+            })
+            current_section_id = line_id
+        else:
+            # 非 section 节点：parent 指向当前最近的 section
+            results.append({
+                id_key: line_id,
+                "parent_id": current_section_id if current_section_id is not None else -1,
+                "relation": "contain",
+                "text": line.get("text", ""),
+                "class": line.get("class", line.get("category", "")),
+                "is_section": False,
+            })
+
+    return results
+
+
+def insert_content_to_toc_tree(
+    toc_tree: List[Dict],
+    all_lines: List[Dict],
+    section_line_ids: set,
+) -> List[Dict]:
+    """将非 section 内容插入到 TOC 树中
+
+    按阅读顺序，非 section 节点属于它前面最近的 section。
+
+    Args:
+        toc_tree: section-only 的 TOC 树（嵌套结构）
+            每个节点: {"line_id": int, "text": str, "children": [...]}
+        all_lines: 所有行的列表，按阅读顺序
+            每行: {"line_id": int, "text": str, "class": int/str, ...}
+        section_line_ids: section 的 line_id 集合
+
+    Returns:
+        完整的文档树，每个 section 节点增加 "content" 字段存放非 section 内容
+    """
+    import copy
+    toc_tree = copy.deepcopy(toc_tree)
+
+    # 1. 构建 line_id -> section 节点的映射
+    section_nodes = {}
+
+    def collect_sections(nodes):
+        for node in nodes:
+            section_nodes[node["line_id"]] = node
+            if "content" not in node:
+                node["content"] = []
+            collect_sections(node.get("children", []))
+
+    collect_sections(toc_tree)
+
+    # 2. 按阅读顺序遍历，将非 section 插入到对应 section
+    current_section = None
+    preamble = []  # 第一个 section 之前的内容
+
+    for line in all_lines:
+        line_id = line.get("line_id")
+        if line_id is None:
+            continue
+
+        if line_id in section_line_ids:
+            # 是 section，更新当前 section
+            current_section = section_nodes.get(line_id)
+        else:
+            # 非 section，插入到当前 section
+            content_item = {
+                "line_id": line_id,
+                "text": line.get("text", ""),
+                "class": line.get("class", ""),
+            }
+            if current_section is not None:
+                current_section["content"].append(content_item)
+            else:
+                # 在第一个 section 之前
+                preamble.append(content_item)
+
+    # 3. 处理 preamble（放到结果的开头）
+    if preamble:
+        # 作为一个虚拟的 preamble 节点，或者直接放到第一个 section
+        if toc_tree and len(toc_tree) > 0:
+            # 放到第一个顶层 section 的 content 开头
+            if "content" not in toc_tree[0]:
+                toc_tree[0]["content"] = []
+            toc_tree[0]["content"] = preamble + toc_tree[0]["content"]
+        else:
+            # 没有 section，创建一个 preamble 节点
+            toc_tree = [{
+                "line_id": -1,
+                "text": "[Preamble]",
+                "children": [],
+                "content": preamble,
+            }]
+
+    return toc_tree
+
+
 __all__ = [
     'Node',
     'RELATION_STR_TO_INT',
@@ -843,4 +986,8 @@ __all__ = [
     'format_toc_tree',
     'build_complete_tree',
     'format_complete_tree',
+    # 非 section 内容插入
+    'insert_content_to_toc_tree',
+    # 完整树转扁平格式A
+    'flatten_full_tree_to_format_a',
 ]
