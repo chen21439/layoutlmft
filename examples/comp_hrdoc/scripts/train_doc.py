@@ -45,8 +45,21 @@ from examples.stage.data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoad
 from examples.stage.joint_data_collator import HRDocDocumentLevelCollator
 from examples.comp_hrdoc.data.hrdoc_loader import HRDocDataset
 
-# 标签转换：使用 tree_utils 计算层级 parent 和 sibling
-from examples.comp_hrdoc.utils.tree_utils import resolve_hierarchical_parents_and_siblings, format_tree_from_parents
+# 标签转换：使用 tree_utils 进行格式A/B双向转换
+# 格式A: ref_parent + relation (原始标注，顶层节点 parent=-1)
+# 格式B: hierarchical_parent + sibling (训练标签，自指向方案)
+from examples.comp_hrdoc.utils.tree_utils import (
+    resolve_hierarchical_parents_and_siblings,  # 正向: A → B
+    format_tree_from_parents,
+)
+# 推理解码：复用 engines/predictor
+from examples.comp_hrdoc.engines.predictor import (
+    decode_construct_outputs,
+    convert_to_format_a,
+    build_predictions,
+)
+# 评估指标：复用 metrics/teds
+from examples.comp_hrdoc.metrics.teds import TEDSMetric
 from examples.comp_hrdoc.models import (
     DOCModel,
     build_doc_model,
@@ -737,8 +750,7 @@ def evaluate_with_stage_features(
 ) -> Dict[str, float]:
     """Evaluate ConstructFromFeatures model using stage features."""
     from examples.comp_hrdoc.models.construct_only import compute_construct_metrics
-    from examples.comp_hrdoc.utils.tree_utils import generate_doc_tree
-    from examples.comp_hrdoc.metrics.teds import tree_edit_distance, HAS_APTED
+    from examples.comp_hrdoc.metrics.teds import HAS_APTED
 
     model.eval()
 
@@ -758,8 +770,8 @@ def evaluate_with_stage_features(
     sibling_fp = 0
     sibling_fn = 0
 
-    # TEDS
-    teds_scores = []
+    # TEDS - 复用 metrics/teds.TEDSMetric
+    teds_metric = TEDSMetric() if HAS_APTED else None
 
     # 用于可视化的样本
     vis_samples = []
@@ -851,8 +863,8 @@ def evaluate_with_stage_features(
                 sibling_fp += (has_sibling.sum().item() - correct_sib.sum().item())  # For accuracy calc
                 sibling_fn += 0  # Not used for accuracy
 
-            # TEDS 计算（每个样本）
-            if HAS_APTED:
+            # TEDS 计算（每个样本）- 使用 TEDSMetric
+            if teds_metric is not None:
                 batch_size = line_parent_ids.shape[0]
                 for b in range(batch_size):
                     mask_b = line_mask[b].cpu().tolist()
@@ -872,6 +884,7 @@ def evaluate_with_stage_features(
                         texts = [text_map.get(oid, f"node_{oid}") for oid in orig_ids]
                     else:
                         texts = [text_map.get(i, f"node_{i}") for i in valid_indices]
+
                     # 重新映射 parent_ids 到压缩后的索引
                     idx_map = {old: new for new, old in enumerate(valid_indices)}
                     idx_map[-1] = -1  # root 保持 -1
@@ -884,13 +897,36 @@ def evaluate_with_stage_features(
                         pred_parents_mapped.append(idx_map.get(p_pred, -1))
                         gt_parents_mapped.append(idx_map.get(p_gt, -1))
 
-                    try:
-                        pred_tree = generate_doc_tree(texts, pred_parents_mapped, ["child"] * len(texts))
-                        gt_tree = generate_doc_tree(texts, gt_parents_mapped, ["child"] * len(texts))
-                        _, teds = tree_edit_distance(pred_tree, gt_tree)
-                        teds_scores.append(teds)
-                    except Exception as e:
-                        pass  # 跳过无法构建的树
+                    # 获取 sibling 预测和标签（用于反向转换）
+                    pred_siblings_b = outputs["sibling_logits"].argmax(dim=-1)[b].cpu().tolist() if "sibling_logits" in outputs else None
+                    gt_siblings_b = sibling_labels[b].cpu().tolist() if sibling_labels is not None else None
+
+                    # 提取有效节点的 sibling 并映射索引
+                    pred_siblings_mapped = None
+                    gt_siblings_mapped = None
+                    if pred_siblings_b is not None:
+                        pred_siblings_mapped = [idx_map.get(pred_siblings_b[i], i) for i in valid_indices]
+                    if gt_siblings_b is not None:
+                        gt_siblings_mapped = [idx_map.get(gt_siblings_b[i], i) for i in valid_indices]
+
+                    # 使用 predictor 的反向转换：格式B → 格式A
+                    pred_ref_parents, pred_relations = convert_to_format_a(
+                        pred_parents_mapped, pred_siblings_mapped
+                    )
+                    gt_ref_parents, gt_relations = convert_to_format_a(
+                        gt_parents_mapped, gt_siblings_mapped
+                    )
+
+                    # 使用 TEDSMetric.update() 计算
+                    teds_metric.update(
+                        pred_texts=texts,
+                        pred_parent_ids=pred_ref_parents,
+                        pred_relations=pred_relations,
+                        gt_texts=texts,
+                        gt_parent_ids=gt_ref_parents,
+                        gt_relations=gt_relations,
+                        sample_id=f"batch{num_batches}_sample{b}",
+                    )
 
             # 收集可视化样本
             if len(vis_samples) < visualize_samples:
@@ -939,10 +975,12 @@ def evaluate_with_stage_features(
     total_sibling = sibling_tp + sibling_fp  # sibling_tp = correct, sibling_fp = incorrect
     results["sibling_accuracy"] = sibling_tp / max(total_sibling, 1)
 
-    # TEDS
-    if teds_scores:
-        results["teds_macro"] = sum(teds_scores) / len(teds_scores)
-        results["teds_samples"] = len(teds_scores)
+    # TEDS - 使用 TEDSMetric.compute()
+    if teds_metric is not None:
+        teds_result = teds_metric.compute()
+        if teds_result.num_samples > 0:
+            results["teds_macro"] = teds_result.macro_teds
+            results["teds_samples"] = teds_result.num_samples
 
     # TOC 可视化
     if vis_samples:

@@ -365,7 +365,9 @@ def build_tree_from_parents(
 ) -> List[Dict]:
     """从 parent 预测结果构建嵌套树结构
 
-    采用自指向方案：parent == self 表示 root 节点。
+    支持两种方案判断顶层节点：
+    - 格式A: parent_id == -1 表示顶层节点
+    - 格式B: parent_id == node_id（自指向）表示顶层节点
 
     Args:
         predictions: 预测结果列表，每个元素包含 id_key 和 parent_key
@@ -376,26 +378,16 @@ def build_tree_from_parents(
         嵌套树结构列表，每个节点包含 children 数组
 
     Example:
-        输入:
+        格式A输入:
         [
-            {"line_id": 0, "toc_parent": 0, "text": "第一章"},  # root (自指向)
-            {"line_id": 5, "toc_parent": 0, "text": "1.1 节"},
-            {"line_id": 10, "toc_parent": 5, "text": "1.1.1 小节"},
+            {"line_id": 0, "parent_id": -1, "text": "第一章"},  # 顶层 (parent=-1)
+            {"line_id": 5, "parent_id": 0, "text": "1.1 节"},
         ]
 
-        输出:
+        格式B输入:
         [
-            {
-                "line_id": 0, "toc_parent": 0, "text": "第一章",
-                "children": [
-                    {
-                        "line_id": 5, "toc_parent": 0, "text": "1.1 节",
-                        "children": [
-                            {"line_id": 10, "toc_parent": 5, "text": "1.1.1 小节", "children": []}
-                        ]
-                    }
-                ]
-            }
+            {"line_id": 0, "toc_parent": 0, "text": "第一章"},  # 顶层 (自指向)
+            {"line_id": 5, "toc_parent": 0, "text": "1.1 节"},
         ]
     """
     if not predictions:
@@ -415,14 +407,17 @@ def build_tree_from_parents(
         parent_id = pred[parent_key]
         node = id_to_node[node_id]
 
-        if parent_id == node_id:
-            # 自指向 = root 节点
+        if parent_id == -1:
+            # 格式A: parent_id == -1 表示顶层节点
+            roots.append(node)
+        elif parent_id == node_id:
+            # 格式B: 自指向 = 顶层节点
             roots.append(node)
         elif parent_id in id_to_node:
             # 添加到父节点的 children
             id_to_node[parent_id]["children"].append(node)
         else:
-            # 父节点不存在，作为 root 处理
+            # 父节点不存在，作为顶层处理
             roots.append(node)
 
     return roots
@@ -521,18 +516,326 @@ def format_toc_tree(
     return lines
 
 
+def build_complete_tree(
+    line_ids: List[int],
+    categories: List[int],
+    toc_parents: List[int],
+    texts: Optional[List[str]] = None,
+    section_category: int = 0,
+) -> Tuple[Node, List[Node]]:
+    """从 TOC + Reading Order + 类别构建完整文档树
+
+    根据论文 Figure 2 和 Section 3 的描述：
+    - TOC 树只包含 Section 标题（层级骨架）
+    - 非 Section 节点（Paragraph、Caption、Table 等）根据 Reading Order
+      挂载到其前面最近的 Section 节点下
+
+    算法流程（单遍遍历，保持阅读顺序）：
+    1. 按 line_id 排序所有节点（line_id 暂代 Reading Order）
+    2. 遍历每个节点：
+       - Section 节点：根据 toc_parent 挂载到 TOC 父节点
+       - 非 Section 节点：挂载到当前最近的 Section 节点
+
+    Args:
+        line_ids: 所有行的 ID（用于排序，暂代 Reading Order）
+        categories: 每行的语义类别
+        toc_parents: 每行的 TOC parent（自指向表示 root Section，非 Section 可为 -1）
+        texts: 可选的节点文本列表
+        section_category: Section 类别的 ID，默认 0
+
+    Returns:
+        root: ROOT 节点
+        nodes: 所有节点列表，按原始顺序（与 line_ids 对应）
+
+    Example:
+        输入:
+          line_ids:   [0,       1,         2,          3,       4        ]
+          categories: [0,       1,         1,          0,       1        ]  # 0=Section, 1=Paragraph
+          toc_parents:[0,       -1,        -1,         0,       -1       ]
+
+        输出树结构:
+          ROOT
+          └── [0] Section
+                ├── [1] Paragraph
+                ├── [2] Paragraph
+                └── [3] Section
+                      └── [4] Paragraph
+
+    TODO: 当 Order 模块训练完成后，使用预测的阅读顺序替代 line_id
+    """
+    n = len(line_ids)
+    assert len(categories) == n and len(toc_parents) == n
+
+    # 创建 ROOT 和所有节点
+    root = Node(name='ROOT')
+    nodes = []
+    for i in range(n):
+        name = texts[i] if texts else f"node_{i}"
+        node = Node(name=name, info={
+            'index': i,
+            'line_id': line_ids[i],
+            'category': categories[i],
+            'toc_parent': toc_parents[i],
+        })
+        nodes.append(node)
+
+    # 按 line_id 排序得到阅读顺序
+    sorted_indices = sorted(range(n), key=lambda i: line_ids[i])
+
+    # 构建 line_id -> index 映射
+    line_id_to_idx = {line_ids[i]: i for i in range(n)}
+
+    # 单遍遍历：按阅读顺序处理所有节点
+    current_section: Optional[Node] = None
+
+    for idx in sorted_indices:
+        cat = categories[idx]
+        toc_parent_id = toc_parents[idx]
+        node = nodes[idx]
+
+        if cat == section_category:
+            # Section 节点：根据 TOC parent 挂载
+            if toc_parent_id == line_ids[idx]:
+                # 自指向 = root Section，挂载到 ROOT
+                root.add_child(node)
+            elif toc_parent_id in line_id_to_idx:
+                # 挂载到其 TOC parent
+                parent_idx = line_id_to_idx[toc_parent_id]
+                nodes[parent_idx].add_child(node)
+            else:
+                # TOC parent 不存在，作为顶层 Section
+                root.add_child(node)
+            # 更新当前 Section
+            current_section = node
+        else:
+            # 非 Section 节点：挂载到当前最近的 Section
+            if current_section is not None:
+                current_section.add_child(node)
+            else:
+                # 还没有遇到任何 Section，挂载到 ROOT
+                root.add_child(node)
+
+    root.set_depth(cur_depth=0)
+    return root, nodes
+
+
+def format_complete_tree(
+    root: Node,
+    max_text_len: int = 40,
+    show_category: bool = True,
+) -> List[str]:
+    """格式化完整文档树为可视化字符串
+
+    Args:
+        root: 完整树的 ROOT 节点
+        max_text_len: 文本最大显示长度
+        show_category: 是否显示类别
+
+    Returns:
+        树形字符串列表
+    """
+    lines = []
+
+    def _format(node: Node, indent: int = 0):
+        if node.name == 'ROOT':
+            for child in node.children:
+                _format(child, indent)
+            return
+
+        info = node.info or {}
+        line_id = info.get('line_id', '?')
+        cat = info.get('category', '?')
+
+        text = node.name
+        if len(text) > max_text_len:
+            text = text[:max_text_len - 3] + "..."
+
+        if show_category:
+            lines.append("  " * indent + f"├── [{line_id}|cat={cat}] {text}")
+        else:
+            lines.append("  " * indent + f"├── [{line_id}] {text}")
+
+        for child in node.children:
+            _format(child, indent + 1)
+
+    _format(root, 0)
+    return lines
+
+
+# ============================================================================
+# 反向转换：从 hierarchical_parent + sibling 恢复 ref_parent + relation
+# ============================================================================
+
+
+def build_tree_from_hierarchical_parents(
+    hierarchical_parents: List[int],
+    texts: Optional[List[str]] = None,
+) -> Tuple[Node, List[Node]]:
+    """从层级父节点列表构建树（反向：用于推理输出）
+
+    Args:
+        hierarchical_parents: 每个节点的层级父节点索引，-1 表示 ROOT
+                              或自指向表示 ROOT（自指向方案）
+        texts: 可选的节点文本列表
+
+    Returns:
+        root: ROOT 节点
+        nodes: 节点列表
+    """
+    n = len(hierarchical_parents)
+
+    root = Node(name='ROOT')
+    nodes = []
+    for i in range(n):
+        name = texts[i] if texts else f"node_{i}"
+        node = Node(name=name, info={'index': i})
+        nodes.append(node)
+
+    for i in range(n):
+        hp = hierarchical_parents[i]
+        if hp == -1 or hp == i:  # ROOT（-1 或自指向）
+            root.add_child(nodes[i])
+        elif 0 <= hp < n:
+            nodes[hp].add_child(nodes[i])
+        else:
+            # 无效的 parent，作为 ROOT 子节点
+            root.add_child(nodes[i])
+
+    root.set_depth(cur_depth=0)
+    return root, nodes
+
+
+def extract_ref_parents_and_relations(
+    nodes: List[Node],
+    left_siblings: Optional[List[int]] = None,
+) -> Tuple[List[int], List[str]]:
+    """从树中提取 ref_parent 和 relation（反向转换）
+
+    根据论文定义：
+    - contain: 父子包含关系
+    - equality: 兄弟关系（有左兄弟时）
+    - connect: 阅读顺序延续（无左兄弟的后续兄弟 - 简化为 contain）
+
+    Args:
+        nodes: 节点列表，node.parent 已设置
+        left_siblings: 可选的左兄弟索引列表，-1 表示无左兄弟
+
+    Returns:
+        ref_parents: 引用父节点索引列表（-1 表示 ROOT）
+        relations: 关系类型列表 ('contain', 'equality')
+    """
+    n = len(nodes)
+    ref_parents = []
+    relations = []
+
+    for i in range(n):
+        node = nodes[i]
+
+        # 检查是否有左兄弟
+        has_left_sibling = (
+            left_siblings is not None and
+            i < len(left_siblings) and
+            left_siblings[i] >= 0
+        )
+
+        if has_left_sibling:
+            # equality: 指向左兄弟
+            ref_parents.append(left_siblings[i])
+            relations.append('equality')
+        else:
+            # contain: 指向层级父节点
+            if node.parent is None or node.parent.name == 'ROOT':
+                ref_parents.append(-1)
+            else:
+                parent_idx = node.parent.info.get('index', -1)
+                ref_parents.append(parent_idx)
+            relations.append('contain')
+
+    return ref_parents, relations
+
+
+def resolve_ref_parents_and_relations(
+    hierarchical_parents: List[int],
+    left_siblings: Optional[List[int]] = None,
+) -> Tuple[List[int], List[str]]:
+    """从 hierarchical_parents 和 left_siblings 解析出 ref_parent 和 relation
+
+    反向转换：格式B → 树 → 格式A
+
+    两种格式：
+        格式A: ref_parent + relation (原始标注/输出)
+               - 顶层节点 parent = -1
+        格式B: hierarchical_parent + sibling (训练标签/预测)
+               - 顶层节点 parent = 自己的索引（自指向）
+               - 无左兄弟时 sibling = 自己的索引（自指向）
+               - 原因：softmax + cross_entropy 不能用 -1 作为目标
+
+    Args:
+        hierarchical_parents: 层级父节点索引列表（格式B：顶层节点自指向）
+        left_siblings: 左兄弟索引列表（格式B：无左兄弟时自指向）
+
+    Returns:
+        ref_parents: 引用父节点索引列表（格式A：顶层节点为 -1）
+        relations: 关系类型列表
+
+    Example:
+        输入（格式B）:
+            hierarchical_parents = [0, 0, 0, 0]  # 节点0自指向=顶层, 节点1/2/3指向0
+            left_siblings = [0, 1, 1, 2]         # 节点0/1自指向=无左兄弟, 节点2左兄弟是1, 节点3左兄弟是2
+
+        输出（格式A）:
+            ref_parents = [-1, 0, 1, 2]          # 节点0→ROOT, 节点1→0, 节点2→1, 节点3→2
+            relations = ['contain', 'contain', 'equality', 'equality']
+    """
+    n = len(hierarchical_parents)
+
+    # 格式B使用自指向，转换为内部表示（-1 表示 ROOT/无左兄弟）
+    hp_converted = [
+        -1 if hierarchical_parents[i] == i else hierarchical_parents[i]
+        for i in range(n)
+    ]
+
+    ls_converted = None
+    if left_siblings is not None:
+        ls_converted = [
+            -1 if left_siblings[i] == i else left_siblings[i]
+            for i in range(len(left_siblings))
+        ]
+
+    # 1. 构建树（使用转换后的值）
+    root, nodes = build_tree_from_hierarchical_parents(hp_converted)
+
+    # 2. 提取 ref_parent 和 relation（使用转换后的值）
+    return extract_ref_parents_and_relations(nodes, ls_converted)
+
+
 __all__ = [
     'Node',
     'RELATION_STR_TO_INT',
     'RELATION_INT_TO_STR',
     'normalize_relation',
+    # 双向转换
+    #   格式A: ref_parent + relation (原始标注/输出)
+    #          - 顶层节点 parent = -1
+    #   格式B: hierarchical_parent + sibling (训练标签/预测)
+    #          - 顶层节点 parent = 自己的索引（自指向）
+    #          - 无左兄弟时 sibling = 自己的索引（自指向）
+    #          - 原因：softmax + cross_entropy 不能用 -1 作为目标
+    # 正向：A → 树 → B
     'build_doc_tree_with_nodes',
     'generate_doc_tree',
     'extract_parents_and_siblings',
     'resolve_hierarchical_parents_and_siblings',
     'resolve_parent_and_sibling_from_tree',  # 向后兼容别名
     'build_sibling_matrix',
+    # 反向：B → 树 → A
+    'build_tree_from_hierarchical_parents',
+    'extract_ref_parents_and_relations',
+    'resolve_ref_parents_and_relations',
+    # 工具函数
     'build_tree_from_parents',
     'format_tree_from_parents',
     'format_toc_tree',
+    'build_complete_tree',
+    'format_complete_tree',
 ]

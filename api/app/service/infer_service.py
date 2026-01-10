@@ -37,7 +37,11 @@ from data.hrdoc_data_loader import tokenize_page_with_line_boundary, get_label2i
 from data.batch import wrap_batch
 from joint_data_collator import HRDocDocumentLevelCollator
 from layoutlmft.data.labels import ID2LABEL
-from comp_hrdoc.utils.tree_utils import build_tree_from_parents, format_toc_tree
+from comp_hrdoc.utils.tree_utils import (
+    build_tree_from_parents,
+    format_toc_tree,
+    resolve_ref_parents_and_relations,  # 反向转换: 格式B → 格式A
+)
 
 from .model_loader import get_model_loader
 
@@ -405,8 +409,12 @@ class InferenceService:
                 for pred in construct_result["predictions"]:
                     pred["text"] = line_text_map.get(pred["line_id"], "")
 
-                # 转换为嵌套树结构
-                toc_tree = build_tree_from_parents(construct_result["predictions"])
+                # 转换为嵌套树结构（格式A使用 parent_id 字段）
+                toc_tree = build_tree_from_parents(
+                    construct_result["predictions"],
+                    id_key="line_id",
+                    parent_key="parent_id",
+                )
                 construct_result["toc_tree"] = toc_tree
 
             # Save construct.json
@@ -485,25 +493,27 @@ class InferenceService:
                 reading_orders=reading_orders,
             )
 
-        # Decode predictions
+        # Decode predictions (格式B: 自指向方案)
         parent_preds = outputs["parent_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
         sibling_preds = outputs["sibling_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
 
+        # 反向转换: 格式B → 格式A
+        # 格式B: hierarchical_parent + sibling (自指向方案)
+        # 格式A: ref_parent + relation (顶层节点 parent=-1)
+        ref_parents, relations = resolve_ref_parents_and_relations(parent_preds, sibling_preds)
+
         # Build result - 映射回原始 line_id
-        # toc_parent/toc_sibling 是 section 空间的索引，需要映射回 line_id
         results = []
         for sec_idx, line_id in enumerate(section_line_ids):
-            parent_sec_idx = parent_preds[sec_idx]
-            sibling_sec_idx = sibling_preds[sec_idx]
+            ref_parent_sec_idx = ref_parents[sec_idx]
 
-            # 映射回 line_id (-1 表示无)
-            toc_parent_line_id = section_line_ids[parent_sec_idx] if 0 <= parent_sec_idx < num_sections else -1
-            toc_sibling_line_id = section_line_ids[sibling_sec_idx] if 0 <= sibling_sec_idx < num_sections else -1
+            # 映射回 line_id (-1 表示顶层节点)
+            parent_line_id = section_line_ids[ref_parent_sec_idx] if ref_parent_sec_idx >= 0 else -1
 
             results.append({
                 "line_id": line_id,
-                "toc_parent": toc_parent_line_id,
-                "toc_sibling": toc_sibling_line_id,
+                "parent_id": parent_line_id,
+                "relation": relations[sec_idx],
                 "section_index": sec_idx,  # section 空间的索引
             })
 

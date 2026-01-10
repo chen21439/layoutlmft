@@ -4,6 +4,7 @@
 Inference Script for comp_hrdoc - Construct Task Only
 
 只运行 construct 任务，输出 TOC 树结构。
+这是一个薄入口脚本，实际推理逻辑在 engines/predictor.py。
 
 Usage:
     python examples/comp_hrdoc/scripts/infer.py \
@@ -36,7 +37,12 @@ import torch
 
 from examples.comp_hrdoc.models import load_doc_model
 from examples.comp_hrdoc.data.hrdoc_loader import HRDocDataset, HRDocCollator
-from examples.comp_hrdoc.utils.tree_utils import build_tree_from_parents, format_tree_from_parents
+from examples.comp_hrdoc.engines.predictor import (
+    decode_construct_outputs,
+    convert_to_format_a,
+    build_predictions,
+    format_result_as_tree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,39 +68,16 @@ def parse_args():
     return parser.parse_args()
 
 
-def decode_parent_from_logits(parent_logits: torch.Tensor, mask: torch.Tensor = None):
-    """从 parent_logits 解码得到 toc_parent
-
-    Args:
-        parent_logits: [num_regions, num_regions] 父节点预测 logits
-        mask: [num_regions] 有效区域掩码
-
-    Returns:
-        parents: List[int] 每个节点的父节点索引（自指向表示 root）
-    """
-    num_regions = parent_logits.size(0)
-
-    # 对每个节点，选择概率最大的父节点
-    # parent_logits[i, j] 表示节点 i 的父节点是 j 的概率
-    pred_parents = parent_logits.argmax(dim=-1)  # [num_regions]
-
-    parents = []
-    for i in range(num_regions):
-        if mask is not None and not mask[i]:
-            continue
-        parent_idx = pred_parents[i].item()
-        parents.append(parent_idx)
-
-    return parents
-
-
 def run_inference(
     model,
     dataloader,
     output_dir: str,
     device: str,
 ):
-    """运行推理并保存结果"""
+    """运行推理并保存结果
+
+    使用 engines/predictor.py 中的函数进行解码和格式转换。
+    """
     model.eval()
     os.makedirs(output_dir, exist_ok=True)
 
@@ -125,23 +108,25 @@ def run_inference(
             texts = batch['texts'][b][:num_valid]
             doc_name = batch['doc_names'][b]
 
-            # 解码 parent
-            parent_logits = outputs['parent_logits'][b]
-            parents = decode_parent_from_logits(parent_logits, valid_mask)
+            # 使用 predictor 解码（格式B）
+            single_outputs = {
+                "parent_logits": outputs['parent_logits'][b],
+            }
+            if 'sibling_logits' in outputs:
+                single_outputs["sibling_logits"] = outputs['sibling_logits'][b]
 
-            # 构建 predictions 列表
-            predictions = []
-            for i, (text, parent) in enumerate(zip(texts, parents)):
-                predictions.append({
-                    "line_id": i,
-                    "text": text,
-                    "toc_parent": parent,
-                })
+            pred_parents, pred_siblings = decode_construct_outputs(single_outputs, valid_mask)
 
-            # 构建嵌套树结构
-            toc_tree = build_tree_from_parents(predictions)
+            # 转换为格式A
+            ref_parents, relations = convert_to_format_a(pred_parents, pred_siblings)
+
+            # 构建标准化预测结果
+            predictions = build_predictions(ref_parents, relations, texts=list(texts))
 
             # 构建结果
+            from examples.comp_hrdoc.utils.tree_utils import build_tree_from_parents
+            toc_tree = build_tree_from_parents(predictions, id_key="line_id", parent_key="parent_id")
+
             result = {
                 "document_name": doc_name,
                 "num_sections": len(predictions),
@@ -155,7 +140,7 @@ def run_inference(
                 json.dump(result, f, ensure_ascii=False, indent=2)
 
             # 打印 TOC 树
-            tree_lines = format_tree_from_parents(parents, texts)
+            tree_lines = format_result_as_tree(result)
             logger.info(f"\n{'='*60}\n TOC Tree ({doc_name})\n{'='*60}\n" + "\n".join(tree_lines))
 
             total_docs += 1
