@@ -654,6 +654,7 @@ class InferenceService:
             parent_line_id = section_line_ids[ref_parent_sec_idx] if ref_parent_sec_idx >= 0 else -1
 
             results.append({
+                "id": line_id,
                 "line_id": line_id,
                 "parent_id": parent_line_id,
                 "relation": relations[sec_idx],
