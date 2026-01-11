@@ -398,20 +398,52 @@ class InferenceService:
             with open(json_path, 'r', encoding='utf-8') as f:
                 original_data = json.load(f)
 
-            # 辅助函数：确保 location 每个元素都带上 coord_origin
-            def normalize_location(loc):
-                if loc is None:
-                    return None
-                if isinstance(loc, list):
+            # 辅助函数：将原始 page + box 转换为标准 location 格式
+            def build_location(item):
+                """
+                原始格式: {"page": "0", "box": [267, 72, 351, 86]}
+                目标格式: [{"page": 1, "l": 267, "t": 72, "r": 351, "b": 86, "coord_origin": "TOPLEFT"}]
+                """
+                # 先检查是否已有标准 location 格式
+                loc = item.get("location")
+                if loc and isinstance(loc, list) and len(loc) > 0 and isinstance(loc[0], dict):
+                    # 已是标准格式，确保有 coord_origin
                     result = []
-                    for item in loc:
-                        if isinstance(item, dict):
-                            item = dict(item)  # 复制
-                            if "coord_origin" not in item:
-                                item["coord_origin"] = "TOPLEFT"
-                            result.append(item)
+                    for l in loc:
+                        l = dict(l)
+                        if "coord_origin" not in l:
+                            l["coord_origin"] = "TOPLEFT"
+                        result.append(l)
                     return result
-                return loc
+
+                # 从 page + box 构建
+                page = item.get("page")
+                box = item.get("box", item.get("bbox"))
+
+                if box is None:
+                    return None
+
+                # page 可能是字符串，转为整数（从 0-based 转为 1-based）
+                if page is not None:
+                    try:
+                        page = int(page) + 1  # 0-based -> 1-based
+                    except (ValueError, TypeError):
+                        page = 1
+                else:
+                    page = 1
+
+                # box 格式: [l, t, r, b] 或 [x1, y1, x2, y2]
+                if isinstance(box, list) and len(box) >= 4:
+                    return [{
+                        "page": page,
+                        "l": float(box[0]),
+                        "t": float(box[1]),
+                        "r": float(box[2]),
+                        "b": float(box[3]),
+                        "coord_origin": "TOPLEFT",
+                    }]
+
+                return None
 
             # 构建 line_id -> (text, location) 映射
             line_info_map = {}
@@ -424,7 +456,7 @@ class InferenceService:
                         continue
                 line_info_map[lid] = {
                     "text": item.get("text", ""),
-                    "location": normalize_location(item.get("location", item.get("bbox", None))),
+                    "location": build_location(item),
                 }
 
             # 合并 text 和 location 到 construct_result
@@ -450,7 +482,7 @@ class InferenceService:
                         "line_id": lid,
                         "text": item.get("text", ""),
                         "class": item.get("class", item.get("category", "")),
-                        "location": normalize_location(item.get("location", item.get("bbox", None))),
+                        "location": build_location(item),
                     })
                 all_lines.sort(key=lambda x: x["line_id"])
 
