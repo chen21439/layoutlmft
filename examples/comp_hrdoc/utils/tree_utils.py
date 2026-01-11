@@ -861,6 +861,7 @@ def flatten_full_tree_to_format_a(
                 "relation": pred.get("relation", "contain"),
                 "text": line.get("text", pred.get("text", "")),
                 "class": line.get("class", line.get("category", "")),
+                "location": line.get("location", pred.get("location")),
                 "is_section": True,
             })
             current_section_id = line_id
@@ -872,6 +873,7 @@ def flatten_full_tree_to_format_a(
                 "relation": "contain",
                 "text": line.get("text", ""),
                 "class": line.get("class", line.get("category", "")),
+                "location": line.get("location"),
                 "is_section": False,
             })
 

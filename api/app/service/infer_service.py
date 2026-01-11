@@ -398,8 +398,8 @@ class InferenceService:
             with open(json_path, 'r', encoding='utf-8') as f:
                 original_data = json.load(f)
 
-            # 构建 line_id -> text 映射
-            line_text_map = {}
+            # 构建 line_id -> (text, location) 映射
+            line_info_map = {}
             for item in original_data:
                 lid = item.get("line_id", item.get("id", -1))
                 if isinstance(lid, str):
@@ -407,12 +407,17 @@ class InferenceService:
                         lid = int(lid)
                     except ValueError:
                         continue
-                line_text_map[lid] = item.get("text", "")
+                line_info_map[lid] = {
+                    "text": item.get("text", ""),
+                    "location": item.get("location", item.get("bbox", None)),
+                }
 
-            # 合并 text 到 construct_result
+            # 合并 text 和 location 到 construct_result
             if construct_result and "predictions" in construct_result:
                 for pred in construct_result["predictions"]:
-                    pred["text"] = line_text_map.get(pred["line_id"], "")
+                    info = line_info_map.get(pred["line_id"], {})
+                    pred["text"] = info.get("text", "")
+                    pred["location"] = info.get("location")
 
                 # 构建 section_ids 集合
                 section_ids = set(pred["line_id"] for pred in construct_result["predictions"])
@@ -430,6 +435,7 @@ class InferenceService:
                         "line_id": lid,
                         "text": item.get("text", ""),
                         "class": item.get("class", item.get("category", "")),
+                        "location": item.get("location", item.get("bbox", None)),
                     })
                 all_lines.sort(key=lambda x: x["line_id"])
 
