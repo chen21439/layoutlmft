@@ -657,6 +657,7 @@ class InferenceService:
                 "line_id": line_id,
                 "parent_id": parent_line_id,
                 "relation": relations[sec_idx],
+                "class": ID2LABEL.get(section_label_id, "section"),
                 "section_index": sec_idx,  # section 空间的索引
             })
 
