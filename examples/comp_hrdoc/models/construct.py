@@ -269,9 +269,18 @@ class TreeRelationHead(nn.Module):
 
             # Diagonal: node cannot be its own sibling, but CAN be its own parent (root self-pointing)
             # 论文 Section 4.4.1: "its parent-child relationship is defined as pointing to itself"
-            diag = torch.eye(num_nodes, dtype=torch.bool, device=features.device)
             # Note: parent_logits keeps diagonal for root self-pointing
-            sibling_logits = sibling_logits.masked_fill(diag.unsqueeze(0), -1e4)
+
+            # 上三角掩码：左兄弟只能从前面的节点选择（j <= i）
+            # sibling_logits[i, j] 中，j > i 的部分（严格上三角）被 mask
+            # 对角线（j == i）保留，表示"没有左兄弟"（自指向）
+            # 论文 Section 4.4.1: "if a section heading lacks a left sibling node,
+            # its sibling relationship is defined as pointing to itself"
+            upper_tri_mask = torch.triu(
+                torch.ones(num_nodes, num_nodes, dtype=torch.bool, device=features.device),
+                diagonal=1  # 严格上三角，不包括对角线
+            )
+            sibling_logits = sibling_logits.masked_fill(upper_tri_mask.unsqueeze(0), -1e4)
 
         return {
             'parent_logits': parent_logits,

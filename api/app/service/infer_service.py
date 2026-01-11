@@ -565,13 +565,30 @@ class InferenceService:
         logger.debug(f"[Construct] Format B parent_preds: {parent_preds[:20]}...")
         logger.debug(f"[Construct] Format A ref_parents: {ref_parents[:20]}...")
 
-        # [DEBUG] 检查 ref_parents 中是否有循环（0-based section 空间）
+        # 修复互指问题：line_id 较小的节点不能指向 line_id 较大的节点
+        # 对于互指 (A <-> B)，将 line_id 较小的那个设为 -1
+        fixed_count = 0
+        processed_pairs = set()
         for i, p in enumerate(ref_parents):
-            if p >= 0 and p < len(ref_parents):
-                if ref_parents[p] == i:
+            if p >= 0 and p < len(ref_parents) and i != p:
+                pair = (min(i, p), max(i, p))
+                if pair not in processed_pairs and ref_parents[p] == i:
+                    processed_pairs.add(pair)
                     lid_i = section_line_ids[i]
                     lid_p = section_line_ids[p]
-                    logger.warning(f"[Construct] Format A 互指: sec[{i}](line_id={lid_i}).ref_parent={p}, sec[{p}](line_id={lid_p}).ref_parent={i}")
+                    # line_id 较小的那个设为 -1（提升为根节点）
+                    if lid_i < lid_p:
+                        ref_parents[i] = -1
+                        relations[i] = "contain"
+                        logger.warning(f"[Construct] 修复互指: sec[{i}](line_id={lid_i}).ref_parent={p} -> -1 (line_id较小)")
+                    else:
+                        ref_parents[p] = -1
+                        relations[p] = "contain"
+                        logger.warning(f"[Construct] 修复互指: sec[{p}](line_id={lid_p}).ref_parent={i} -> -1 (line_id较小)")
+                    fixed_count += 1
+
+        if fixed_count > 0:
+            logger.info(f"[Construct] 修复了 {fixed_count} 对互指")
 
         # Build result - 映射回原始 line_id
         results = []
