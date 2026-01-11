@@ -447,6 +447,10 @@ class InferenceService:
 
             # 构建 line_id -> (text, location) 映射
             line_info_map = {}
+            # DEBUG: 打印第一个 item 的字段
+            if original_data:
+                logger.info(f"[DEBUG] First item keys: {list(original_data[0].keys())}")
+                logger.info(f"[DEBUG] First item page={original_data[0].get('page')}, box={original_data[0].get('box')}")
             for item in original_data:
                 lid = item.get("line_id", item.get("id", -1))
                 if isinstance(lid, str):
