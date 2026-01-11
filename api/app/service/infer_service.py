@@ -424,10 +424,10 @@ class InferenceService:
                 if box is None:
                     return None
 
-                # page 可能是字符串，转为整数（从 0-based 转为 1-based）
+                # page 可能是字符串，转为整数
                 if page is not None:
                     try:
-                        page = int(page) + 1  # 0-based -> 1-based
+                        page = int(page)
                     except (ValueError, TypeError):
                         page = 1
                 else:
