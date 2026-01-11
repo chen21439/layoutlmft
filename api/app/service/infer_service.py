@@ -545,18 +545,33 @@ class InferenceService:
         # [DEBUG] 检测 Format B 中的循环
         for i, p in enumerate(parent_preds):
             if p != i and 0 <= p < len(parent_preds):
-                # 检查是否互相指向
                 if parent_preds[p] == i:
-                    logger.warning(f"[Construct] 检测到互指: section[{i}].parent={p}, section[{p}].parent={i}")
+                    logger.warning(f"[Construct] Format B parent 互指: section[{i}].parent={p}, section[{p}].parent={i}")
+
+        # [DEBUG] 检测 sibling 互指（这是问题根源）
+        for i, s in enumerate(sibling_preds):
+            if s != i and 0 <= s < len(sibling_preds):
+                if sibling_preds[s] == i:
+                    lid_i = section_line_ids[i]
+                    lid_s = section_line_ids[s]
+                    logger.warning(f"[Construct] Format B sibling 互指: sec[{i}](line_id={lid_i}).sibling={s}, sec[{s}](line_id={lid_s}).sibling={i}")
 
         # 反向转换: 格式B → 格式A
         # 格式B: hierarchical_parent + sibling (自指向方案)
         # 格式A: ref_parent + relation (顶层节点 parent=-1)
         ref_parents, relations = resolve_ref_parents_and_relations(parent_preds, sibling_preds)
 
-        # [DEBUG] 打印转换前后对比
+        # [DEBUG] 打印转换前后对比，检查转换是否引入循环
         logger.debug(f"[Construct] Format B parent_preds: {parent_preds[:20]}...")
         logger.debug(f"[Construct] Format A ref_parents: {ref_parents[:20]}...")
+
+        # [DEBUG] 检查 ref_parents 中是否有循环（0-based section 空间）
+        for i, p in enumerate(ref_parents):
+            if p >= 0 and p < len(ref_parents):
+                if ref_parents[p] == i:
+                    lid_i = section_line_ids[i]
+                    lid_p = section_line_ids[p]
+                    logger.warning(f"[Construct] Format A 互指: sec[{i}](line_id={lid_i}).ref_parent={p}, sec[{p}](line_id={lid_p}).ref_parent={i}")
 
         # Build result - 映射回原始 line_id
         results = []
