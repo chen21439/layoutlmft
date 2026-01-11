@@ -542,10 +542,21 @@ class InferenceService:
         parent_preds = outputs["parent_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
         sibling_preds = outputs["sibling_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
 
+        # [DEBUG] 检测 Format B 中的循环
+        for i, p in enumerate(parent_preds):
+            if p != i and 0 <= p < len(parent_preds):
+                # 检查是否互相指向
+                if parent_preds[p] == i:
+                    logger.warning(f"[Construct] 检测到互指: section[{i}].parent={p}, section[{p}].parent={i}")
+
         # 反向转换: 格式B → 格式A
         # 格式B: hierarchical_parent + sibling (自指向方案)
         # 格式A: ref_parent + relation (顶层节点 parent=-1)
         ref_parents, relations = resolve_ref_parents_and_relations(parent_preds, sibling_preds)
+
+        # [DEBUG] 打印转换前后对比
+        logger.debug(f"[Construct] Format B parent_preds: {parent_preds[:20]}...")
+        logger.debug(f"[Construct] Format A ref_parents: {ref_parents[:20]}...")
 
         # Build result - 映射回原始 line_id
         results = []
@@ -561,6 +572,14 @@ class InferenceService:
                 "relation": relations[sec_idx],
                 "section_index": sec_idx,  # section 空间的索引
             })
+
+        # [DEBUG] 检测最终结果中的循环
+        line_id_to_parent = {r["line_id"]: r["parent_id"] for r in results}
+        for r in results:
+            lid, pid = r["line_id"], r["parent_id"]
+            if pid != -1 and pid in line_id_to_parent:
+                if line_id_to_parent[pid] == lid:
+                    logger.warning(f"[Construct] 最终结果互指: line_id={lid} <-> {pid}")
 
         logger.info(f"[Construct] TOC inference done: {num_sections} sections")
 
