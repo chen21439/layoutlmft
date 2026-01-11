@@ -1066,4 +1066,143 @@ __all__ = [
     'insert_content_to_toc_tree',
     # 完整树转扁平格式A
     'flatten_full_tree_to_format_a',
+    # Tree Insertion Algorithm (论文 Algorithm 1)
+    'tree_insertion_decode',
 ]
+
+
+def tree_insertion_decode(
+    parent_logits: 'torch.Tensor',
+    sibling_logits: 'torch.Tensor',
+) -> Tuple[List[int], List[int]]:
+    """论文 Algorithm 1: Tree Insertion Algorithm
+
+    通过联合解码 parent 和 sibling 概率来构建树，保证 sibling 约束。
+
+    Args:
+        parent_logits: [N, N] 父节点概率矩阵，parent_logits[i, j] 表示节点 i 选择 j 为父节点的 logit
+        sibling_logits: [N, N] 左兄弟概率矩阵，sibling_logits[i, j] 表示节点 i 选择 j 为左兄弟的 logit
+                        自指向（sibling_logits[i, i]）表示无左兄弟
+
+    Returns:
+        hierarchical_parents: 层级父节点列表，自指向表示 ROOT
+        left_siblings: 左兄弟列表，自指向表示无左兄弟
+
+    Note:
+        输入节点按阅读顺序排列（索引 0, 1, 2, ... 就是阅读顺序）
+    """
+    import torch
+
+    # 转换为 numpy 方便处理
+    if isinstance(parent_logits, torch.Tensor):
+        parent_scores = torch.softmax(parent_logits, dim=-1).cpu().numpy()
+        sibling_scores = torch.softmax(sibling_logits, dim=-1).cpu().numpy()
+    else:
+        import numpy as np
+        # 假设已经是 softmax 后的概率
+        parent_scores = np.array(parent_logits)
+        sibling_scores = np.array(sibling_logits)
+
+    n = len(parent_scores)
+    if n == 0:
+        return [], []
+
+    # 结果：hierarchical_parent 和 left_sibling
+    # 初始化为自指向（表示 ROOT / 无左兄弟）
+    hierarchical_parents = list(range(n))  # 自指向 = ROOT
+    left_siblings = list(range(n))  # 自指向 = 无左兄弟
+
+    # 树结构：parent -> children（有序列表）
+    # -1 表示 ROOT
+    children = {-1: []}
+    for i in range(n):
+        children[i] = []
+
+    def get_rightmost_path(node_idx: int) -> List[int]:
+        """获取从 node_idx 开始的最右路径上的所有节点"""
+        path = [node_idx]
+        current = node_idx
+        while children[current]:
+            current = children[current][-1]  # 最右子节点
+            path.append(current)
+        return path
+
+    # 按阅读顺序逐个插入节点
+    for i in range(n):
+        if i == 0:
+            # 第一个节点直接作为 ROOT 的子节点
+            children[-1].append(0)
+            hierarchical_parents[0] = 0  # 自指向 = ROOT
+            left_siblings[0] = 0  # 自指向 = 无左兄弟
+            continue
+
+        # 获取当前树的最右子树路径
+        # 从 ROOT 开始，包括 ROOT（用 -1 表示）
+        rightmost_path = [-1] + get_rightmost_path(-1) if children[-1] else [-1]
+
+        # 候选节点：最右路径上的所有节点（作为 parent 候选）
+        # rightmost_path = [ROOT(-1), r1, r2, ..., rn]
+        # 对应的 sibling 候选 = [无(自指向), r1, r2, ..., rn]
+        # 即：如果选 rk 为 parent，那么 rk 当前的最右子节点是左兄弟
+
+        best_score = -float('inf')
+        best_parent_idx = -1  # 在 rightmost_path 中的索引
+
+        for path_idx, parent_candidate in enumerate(rightmost_path):
+            # parent_candidate 是候选父节点（-1 表示 ROOT）
+
+            # Parent score
+            if parent_candidate == -1:
+                # ROOT: 使用自指向的分数
+                p_score = parent_scores[i, i]
+            else:
+                p_score = parent_scores[i, parent_candidate]
+
+            # Sibling score
+            # 如果选 parent_candidate 为父节点，左兄弟是 parent_candidate 当前的最右子节点
+            if parent_candidate == -1:
+                # ROOT 的子节点
+                if children[-1]:
+                    left_sib = children[-1][-1]  # ROOT 的最右子节点
+                    s_score = sibling_scores[i, left_sib]
+                else:
+                    # 无左兄弟（第一个 ROOT 子节点）
+                    s_score = sibling_scores[i, i]  # 自指向
+            else:
+                if children[parent_candidate]:
+                    left_sib = children[parent_candidate][-1]
+                    s_score = sibling_scores[i, left_sib]
+                else:
+                    # parent_candidate 没有子节点，无左兄弟
+                    s_score = sibling_scores[i, i]  # 自指向
+
+            # 联合分数 = parent_score * sibling_score
+            joint_score = p_score * s_score
+
+            if joint_score > best_score:
+                best_score = joint_score
+                best_parent_idx = path_idx
+
+        # 插入节点 i
+        best_parent = rightmost_path[best_parent_idx]
+
+        # 确定左兄弟
+        if best_parent == -1:
+            if children[-1]:
+                left_sib = children[-1][-1]
+            else:
+                left_sib = i  # 自指向 = 无左兄弟
+        else:
+            if children[best_parent]:
+                left_sib = children[best_parent][-1]
+            else:
+                left_sib = i  # 自指向 = 无左兄弟
+
+        # 更新结果
+        hierarchical_parents[i] = best_parent if best_parent != -1 else i  # -1 用自指向表示
+        left_siblings[i] = left_sib
+
+        # 更新树结构
+        children[best_parent].append(i)
+
+    return hierarchical_parents, left_siblings

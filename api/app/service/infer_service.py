@@ -44,6 +44,7 @@ from comp_hrdoc.utils.tree_utils import (
     resolve_ref_parents_and_relations,  # 反向转换: 格式B → 格式A
     flatten_full_tree_to_format_a,  # 完整树转扁平格式A
     visualize_toc,  # 可视化 TOC 树（和训练一致）
+    tree_insertion_decode,  # 论文 Algorithm 1: 联合解码 parent + sibling
 )
 
 from .model_loader import get_model_loader
@@ -451,6 +452,8 @@ class InferenceService:
             if original_data:
                 logger.info(f"[DEBUG] First item keys: {list(original_data[0].keys())}")
                 logger.info(f"[DEBUG] First item page={original_data[0].get('page')}, box={original_data[0].get('box')}")
+                first_loc = build_location(original_data[0])
+                logger.info(f"[DEBUG] build_location result: {first_loc}")
             for item in original_data:
                 lid = item.get("line_id", item.get("id", -1))
                 if isinstance(lid, str):
@@ -469,6 +472,10 @@ class InferenceService:
                     info = line_info_map.get(pred["line_id"], {})
                     pred["text"] = info.get("text", "")
                     pred["location"] = info.get("location")
+                # DEBUG: 打印第一个 prediction 的 location
+                if construct_result["predictions"]:
+                    first_pred = construct_result["predictions"][0]
+                    logger.info(f"[DEBUG] First prediction: line_id={first_pred.get('line_id')}, location={first_pred.get('location')}")
 
                 # 构建 section_ids 集合
                 section_ids = set(pred["line_id"] for pred in construct_result["predictions"])
@@ -596,22 +603,12 @@ class InferenceService:
             )
 
         # Decode predictions (格式B: 自指向方案)
-        parent_preds = outputs["parent_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
-        sibling_preds = outputs["sibling_logits"].argmax(dim=-1)[0].cpu().tolist()  # [S]
-
-        # [DEBUG] 检测 Format B 中的循环
-        for i, p in enumerate(parent_preds):
-            if p != i and 0 <= p < len(parent_preds):
-                if parent_preds[p] == i:
-                    logger.warning(f"[Construct] Format B parent 互指: section[{i}].parent={p}, section[{p}].parent={i}")
-
-        # [DEBUG] 检测 sibling 互指（这是问题根源）
-        for i, s in enumerate(sibling_preds):
-            if s != i and 0 <= s < len(sibling_preds):
-                if sibling_preds[s] == i:
-                    lid_i = section_line_ids[i]
-                    lid_s = section_line_ids[s]
-                    logger.warning(f"[Construct] Format B sibling 互指: sec[{i}](line_id={lid_i}).sibling={s}, sec[{s}](line_id={lid_s}).sibling={i}")
+        # 使用论文 Algorithm 1: Tree Insertion Algorithm 进行联合解码
+        # 保证 sibling 约束：每个节点的左兄弟一定是其父节点的已有子节点
+        parent_preds, sibling_preds = tree_insertion_decode(
+            outputs["parent_logits"][0],  # [S, S]
+            outputs["sibling_logits"][0],  # [S, S]
+        )
 
         # 反向转换: 格式B → 格式A
         # 格式B: hierarchical_parent + sibling (自指向方案)
@@ -622,8 +619,9 @@ class InferenceService:
         logger.debug(f"[Construct] Format B parent_preds: {parent_preds[:20]}...")
         logger.debug(f"[Construct] Format A ref_parents: {ref_parents[:20]}...")
 
-        # 修复互指问题：line_id 较小的节点不能指向 line_id 较大的节点
-        # 对于互指 (A <-> B)，将 line_id 较小的那个设为 -1
+        # 安全检查：修复 Format A 中可能的互指问题
+        # 注：使用 Tree Insertion Algorithm 后，Format B 应已保证一致性
+        # 此检查作为防御性措施保留
         fixed_count = 0
         processed_pairs = set()
         for i, p in enumerate(ref_parents):
