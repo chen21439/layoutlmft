@@ -335,9 +335,19 @@ class HRDocDocumentLevelCollator:
                 if relations:
                     # relation="meta" → -100 (忽略), 其他 → 正常索引
                     # 详见文件头部流程图
+                    # [DEBUG] 打印第一个文档的前几个 relation 值
+                    if doc_idx == 0 and len(relations) > 0:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        sample_rels = relations[:min(10, len(relations))]
+                        logger.info(f"[Collator DEBUG] relation2id: {self.relation2id}")
+                        logger.info(f"[Collator DEBUG] 原始 relations 类型: {type(sample_rels[0])}, 值: {sample_rels}")
                     rel_indices = [
-                        self.relation2id.get(rel.lower(), -100) for rel in relations
+                        self.relation2id.get(rel.lower() if isinstance(rel, str) else rel, -100) for rel in relations
                     ]
+                    # [DEBUG] 打印转换后的值
+                    if doc_idx == 0:
+                        logger.info(f"[Collator DEBUG] 转换后 rel_indices: {rel_indices[:10]}")
                     padded_relations.append(
                         rel_indices + [-100] * padding_len  # -100 会被 loss 忽略
                     )
