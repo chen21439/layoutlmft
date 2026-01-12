@@ -621,9 +621,23 @@ class InferenceService:
         # 格式A: ref_parent + relation (顶层节点 parent=-1)
         ref_parents, relations = convert_to_format_a(parent_preds, sibling_preds)
 
-        # [DEBUG] 打印转换前后对比，检查转换是否引入循环
-        logger.debug(f"[Construct] Format B parent_preds: {parent_preds[:20]}...")
-        logger.debug(f"[Construct] Format A ref_parents: {ref_parents[:20]}...")
+        # [DEBUG] 打印每个节点的 B→A 转换详情
+        logger.info(f"[Construct] Format B→A 转换详情 ({num_sections} sections):")
+        for sec_idx in range(num_sections):
+            line_id = section_line_ids[sec_idx]
+            hp = parent_preds[sec_idx]  # hierarchical_parent (section index)
+            ls = sibling_preds[sec_idx]  # left_sibling (section index)
+            rp = ref_parents[sec_idx]  # ref_parent (section index)
+            rel = relations[sec_idx]
+            # 映射到 line_id 显示
+            hp_lid = section_line_ids[hp] if hp != sec_idx else -1
+            ls_lid = section_line_ids[ls] if ls != sec_idx else -1
+            rp_lid = section_line_ids[rp] if rp >= 0 else -1
+            logger.info(
+                f"  [{sec_idx}] line_id={line_id}: "
+                f"B(parent={hp_lid}, sibling={ls_lid}) -> "
+                f"A(ref_parent={rp_lid}, rel={rel})"
+            )
 
         # 安全检查：修复 Format A 中可能的互指问题
         # 注：使用 Tree Insertion Algorithm 后，Format B 应已保证一致性
