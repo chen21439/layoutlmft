@@ -484,6 +484,16 @@ def convert_stage_labels_to_construct(
             raw_parents, raw_rels
         )
 
+        # [DEBUG] 打印格式 A → B 转换详情（仅第一个 batch）
+        if b == 0:
+            logger.info(f"[A→B] 格式转换详情 (doc {b}, {valid_len} nodes):")
+            for i in range(min(valid_len, 20)):  # 最多打印 20 个节点
+                rp = raw_parents[i]
+                rel = raw_rels[i]
+                hp = hier_parents[i]
+                hp_self = i if hp == -1 else hp  # 自指向方案
+                logger.info(f"  [{i}] A(ref_parent={rp}, rel={rel}) -> B(hier_parent={hp} -> {hp_self})")
+
         # 填充 parent_ids（自指向方案：root 节点 parent == self）
         for i, hp in enumerate(hier_parents):
             if i < max_lines:
@@ -777,27 +787,29 @@ def evaluate_with_stage_features(
         total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
         total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
 
-        # Compute metrics - 使用联合解码（与推理一致）
+        # Compute metrics
         if line_parent_ids is not None:
             batch_size = line_parent_ids.shape[0]
 
-            # 联合解码 (tree_insertion_decode)
-            all_pred_parents = []
-            all_pred_siblings = []
-            for b in range(batch_size):
-                if "sibling_logits" in outputs:
-                    parents_b, siblings_b = tree_insertion_decode(
-                        outputs["parent_logits"][b],
-                        outputs["sibling_logits"][b],
-                    )
-                else:
-                    parents_b = outputs["parent_logits"][b].argmax(dim=-1).cpu().tolist()
-                    siblings_b = list(range(len(parents_b)))
-                all_pred_parents.append(parents_b)
-                all_pred_siblings.append(siblings_b)
+            # 使用 argmax 解码（训练时的快速评估）
+            pred_parents = outputs["parent_logits"].argmax(dim=-1)
+            pred_siblings_batch = outputs["sibling_logits"].argmax(dim=-1) if "sibling_logits" in outputs else None
 
-            pred_parents = torch.tensor(all_pred_parents, dtype=torch.long, device=device)
-            pred_siblings_batch = torch.tensor(all_pred_siblings, dtype=torch.long, device=device) if "sibling_logits" in outputs else None
+            # [DEBUG] 打印第一个 batch 的预测详情
+            if num_batches == 0:
+                logger.info(f"[Eval] 模型预测详情 (第一个 batch):")
+                for b in range(min(batch_size, 1)):  # 只打印第一个样本
+                    mask_b = line_mask[b].cpu().tolist()
+                    valid_count = sum(mask_b)
+                    logger.info(f"  Doc {b}: {valid_count} valid nodes")
+                    for i in range(min(valid_count, 20)):  # 最多 20 个节点
+                        if mask_b[i]:
+                            gt_p = line_parent_ids[b, i].item()
+                            pred_p = pred_parents[b, i].item()
+                            gt_s = sibling_labels[b, i].item() if sibling_labels is not None else -1
+                            pred_s = pred_siblings_batch[b, i].item() if pred_siblings_batch is not None else -1
+                            match = "✓" if gt_p == pred_p else "✗"
+                            logger.info(f"    [{i}] parent: pred={pred_p}, gt={gt_p} {match} | sibling: pred={pred_s}, gt={gt_s}")
 
             # Aggregate parent metrics
             has_parent = (line_parent_ids >= 0) & line_mask
