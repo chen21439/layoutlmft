@@ -17,9 +17,10 @@ from pathlib import Path
 # 路径配置
 SRC_BASE = Path("/data/LLM_group/ontology/static/upload")
 JSON_FILE = Path(
-    "/data/LLM_group/layoutlmft/data/tender_document/covmatch/doc_random_dev2_seed99/train_doc_ids.json"
+    "/data/LLM_group/layoutlmft/data/tender_document/covmatch/doc_random_dev2_section/train_doc_ids.json"
 )
 DEST_BASE = Path("/data/LLM_group/layoutlmft/data/tender_document/images")
+TRAIN_JSON_BASE = Path("/data/LLM_group/layoutlmft/data/tender_document/train")
 
 
 def sync_with_rsync(src: Path, dest: Path) -> None:
@@ -34,6 +35,42 @@ def sync_with_shutil(src: Path, dest: Path) -> None:
     print(f"Copying {src} -> {dest_folder}")
     shutil.copytree(src, dest_folder)
     print("Copy completed.")
+
+
+def copy_construct_json(upload_dir: Path, doc_id: str) -> None:
+    """复制 construct.json 到训练目录，只保留 predictions 字段。
+
+    Args:
+        upload_dir: 上传目录，如 /data/.../upload/79
+        doc_id: 文档 ID
+    """
+    # 查找 *_construct.json 文件
+    construct_files = list(upload_dir.glob("*_construct.json"))
+    if not construct_files:
+        print(f"WARNING: No *_construct.json found in {upload_dir}", file=sys.stderr)
+        return
+
+    if len(construct_files) > 1:
+        print(f"WARNING: Multiple construct.json found, using first: {construct_files}", file=sys.stderr)
+
+    src_json = construct_files[0]
+    print(f"Found construct.json: {src_json}")
+
+    # 读取并提取 predictions
+    with open(src_json, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    predictions = data.get("predictions", [])
+    print(f"Extracted {len(predictions)} predictions")
+
+    # 确保目标目录存在
+    TRAIN_JSON_BASE.mkdir(parents=True, exist_ok=True)
+
+    # 保存到目标目录，文件名为 {doc_id}.json
+    dest_json = TRAIN_JSON_BASE / f"{doc_id}.json"
+    with open(dest_json, "w", encoding="utf-8") as f:
+        json.dump(predictions, f, ensure_ascii=False, indent=2)
+    print(f"Saved predictions to: {dest_json}")
 
 
 def main():
@@ -92,6 +129,10 @@ def main():
         sync_with_shutil(src_folder, DEST_BASE)
     else:
         sync_with_rsync(src_folder, DEST_BASE)
+
+    # 复制 construct.json 到训练目录
+    upload_dir = SRC_BASE / str(upload_id)
+    copy_construct_json(upload_dir, doc_id)
 
     # 备份 JSON 文件
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
