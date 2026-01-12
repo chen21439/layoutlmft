@@ -21,6 +21,7 @@ from ..metrics.doc_metrics import (
     compute_order_metrics,
     compute_construct_metrics,
 )
+from ..utils.tree_utils import tree_insertion_decode
 
 
 class DetectTask(BaseTask):
@@ -305,10 +306,13 @@ class ConstructTask(BaseTask):
     def _compute_sibling_loss(
         self,
         logits: Tensor,  # [B, N, N]
-        labels: Tensor,  # [B, N] index of left sibling (-1 for none)
+        labels: Tensor,  # [B, N] index of left sibling (self-index for none)
         mask: Optional[Tensor] = None,
     ) -> Tensor:
-        """计算兄弟关系损失 (softmax CE, N选1)"""
+        """计算兄弟关系损失 (softmax CE, N选1)
+
+        论文自指向方案：无左兄弟的节点指向自己，所有有效节点都参与训练。
+        """
         B, N, _ = logits.shape
 
         logits_flat = logits.view(B * N, N)
@@ -319,8 +323,8 @@ class ConstructTask(BaseTask):
             logits_flat = logits_flat[mask_flat]
             labels_flat = labels_flat[mask_flat]
 
-        # 只计算有左兄弟的区域 (sibling >= 0)
-        valid = labels_flat >= 0
+        # 论文自指向方案：所有有效节点都参与（包括自指向=无左兄弟）
+        valid = (labels_flat >= 0) & (labels_flat < N)
         if not valid.any():
             return torch.tensor(0.0, device=logits.device)
 
@@ -331,7 +335,9 @@ class ConstructTask(BaseTask):
         outputs: Dict[str, Tensor],
         **kwargs,
     ) -> Dict[str, Any]:
-        """解码层级结构预测
+        """解码层级结构预测（论文 Algorithm 1: Tree Insertion Algorithm）
+
+        使用联合解码保证树结构的合法性（sibling 约束）。
 
         Args:
             outputs: {
@@ -340,16 +346,42 @@ class ConstructTask(BaseTask):
             }
 
         Returns:
-            解码后的预测结果
+            {
+                'pred_parents': [B, N] 层级父节点（自指向方案）,
+                'pred_siblings': [B, N] 左兄弟（自指向方案）
+            }
         """
-        result = {}
+        parent_logits = outputs.get('parent_logits')
+        sibling_logits = outputs.get('sibling_logits')
 
-        if 'parent_logits' in outputs:
-            result['pred_parents'] = outputs['parent_logits'].argmax(dim=-1)
+        if parent_logits is None:
+            return {}
 
-        if 'sibling_logits' in outputs:
-            # N选1: argmax for left sibling prediction
-            result['pred_siblings'] = outputs['sibling_logits'].argmax(dim=-1)
+        B = parent_logits.size(0)
+        N = parent_logits.size(1)
+        device = parent_logits.device
+
+        # 批量联合解码
+        all_parents = []
+        all_siblings = []
+
+        for b in range(B):
+            if sibling_logits is not None:
+                parents, siblings = tree_insertion_decode(
+                    parent_logits[b], sibling_logits[b]
+                )
+            else:
+                # 无 sibling_logits 时退化为 argmax
+                parents = parent_logits[b].argmax(dim=-1).cpu().tolist()
+                siblings = list(range(N))  # 全部自指向
+
+            all_parents.append(parents)
+            all_siblings.append(siblings)
+
+        result = {
+            'pred_parents': torch.tensor(all_parents, dtype=torch.long, device=device),
+            'pred_siblings': torch.tensor(all_siblings, dtype=torch.long, device=device),
+        }
 
         return result
 
@@ -429,26 +461,26 @@ class DOCTask:
                 mask=mask,
             )
 
-        # Construct
+        # Construct - 使用联合解码
         if 'parent_logits' in outputs:
-            parent_preds = outputs['parent_logits'].argmax(dim=-1)
+            # 使用 ConstructTask.decode 进行联合解码
+            construct_preds = self.construct_task.decode(outputs)
+            parent_preds = construct_preds.get('pred_parents')
+            sibling_preds = construct_preds.get('pred_siblings')
+
             parent_labels = targets.get('parent_labels')
             self.metrics_computer.update(
                 parent_preds=parent_preds,
                 parent_labels=parent_labels,
                 mask=mask,
             )
-            # 论文自指向方案: Root is determined by parent_label == self_index
-            # No separate root prediction head needed
 
-        if 'sibling_logits' in outputs:
-            # N选1: argmax for left sibling prediction
-            sibling_preds = outputs['sibling_logits'].argmax(dim=-1)
-            self.metrics_computer.update(
-                sibling_preds=sibling_preds,
-                sibling_labels=targets.get('sibling_labels'),
-                mask=mask,
-            )
+            if sibling_preds is not None:
+                self.metrics_computer.update(
+                    sibling_preds=sibling_preds,
+                    sibling_labels=targets.get('sibling_labels'),
+                    mask=mask,
+                )
 
     def compute_metrics(self) -> Dict[str, float]:
         """计算最终指标

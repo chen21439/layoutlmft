@@ -1,7 +1,7 @@
 """Predictor - 推理管线
 
 封装 Construct 模型的推理逻辑：
-1. 解码模型输出（格式B: 自指向方案）
+1. 解码模型输出（格式B: 自指向方案）- 使用论文 Algorithm 1 联合解码
 2. 转换为格式A（parent_id + relation）
 3. 构建标准化输出
 
@@ -18,6 +18,7 @@ from ..utils.tree_utils import (
     resolve_ref_parents_and_relations,
     build_tree_from_parents,
     format_toc_tree,
+    tree_insertion_decode,
 )
 
 
@@ -25,7 +26,9 @@ def decode_construct_outputs(
     outputs: Dict[str, Tensor],
     mask: Tensor,
 ) -> Tuple[List[int], List[int]]:
-    """解码 Construct 模型输出
+    """解码 Construct 模型输出（论文 Algorithm 1: Tree Insertion Algorithm）
+
+    使用联合解码保证树结构的合法性（sibling 约束）。
 
     Args:
         outputs: 模型输出，包含 parent_logits 和 sibling_logits
@@ -35,22 +38,21 @@ def decode_construct_outputs(
         pred_parents: 预测的层级父节点（格式B，自指向方案）
         pred_siblings: 预测的左兄弟（格式B，自指向方案）
     """
-    # Parent: argmax
     parent_logits = outputs["parent_logits"]  # [N, N]
-    pred_parents = parent_logits.argmax(dim=-1).cpu().tolist()  # [N]
+    sibling_logits = outputs.get("sibling_logits")  # [N, N] or None
 
-    # Sibling: argmax
-    pred_siblings = None
-    if "sibling_logits" in outputs:
-        sibling_logits = outputs["sibling_logits"]  # [N, N]
-        pred_siblings = sibling_logits.argmax(dim=-1).cpu().tolist()  # [N]
+    # 联合解码
+    if sibling_logits is not None:
+        pred_parents, pred_siblings = tree_insertion_decode(parent_logits, sibling_logits)
+    else:
+        # 无 sibling_logits 时退化为 argmax
+        pred_parents = parent_logits.argmax(dim=-1).cpu().tolist()
+        pred_siblings = list(range(len(pred_parents)))  # 全部自指向
 
     # 只保留有效节点
     mask_list = mask.cpu().tolist()
     valid_parents = [pred_parents[i] for i, m in enumerate(mask_list) if m]
-    valid_siblings = None
-    if pred_siblings is not None:
-        valid_siblings = [pred_siblings[i] for i, m in enumerate(mask_list) if m]
+    valid_siblings = [pred_siblings[i] for i, m in enumerate(mask_list) if m]
 
     return valid_parents, valid_siblings
 
