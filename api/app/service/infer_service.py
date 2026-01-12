@@ -41,11 +41,14 @@ from comp_hrdoc.utils.tree_utils import (
     build_tree_from_parents,
     format_toc_tree,
     format_tree_from_parents,  # 训练时的打印格式
-    resolve_ref_parents_and_relations,  # 反向转换: 格式B → 格式A
     flatten_full_tree_to_format_a,  # 完整树转扁平格式A
     visualize_toc,  # 可视化 TOC 树（和训练一致）
-    tree_insertion_decode,  # 论文 Algorithm 1: 联合解码 parent + sibling
 )
+from comp_hrdoc.engines.predictor import (
+    decode_construct_outputs,  # 联合解码（复用 Predictor）
+    convert_to_format_a,  # 格式 B → A 转换
+)
+from comp_hrdoc.metrics.classification import normalize_class
 
 from .model_loader import get_model_loader
 
@@ -492,7 +495,7 @@ class InferenceService:
                     all_lines.append({
                         "line_id": lid,
                         "text": item.get("text", ""),
-                        "class": item.get("class", item.get("category", "")),
+                        "class": normalize_class(item.get("class", item.get("category", ""))),
                         "location": build_location(item),
                     })
                 all_lines.sort(key=lambda x: x["line_id"])
@@ -603,17 +606,20 @@ class InferenceService:
             )
 
         # Decode predictions (格式B: 自指向方案)
-        # 使用论文 Algorithm 1: Tree Insertion Algorithm 进行联合解码
+        # 使用 Predictor 的联合解码（论文 Algorithm 1: Tree Insertion Algorithm）
         # 保证 sibling 约束：每个节点的左兄弟一定是其父节点的已有子节点
-        parent_preds, sibling_preds = tree_insertion_decode(
-            outputs["parent_logits"][0],  # [S, S]
-            outputs["sibling_logits"][0],  # [S, S]
+        single_outputs = {
+            "parent_logits": outputs["parent_logits"][0],  # [S, S]
+            "sibling_logits": outputs["sibling_logits"][0],  # [S, S]
+        }
+        parent_preds, sibling_preds = decode_construct_outputs(
+            single_outputs, section_mask[0]
         )
 
-        # 反向转换: 格式B → 格式A
+        # 反向转换: 格式B → 格式A（复用 Predictor 函数）
         # 格式B: hierarchical_parent + sibling (自指向方案)
         # 格式A: ref_parent + relation (顶层节点 parent=-1)
-        ref_parents, relations = resolve_ref_parents_and_relations(parent_preds, sibling_preds)
+        ref_parents, relations = convert_to_format_a(parent_preds, sibling_preds)
 
         # [DEBUG] 打印转换前后对比，检查转换是否引入循环
         logger.debug(f"[Construct] Format B parent_preds: {parent_preds[:20]}...")
