@@ -51,6 +51,7 @@ from examples.comp_hrdoc.data.hrdoc_loader import HRDocDataset
 from examples.comp_hrdoc.utils.tree_utils import (
     resolve_hierarchical_parents_and_siblings,  # 正向: A → B
     visualize_toc,
+    tree_insertion_decode,  # 论文 Algorithm 1: 联合解码
 )
 # 推理解码：复用 engines/predictor
 from examples.comp_hrdoc.engines.predictor import (
@@ -776,23 +777,42 @@ def evaluate_with_stage_features(
         total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
         total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
 
-        # Compute metrics
+        # Compute metrics - 使用联合解码（与推理一致）
         if line_parent_ids is not None:
+            batch_size = line_parent_ids.shape[0]
+
+            # 联合解码 (tree_insertion_decode)
+            all_pred_parents = []
+            all_pred_siblings = []
+            for b in range(batch_size):
+                if "sibling_logits" in outputs:
+                    parents_b, siblings_b = tree_insertion_decode(
+                        outputs["parent_logits"][b],
+                        outputs["sibling_logits"][b],
+                    )
+                else:
+                    parents_b = outputs["parent_logits"][b].argmax(dim=-1).cpu().tolist()
+                    siblings_b = list(range(len(parents_b)))
+                all_pred_parents.append(parents_b)
+                all_pred_siblings.append(siblings_b)
+
+            pred_parents = torch.tensor(all_pred_parents, dtype=torch.long, device=device)
+            pred_siblings_batch = torch.tensor(all_pred_siblings, dtype=torch.long, device=device) if "sibling_logits" in outputs else None
+
             # Aggregate parent metrics
             has_parent = (line_parent_ids >= 0) & line_mask
-            pred_parents = outputs["parent_logits"].argmax(dim=-1)
             correct = (pred_parents == line_parent_ids) & has_parent
             all_parent_correct += correct.sum().item()
             all_parent_total += has_parent.sum().item()
 
-            # Sibling metrics (accuracy for N选1)
-            if sibling_labels is not None and "sibling_logits" in outputs:
-                pred_siblings = outputs["sibling_logits"].argmax(dim=-1)  # [B, N]
+            # Sibling metrics
+            if sibling_labels is not None and pred_siblings_batch is not None:
+                # 自指向方案：所有有效节点都参与评估
                 has_sibling = (sibling_labels >= 0) & line_mask
-                correct_sib = (pred_siblings == sibling_labels) & has_sibling
+                correct_sib = (pred_siblings_batch == sibling_labels) & has_sibling
                 sibling_tp += correct_sib.sum().item()
-                sibling_fp += (has_sibling.sum().item() - correct_sib.sum().item())  # For accuracy calc
-                sibling_fn += 0  # Not used for accuracy
+                sibling_fp += (has_sibling.sum().item() - correct_sib.sum().item())
+                sibling_fn += 0
 
             # TEDS 计算（每个样本）- 使用 TEDSMetric
             if teds_metric is not None:
@@ -828,8 +848,8 @@ def evaluate_with_stage_features(
                         pred_parents_mapped.append(idx_map.get(p_pred, -1))
                         gt_parents_mapped.append(idx_map.get(p_gt, -1))
 
-                    # 获取 sibling 预测和标签（用于反向转换）
-                    pred_siblings_b = outputs["sibling_logits"].argmax(dim=-1)[b].cpu().tolist() if "sibling_logits" in outputs else None
+                    # 获取 sibling 预测和标签（用于反向转换）- 使用联合解码结果
+                    pred_siblings_b = pred_siblings_batch[b].cpu().tolist() if pred_siblings_batch is not None else None
                     gt_siblings_b = sibling_labels[b].cpu().tolist() if sibling_labels is not None else None
 
                     # 提取有效节点的 sibling 并映射索引
@@ -874,11 +894,8 @@ def evaluate_with_stage_features(
                         sample_id=f"batch{num_batches}_sample{b}",
                     )
 
-            # 收集可视化样本
+            # 收集可视化样本（复用前面联合解码的结果）
             if len(vis_samples) < visualize_samples:
-                batch_size = line_parent_ids.shape[0]
-                # 获取 sibling 预测和标签
-                pred_siblings_batch = outputs["sibling_logits"].argmax(dim=-1) if "sibling_logits" in outputs else None
                 for b in range(batch_size):
                     if len(vis_samples) >= visualize_samples:
                         break
