@@ -37,6 +37,30 @@ def sync_with_shutil(src: Path, dest: Path) -> None:
     print("Copy completed.")
 
 
+def transform_prediction(pred: dict) -> dict:
+    """转换单个 prediction 的格式。
+
+    将 location 格式:
+        "location": [{"page": 0, "l": 267.0, "t": 72.0, "r": 351.0, "b": 86.0, ...}]
+    转换为:
+        "page": "0", "box": [267, 72, 351, 86]
+    """
+    result = {}
+    for key, value in pred.items():
+        if key == "location" and isinstance(value, list) and len(value) > 0:
+            loc = value[0]
+            result["page"] = str(loc.get("page", 0))
+            result["box"] = [
+                int(loc.get("l", 0)),
+                int(loc.get("t", 0)),
+                int(loc.get("r", 0)),
+                int(loc.get("b", 0)),
+            ]
+        else:
+            result[key] = value
+    return result
+
+
 def copy_construct_json(upload_dir: Path, doc_id: str) -> None:
     """复制 construct.json 到训练目录，只保留 predictions 字段。
 
@@ -62,6 +86,9 @@ def copy_construct_json(upload_dir: Path, doc_id: str) -> None:
 
     predictions = data.get("predictions", [])
     print(f"Extracted {len(predictions)} predictions")
+
+    # 转换格式
+    predictions = [transform_prediction(p) for p in predictions]
 
     # 确保目标目录存在
     TRAIN_JSON_BASE.mkdir(parents=True, exist_ok=True)
