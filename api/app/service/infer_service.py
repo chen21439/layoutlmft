@@ -659,6 +659,13 @@ class InferenceService:
             # 映射回 line_id (-1 表示顶层节点)
             parent_line_id = section_line_ids[ref_parent_sec_idx] if ref_parent_sec_idx >= 0 else -1
 
+            # 格式 B 的预测值（用于调试 B→A 转换）
+            hier_parent_sec_idx = parent_preds[sec_idx]
+            left_sib_sec_idx = sibling_preds[sec_idx]
+            # 映射到 line_id
+            hier_parent_line_id = section_line_ids[hier_parent_sec_idx] if hier_parent_sec_idx != sec_idx else -1  # 自指向=ROOT
+            left_sib_line_id = section_line_ids[left_sib_sec_idx] if left_sib_sec_idx != sec_idx else -1  # 自指向=无左兄弟
+
             results.append({
                 "id": line_id,
                 "line_id": line_id,
@@ -666,6 +673,9 @@ class InferenceService:
                 "relation": relations[sec_idx],
                 "class": ID2LABEL.get(section_label_id, "section"),
                 "section_index": sec_idx,  # section 空间的索引
+                # 格式 B 预测值（调试用）
+                "hierarchical_parent": hier_parent_line_id,  # 层级父节点（-1=ROOT）
+                "left_sibling": left_sib_line_id,  # 左兄弟（-1=无）
             })
 
         # [DEBUG] 检测最终结果中的循环
