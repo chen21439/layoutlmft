@@ -375,7 +375,7 @@ class ConstructLoss(nn.Module):
         parent_logits: torch.Tensor,   # [batch, N, N]
         sibling_logits: torch.Tensor,  # [batch, N, N]
         parent_labels: torch.Tensor,   # [batch, N] index of parent (self-index for root)
-        sibling_labels: torch.Tensor = None,  # [batch, N] index of left sibling (-1 for none)
+        sibling_labels: torch.Tensor = None,  # [batch, N] index of left sibling (self-index for none)
         mask: torch.Tensor = None,
     ) -> Dict[str, torch.Tensor]:
         """
@@ -385,7 +385,9 @@ class ConstructLoss(nn.Module):
             parent_labels: [batch, N] ground truth parent indices
                            Root 节点的 parent_label == self_index (自指向)
                            其他节点指向其父节点
-            sibling_labels: [batch, N] ground truth left sibling indices (-1 = no left sibling)
+            sibling_labels: [batch, N] ground truth left sibling indices
+                           有左兄弟的节点指向其左兄弟
+                           无左兄弟的节点的 sibling_label == self_index (自指向)
             mask: [batch, N] valid node mask
 
         Returns:
@@ -418,11 +420,11 @@ class ConstructLoss(nn.Module):
             parent_loss = loss_flat.sum() / valid_parent_flat.sum().clamp(min=1)
 
         # Sibling loss (softmax CE, N选1, same as parent)
+        # 论文自指向方案：无左兄弟的节点指向自己，所以所有有效节点都参与训练
         sibling_loss = torch.tensor(0.0, device=device)
         if sibling_labels is not None and self.sibling_weight > 0:
-            # Nodes that have a left sibling
-            has_sibling = (sibling_labels >= 0) & mask
-            valid_sibling = has_sibling & (sibling_labels < num_nodes)
+            # All valid nodes participate in sibling loss (self-pointing for no left sibling)
+            valid_sibling = (sibling_labels >= 0) & (sibling_labels < num_nodes) & mask
 
             if valid_sibling.any():
                 sibling_logits_flat = sibling_logits.view(-1, num_nodes)

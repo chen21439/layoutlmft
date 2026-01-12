@@ -188,6 +188,7 @@ def generate_sibling_labels_from_parents(
     从 parent_ids 和 reading_orders 生成 left sibling labels。
 
     每个节点的 left sibling 是同一 parent 下，reading order 在它之前的兄弟节点。
+    论文自指向方案：无左兄弟的节点指向自己（sibling_labels[i] = i）。
 
     Args:
         parent_ids: [B, N] parent index for each node (-1 for root)
@@ -195,7 +196,7 @@ def generate_sibling_labels_from_parents(
         reading_orders: [B, N] reading order positions (default: use indices)
 
     Returns:
-        sibling_labels: [B, N] index of left sibling (-1 if no left sibling)
+        sibling_labels: [B, N] index of left sibling (self-index if no left sibling)
     """
     B, N = parent_ids.shape
     device = parent_ids.device
@@ -204,7 +205,8 @@ def generate_sibling_labels_from_parents(
     if reading_orders is None:
         reading_orders = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)
 
-    sibling_labels = torch.full((B, N), fill_value=-1, dtype=torch.long, device=device)
+    # 初始化为自指向（无左兄弟的默认值）
+    sibling_labels = torch.arange(N, device=device).unsqueeze(0).expand(B, -1).clone()
 
     for b in range(B):
         # Group nodes by parent
@@ -222,11 +224,10 @@ def generate_sibling_labels_from_parents(
 
         # For each group of siblings, sort by reading order and assign left sibling
         for parent, children in parent_to_children.items():
-            if len(children) < 2:
-                continue
             # Sort by reading order
             children_sorted = sorted(children, key=lambda x: reading_orders[b, x].item())
-            # Assign left sibling for each node (except the first one)
+            # First child keeps self-pointing (no left sibling)
+            # Assign left sibling for subsequent nodes
             for idx in range(1, len(children_sorted)):
                 curr_node = children_sorted[idx]
                 left_sibling = children_sorted[idx - 1]

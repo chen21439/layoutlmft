@@ -507,7 +507,9 @@ def generate_sibling_labels(
     """Generate left sibling labels from parent IDs and reading order.
 
     For each node, find its left sibling (same parent, immediately before in reading order).
-    论文自指向方案：root 节点的 parent_id == self_index。
+    论文自指向方案：
+    - root 节点的 parent_id == self_index
+    - 无左兄弟的节点的 sibling_label == self_index（自指向）
 
     Args:
         parent_ids: [batch, N] parent index for each node (self-index for root)
@@ -515,16 +517,13 @@ def generate_sibling_labels(
         region_mask: [batch, N] valid region mask
 
     Returns:
-        sibling_labels: [batch, N] index of left sibling (-1 if no left sibling)
+        sibling_labels: [batch, N] index of left sibling (self-index if no left sibling)
     """
     batch_size, num_regions = parent_ids.shape
     device = parent_ids.device
 
-    sibling_labels = torch.full(
-        (batch_size, num_regions),
-        fill_value=-1,
-        dtype=torch.long, device=device
-    )
+    # 初始化为自指向（无左兄弟的默认值）
+    sibling_labels = torch.arange(num_regions, device=device).unsqueeze(0).expand(batch_size, -1).clone()
 
     for b in range(batch_size):
         # Group nodes by parent
@@ -533,7 +532,7 @@ def generate_sibling_labels(
             if not region_mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            # 论文自指向方案：root 自指向，跳过
+            # 论文自指向方案：root 自指向，跳过（root 无兄弟）
             if parent_i == i:  # Root (self-pointing) has no siblings
                 continue
             if parent_i not in parent_to_children:
@@ -542,11 +541,10 @@ def generate_sibling_labels(
 
         # For each group of siblings, sort by reading order and assign left sibling
         for parent, children in parent_to_children.items():
-            if len(children) < 2:
-                continue
             # Sort by reading order
             children_sorted = sorted(children, key=lambda x: reading_orders[b, x].item())
-            # Assign left sibling for each node (except the first one)
+            # First child: self-pointing (no left sibling) - already initialized
+            # Assign left sibling for subsequent nodes
             for idx in range(1, len(children_sorted)):
                 curr_node = children_sorted[idx]
                 left_sibling = children_sorted[idx - 1]
