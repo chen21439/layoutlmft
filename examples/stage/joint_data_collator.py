@@ -339,9 +339,15 @@ class HRDocDocumentLevelCollator:
                     if doc_idx == 0 and len(relations) > 0:
                         import logging
                         logger = logging.getLogger(__name__)
+                        doc_name = document_names[doc_idx] if doc_idx < len(document_names) else "unknown"
                         sample_rels = relations[:min(10, len(relations))]
+                        # 统计各 relation 类型数量
+                        from collections import Counter
+                        rel_counts = Counter(relations)
+                        logger.info(f"[Collator DEBUG] 文档名: {doc_name}")
+                        logger.info(f"[Collator DEBUG] relation 统计: {dict(rel_counts)}")
                         logger.info(f"[Collator DEBUG] relation2id: {self.relation2id}")
-                        logger.info(f"[Collator DEBUG] 原始 relations 类型: {type(sample_rels[0])}, 值: {sample_rels}")
+                        logger.info(f"[Collator DEBUG] 原始 relations 类型: {type(sample_rels[0])}, 前10个值: {sample_rels}")
                     rel_indices = [
                         self.relation2id.get(rel.lower() if isinstance(rel, str) else rel, -100) for rel in relations
                     ]
