@@ -124,6 +124,7 @@ class JointModelArguments:
     lambda_parent: float = field(default=1.0, metadata={"help": "Parent loss weight"})
     lambda_rel: float = field(default=1.0, metadata={"help": "Relation loss weight"})
     section_parent_weight: float = field(default=1.0, metadata={"help": "Weight for section type in parent loss"})
+    section_only_cls_loss: bool = field(default=False, metadata={"help": "Only compute cls loss for section class (use when only section labels are reliable)"})
     stage1_micro_batch_size: int = field(default=1, metadata={"help": "Stage1 micro-batch size"})
     gradient_checkpointing: bool = field(default=False, metadata={"help": "Enable gradient checkpointing for Stage1"})
     freeze_visual: bool = field(default=False, metadata={"help": "Freeze visual encoder (ResNet)"})
@@ -333,6 +334,7 @@ def build_model(model_args, config, raw_train_dataset, device):
         lambda_parent=lambda_parent,
         lambda_rel=lambda_rel,
         section_parent_weight=model_args.section_parent_weight,
+        section_only_cls_loss=model_args.section_only_cls_loss,
         use_focal_loss=model_args.use_focal_loss,
         use_gru=model_args.use_gru,
         stage1_micro_batch_size=model_args.stage1_micro_batch_size,
@@ -344,6 +346,8 @@ def build_model(model_args, config, raw_train_dataset, device):
 
     if model_args.mode == "stage1":
         logger.info(f"Mode: stage1 (Stage 3/4 disabled)")
+        if model_args.section_only_cls_loss:
+            logger.info(f"Section-Only Cls Loss: ENABLED (only GT=section samples contribute to cls_loss)")
     elif model_args.mode == "stage34":
         logger.info(f"Mode: stage34 (Stage 1 frozen, no_grad=True)")
     else:

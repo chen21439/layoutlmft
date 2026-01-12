@@ -137,6 +137,7 @@ class JointModel(nn.Module):
         lambda_parent: float = 1.0,
         lambda_rel: float = 1.0,
         section_parent_weight: float = 1.0,  # section 类型的 parent loss 权重
+        section_only_cls_loss: bool = False,  # 只对 GT=section 的样本计算分类 loss
         use_line_level_cls: bool = True,  # True=使用line-level mean pool (推荐), False=使用原有token-level+投票
         use_focal_loss: bool = True,
         use_gru: bool = True,
@@ -193,6 +194,7 @@ class JointModel(nn.Module):
         self.lambda_parent = lambda_parent
         self.lambda_rel = lambda_rel
         self.section_parent_weight = section_parent_weight
+        self.section_only_cls_loss = section_only_cls_loss
         self.use_gru = use_gru
         self.use_line_level_cls = use_line_level_cls  # 新增：控制分类方式
         self.stage1_micro_batch_size = stage1_micro_batch_size
@@ -608,7 +610,13 @@ class JointModel(nn.Module):
 
                         if line_labels is not None:
                             sample_labels = line_labels[b, :num_lines]
-                            valid_indices = sample_labels != -100
+                            # 根据 section_only_cls_loss 开关决定哪些样本参与 loss 计算
+                            # - False: 所有有效标签都参与
+                            # - True: 只有 GT=section 的样本参与（用于只有 section 标签可靠的数据）
+                            if self.section_only_cls_loss:
+                                valid_indices = sample_labels == SECTION_ID
+                            else:
+                                valid_indices = sample_labels != -100
                             if valid_indices.any():
                                 valid_logits = logits[valid_indices]
                                 valid_targets = sample_labels[valid_indices]

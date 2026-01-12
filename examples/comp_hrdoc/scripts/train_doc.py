@@ -486,13 +486,17 @@ def convert_stage_labels_to_construct(
 
         # [DEBUG] 打印格式 A → B 转换详情（仅第一个 batch）
         if b == 0:
+            # relation 整数到字符串的映射
+            REL_NAMES = {0: 'connect', 1: 'contain', 2: 'equality', -100: 'padding'}
             logger.info(f"[A→B] 格式转换详情 (doc {b}, {valid_len} nodes):")
+            logger.info(f"  关系映射: connect=0, contain=1, equality=2")
             for i in range(min(valid_len, 20)):  # 最多打印 20 个节点
                 rp = raw_parents[i]
                 rel = raw_rels[i]
+                rel_name = REL_NAMES.get(rel, f'unknown({rel})')
                 hp = hier_parents[i]
                 hp_self = i if hp == -1 else hp  # 自指向方案
-                logger.info(f"  [{i}] A(ref_parent={rp}, rel={rel}) -> B(hier_parent={hp} -> {hp_self})")
+                logger.info(f"  [{i}] A(ref_parent={rp}, rel={rel}={rel_name}) -> B(hier_parent={hp} -> {hp_self})")
 
         # 填充 parent_ids（自指向方案：root 节点 parent == self）
         for i, hp in enumerate(hier_parents):
