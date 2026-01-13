@@ -511,6 +511,9 @@ def generate_sibling_labels(
     - root 节点的 parent_id == self_index
     - 无左兄弟的节点的 sibling_label == self_index（自指向）
 
+    重要：顶层节点（parent == self）之间也是 siblings！
+    它们都是虚拟 ROOT 的子节点，按阅读顺序互为兄弟。
+
     Args:
         parent_ids: [batch, N] parent index for each node (self-index for root)
         reading_orders: [batch, N] reading order positions (0, 1, 2, ...)
@@ -528,16 +531,32 @@ def generate_sibling_labels(
     for b in range(batch_size):
         # Group nodes by parent
         parent_to_children = {}
+        # 收集顶层节点（parent == self，它们都是虚拟 ROOT 的子节点）
+        root_nodes = []
+
         for i in range(num_regions):
             if not region_mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            # 论文自指向方案：root 自指向，跳过（root 无兄弟）
-            if parent_i == i:  # Root (self-pointing) has no siblings
-                continue
-            if parent_i not in parent_to_children:
-                parent_to_children[parent_i] = []
-            parent_to_children[parent_i].append(i)
+
+            if parent_i == i:  # 顶层节点（自指向）
+                root_nodes.append(i)
+            else:
+                # 非顶层节点按 parent 分组
+                if parent_i not in parent_to_children:
+                    parent_to_children[parent_i] = []
+                parent_to_children[parent_i].append(i)
+
+        # 处理顶层节点之间的 sibling 关系
+        # 它们都是虚拟 ROOT 的子节点，按阅读顺序互为兄弟
+        if len(root_nodes) > 1:
+            root_nodes_sorted = sorted(root_nodes, key=lambda x: reading_orders[b, x].item())
+            # 第一个顶层节点：自指向（无左兄弟）- 已初始化
+            # 后续顶层节点指向前一个
+            for idx in range(1, len(root_nodes_sorted)):
+                curr_node = root_nodes_sorted[idx]
+                left_sibling = root_nodes_sorted[idx - 1]
+                sibling_labels[b, curr_node] = left_sibling
 
         # For each group of siblings, sort by reading order and assign left sibling
         for parent, children in parent_to_children.items():
@@ -563,6 +582,9 @@ def generate_sibling_matrix(
     This is kept for backward compatibility.
     论文自指向方案：root 节点的 parent_id == self_index。
 
+    重要：顶层节点（parent == self）之间也是 siblings！
+    它们都是虚拟 ROOT 的子节点。
+
     Args:
         parent_ids: [batch, N] parent index for each node (self-index for root)
         region_mask: [batch, N] valid region mask
@@ -579,12 +601,27 @@ def generate_sibling_matrix(
     )
 
     for b in range(batch_size):
+        # 收集顶层节点（parent == self）
+        root_nodes = []
         for i in range(num_regions):
             if not region_mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            # 论文自指向方案：root 自指向，跳过
-            if parent_i == i:  # Root (self-pointing) has no siblings
+            if parent_i == i:  # 顶层节点
+                root_nodes.append(i)
+
+        # 顶层节点之间互为 siblings
+        for i in root_nodes:
+            for j in root_nodes:
+                if i != j:
+                    sibling_matrix[b, i, j] = 1
+
+        # 非顶层节点：相同 parent 则为 siblings
+        for i in range(num_regions):
+            if not region_mask[b, i]:
+                continue
+            parent_i = parent_ids[b, i].item()
+            if parent_i == i:  # 顶层节点已处理
                 continue
 
             for j in range(num_regions):

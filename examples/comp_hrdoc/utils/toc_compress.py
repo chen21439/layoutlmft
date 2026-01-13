@@ -191,6 +191,9 @@ def generate_sibling_labels_from_parents(
     每个节点的 left sibling 是同一 parent 下，reading order 在它之前的兄弟节点。
     论文自指向方案：无左兄弟的节点指向自己（sibling_labels[i] = i）。
 
+    重要：顶层节点（parent == self）之间也是 siblings！
+    它们都是虚拟 ROOT 的子节点，按阅读顺序互为兄弟。
+
     Args:
         parent_ids: [B, N] parent index for each node (-1 for root)
         mask: [B, N] valid node mask
@@ -213,18 +216,19 @@ def generate_sibling_labels_from_parents(
     for b in range(B):
         # Group nodes by parent
         parent_to_children = {}
-        root_nodes = []  # 记录被识别为 root 的节点
+        root_nodes = []  # 记录被识别为 root 的节点（顶层节点）
         for i in range(N):
             if not mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
-            # 论文自指向方案：root 自指向，所以 parent_i == i 时是 root，跳过
-            if parent_i == i:  # root (self-pointing) has no siblings
+            # 论文自指向方案：root 自指向，所以 parent_i == i 时是顶层节点
+            if parent_i == i:  # 顶层节点（自指向）
                 root_nodes.append(i)
-                continue
-            if parent_i not in parent_to_children:
-                parent_to_children[parent_i] = []
-            parent_to_children[parent_i].append(i)
+            else:
+                # 非顶层节点按 parent 分组
+                if parent_i not in parent_to_children:
+                    parent_to_children[parent_i] = []
+                parent_to_children[parent_i].append(i)
 
         if debug and b == 0:  # 只输出第一个样本
             import logging
@@ -232,6 +236,25 @@ def generate_sibling_labels_from_parents(
             logger.info(f"[generate_sibling_labels] Sample {b}:")
             logger.info(f"  Root nodes (self-pointing): {root_nodes}")
             logger.info(f"  Parent->Children groups: {parent_to_children}")
+
+        # 处理顶层节点之间的 sibling 关系
+        # 它们都是虚拟 ROOT 的子节点，按阅读顺序互为兄弟
+        if len(root_nodes) > 1:
+            root_nodes_sorted = sorted(root_nodes, key=lambda x: reading_orders[b, x].item())
+            # 第一个顶层节点：自指向（无左兄弟）- 已初始化
+            # 后续顶层节点指向前一个
+            for idx in range(1, len(root_nodes_sorted)):
+                curr_node = root_nodes_sorted[idx]
+                left_sibling = root_nodes_sorted[idx - 1]
+                sibling_labels[b, curr_node] = left_sibling
+
+            if debug and b == 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"  Root nodes siblings: {root_nodes_sorted}")
+                for idx, node in enumerate(root_nodes_sorted):
+                    sib = sibling_labels[b, node].item()
+                    logger.info(f"    Root node {node}: left_sibling={sib} ({'self' if sib == node else 'sibling'})")
 
         # For each group of siblings, sort by reading order and assign left sibling
         for parent, children in parent_to_children.items():
