@@ -1214,6 +1214,25 @@ def tree_insertion_decode(
             # 联合分数 = parent_score * sibling_score
             joint_score = p_score * s_score
 
+            # 调试：记录每个候选的分数
+            if debug and i < 20:  # 只调试前20个节点
+                if not hasattr(tree_insertion_decode, '_debug_candidates'):
+                    tree_insertion_decode._debug_candidates = {}
+                if i not in tree_insertion_decode._debug_candidates:
+                    tree_insertion_decode._debug_candidates[i] = []
+                # 计算 left_sib 用于调试输出
+                if parent_candidate == -1:
+                    debug_left_sib = children[-1][-1] if children[-1] else i
+                else:
+                    debug_left_sib = children[parent_candidate][-1] if children[parent_candidate] else i
+                tree_insertion_decode._debug_candidates[i].append({
+                    'parent': parent_candidate,
+                    'left_sib': debug_left_sib,
+                    'p_score': float(p_score),
+                    's_score': float(s_score),
+                    'joint': float(joint_score),
+                })
+
             if joint_score > best_score:
                 best_score = joint_score
                 best_parent_idx = path_idx
@@ -1251,5 +1270,23 @@ def tree_insertion_decode(
         has_sibling_count = sum(1 for i, s in enumerate(left_siblings) if s != i)
         logger.info(f"  root_count (self-pointing parent): {root_count}")
         logger.info(f"  has_sibling_count (non-self sibling): {has_sibling_count}")
+
+        # 打印每个节点的候选分数详情
+        if hasattr(tree_insertion_decode, '_debug_candidates'):
+            logger.info("")
+            logger.info("[tree_insertion_decode] 联合解码详情:")
+            for node_i in sorted(tree_insertion_decode._debug_candidates.keys()):
+                candidates = tree_insertion_decode._debug_candidates[node_i]
+                final_parent = hierarchical_parents[node_i]
+                final_sibling = left_siblings[node_i]
+                # 找出被选中的候选
+                logger.info(f"  Node {node_i}: final_parent={final_parent}, final_sibling={final_sibling}")
+                for c in candidates:
+                    p_disp = c['parent'] if c['parent'] != -1 else 'ROOT'
+                    selected = "✓" if (c['parent'] == final_parent or (c['parent'] == -1 and final_parent == node_i)) else ""
+                    logger.info(f"    候选 parent={p_disp}, sib={c['left_sib']}: "
+                               f"p={c['p_score']:.4f}, s={c['s_score']:.4f}, joint={c['joint']:.6f} {selected}")
+            # 清理
+            del tree_insertion_decode._debug_candidates
 
     return hierarchical_parents, left_siblings

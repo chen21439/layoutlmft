@@ -25,6 +25,8 @@ from ..utils.tree_utils import (
 def decode_construct_outputs(
     outputs: Dict[str, Tensor],
     mask: Tensor,
+    debug: bool = False,
+    texts: Optional[List[str]] = None,
 ) -> Tuple[List[int], List[int]]:
     """解码 Construct 模型输出（论文 Algorithm 1: Tree Insertion Algorithm）
 
@@ -33,21 +35,62 @@ def decode_construct_outputs(
     Args:
         outputs: 模型输出，包含 parent_logits 和 sibling_logits
         mask: [N] 有效区域掩码
+        debug: 是否打印调试信息
+        texts: 节点文本（用于调试输出）
 
     Returns:
         pred_parents: 预测的层级父节点（格式B，自指向方案）
         pred_siblings: 预测的左兄弟（格式B，自指向方案）
     """
+    import torch
     parent_logits = outputs["parent_logits"]  # [N, N]
     sibling_logits = outputs.get("sibling_logits")  # [N, N] or None
 
     # 联合解码
     if sibling_logits is not None:
-        pred_parents, pred_siblings = tree_insertion_decode(parent_logits, sibling_logits)
+        pred_parents, pred_siblings = tree_insertion_decode(parent_logits, sibling_logits, debug=debug)
     else:
         # 无 sibling_logits 时退化为 argmax
         pred_parents = parent_logits.argmax(dim=-1).cpu().tolist()
         pred_siblings = list(range(len(pred_parents)))  # 全部自指向
+
+    # 调试输出：打印每个节点的 top-k parent 和 sibling 分数
+    if debug:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("=" * 60)
+        logger.info("[decode_construct_outputs] 调试信息")
+        logger.info("=" * 60)
+
+        mask_list = mask.cpu().tolist()
+        valid_indices = [i for i, m in enumerate(mask_list) if m]
+        n_valid = len(valid_indices)
+
+        # softmax 转换
+        parent_probs = torch.softmax(parent_logits, dim=-1)
+        sibling_probs = torch.softmax(sibling_logits, dim=-1) if sibling_logits is not None else None
+
+        for idx, i in enumerate(valid_indices[:20]):  # 最多显示20个节点
+            text = texts[idx][:20] if texts and idx < len(texts) else f"node_{i}"
+            pred_p = pred_parents[i]
+            pred_s = pred_siblings[i]
+
+            # Top-3 parent candidates
+            p_probs = parent_probs[i].cpu()
+            p_topk = torch.topk(p_probs, min(5, len(p_probs)))
+            p_top_str = ", ".join([f"{p_topk.indices[j].item()}:{p_topk.values[j].item():.3f}" for j in range(len(p_topk.indices))])
+
+            # Top-3 sibling candidates
+            if sibling_probs is not None:
+                s_probs = sibling_probs[i].cpu()
+                s_topk = torch.topk(s_probs, min(5, len(s_probs)))
+                s_top_str = ", ".join([f"{s_topk.indices[j].item()}:{s_topk.values[j].item():.3f}" for j in range(len(s_topk.indices))])
+            else:
+                s_top_str = "N/A"
+
+            logger.info(f"[{idx}] '{text}' -> parent={pred_p}, sibling={pred_s}")
+            logger.info(f"     parent_top5: [{p_top_str}]")
+            logger.info(f"     sibling_top5: [{s_top_str}]")
 
     # 只保留有效节点
     mask_list = mask.cpu().tolist()
