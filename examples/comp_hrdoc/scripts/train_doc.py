@@ -484,20 +484,6 @@ def convert_stage_labels_to_construct(
             raw_parents, raw_rels
         )
 
-        # [DEBUG] 打印格式 A → B 转换详情（仅第一个 batch）
-        if b == 0:
-            # relation 整数到字符串的映射
-            REL_NAMES = {0: 'connect', 1: 'contain', 2: 'equality', -100: 'padding'}
-            logger.info(f"[A→B] 格式转换详情 (doc {b}, {valid_len} nodes):")
-            logger.info(f"  关系映射: connect=0, contain=1, equality=2")
-            for i in range(min(valid_len, 20)):  # 最多打印 20 个节点
-                rp = raw_parents[i]
-                rel = raw_rels[i]
-                rel_name = REL_NAMES.get(rel, f'unknown({rel})')
-                hp = hier_parents[i]
-                hp_self = i if hp == -1 else hp  # 自指向方案
-                logger.info(f"  [{i}] A(ref_parent={rp}, rel={rel}={rel_name}) -> B(hier_parent={hp} -> {hp_self})")
-
         # 填充 parent_ids（自指向方案：root 节点 parent == self）
         for i, hp in enumerate(hier_parents):
             if i < max_lines:
@@ -764,10 +750,8 @@ def evaluate_with_stage_features(
             line_labels = compressed["categories"]
             reading_orders = compressed["reading_orders"]
             original_indices = compressed["original_indices"]  # 原始 line_id
-            # 第一个 batch 启用调试日志，检查 sibling 标签生成
-            debug_sibling = (num_batches == 0)
             sibling_labels = generate_sibling_labels_from_parents(
-                line_parent_ids, line_mask, reading_orders, debug=debug_sibling
+                line_parent_ids, line_mask, reading_orders
             )
 
             # Skip batch if no sections
@@ -816,22 +800,6 @@ def evaluate_with_stage_features(
 
             pred_parents = torch.tensor(all_pred_parents, dtype=torch.long, device=device)
             pred_siblings_batch = torch.tensor(all_pred_siblings, dtype=torch.long, device=device) if "sibling_logits" in outputs else None
-
-            # [DEBUG] 打印第一个 batch 的预测详情
-            if num_batches == 0:
-                logger.info(f"[Eval] 模型预测详情 (第一个 batch, 联合解码):")
-                for b in range(min(batch_size, 1)):  # 只打印第一个样本
-                    mask_b = line_mask[b].cpu().tolist()
-                    valid_count = sum(mask_b)
-                    logger.info(f"  Doc {b}: {valid_count} valid nodes")
-                    for i in range(min(valid_count, 20)):  # 最多 20 个节点
-                        if mask_b[i]:
-                            gt_p = line_parent_ids[b, i].item()
-                            pred_p = pred_parents[b, i].item()
-                            gt_s = sibling_labels[b, i].item() if sibling_labels is not None else -1
-                            pred_s = pred_siblings_batch[b, i].item() if pred_siblings_batch is not None else -1
-                            match = "✓" if gt_p == pred_p else "✗"
-                            logger.info(f"    [{i}] parent: pred={pred_p}, gt={gt_p} {match} | sibling: pred={pred_s}, gt={gt_s}")
 
             # Aggregate parent metrics
             has_parent = (line_parent_ids >= 0) & line_mask

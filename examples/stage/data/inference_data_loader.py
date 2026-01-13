@@ -78,12 +78,6 @@ def load_single_document(
         logger.warning(f"Unknown data format in {filepath}")
         return None
 
-    # 调试：打印第一个 item 的字段名
-    first_page_items = list(pages_data.values())[0]
-    if first_page_items:
-        print(f"[DEBUG] JSON item keys: {list(first_page_items[0].keys())}")
-        print(f"[DEBUG] First item: {first_page_items[0]}")
-
     # Process each page
     pages = []
     for page_num in sorted(pages_data.keys()):
@@ -312,16 +306,6 @@ class InferenceDataLoader:
 
         if len(all_chunks) == 0:
             return None
-
-        # 调试日志
-        total_lines = sum(len(p["line_parent_ids"]) for p in pages)
-        print(f"[DEBUG] Document '{document_name}':")
-        print(f"  pages: {len(pages)}, total_lines: {total_lines}, chunks: {len(all_chunks)}")
-        print(f"  all_parent_ids length: {len(all_parent_ids)}")
-        # 打印每页的 line_ids 范围
-        for p in pages[:3]:  # 只打印前3页
-            unique_line_ids = sorted(set(p["line_ids"]))
-            print(f"  page {p['page_number']}: line_ids range [{min(unique_line_ids)}, {max(unique_line_ids)}], count={len(unique_line_ids)}")
 
         return {
             "document_name": document_name,
