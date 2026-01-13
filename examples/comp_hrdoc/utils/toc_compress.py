@@ -183,6 +183,7 @@ def generate_sibling_labels_from_parents(
     parent_ids: torch.Tensor,     # [B, N]
     mask: torch.Tensor,           # [B, N]
     reading_orders: torch.Tensor = None,  # [B, N] reading order positions
+    debug: bool = False,          # 调试模式
 ) -> torch.Tensor:
     """
     从 parent_ids 和 reading_orders 生成 left sibling labels。
@@ -194,6 +195,7 @@ def generate_sibling_labels_from_parents(
         parent_ids: [B, N] parent index for each node (-1 for root)
         mask: [B, N] valid node mask
         reading_orders: [B, N] reading order positions (default: use indices)
+        debug: 是否输出调试日志
 
     Returns:
         sibling_labels: [B, N] index of left sibling (self-index if no left sibling)
@@ -211,16 +213,25 @@ def generate_sibling_labels_from_parents(
     for b in range(B):
         # Group nodes by parent
         parent_to_children = {}
+        root_nodes = []  # 记录被识别为 root 的节点
         for i in range(N):
             if not mask[b, i]:
                 continue
             parent_i = parent_ids[b, i].item()
             # 论文自指向方案：root 自指向，所以 parent_i == i 时是 root，跳过
             if parent_i == i:  # root (self-pointing) has no siblings
+                root_nodes.append(i)
                 continue
             if parent_i not in parent_to_children:
                 parent_to_children[parent_i] = []
             parent_to_children[parent_i].append(i)
+
+        if debug and b == 0:  # 只输出第一个样本
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[generate_sibling_labels] Sample {b}:")
+            logger.info(f"  Root nodes (self-pointing): {root_nodes}")
+            logger.info(f"  Parent->Children groups: {parent_to_children}")
 
         # For each group of siblings, sort by reading order and assign left sibling
         for parent, children in parent_to_children.items():
@@ -232,5 +243,13 @@ def generate_sibling_labels_from_parents(
                 curr_node = children_sorted[idx]
                 left_sibling = children_sorted[idx - 1]
                 sibling_labels[b, curr_node] = left_sibling
+
+            if debug and b == 0:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"  Parent {parent} -> children {children_sorted}")
+                for idx, node in enumerate(children_sorted):
+                    sib = sibling_labels[b, node].item()
+                    logger.info(f"    Node {node}: left_sibling={sib} ({'self' if sib == node else 'sibling'})")
 
     return sibling_labels

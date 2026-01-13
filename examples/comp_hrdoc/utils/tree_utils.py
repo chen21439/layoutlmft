@@ -765,6 +765,7 @@ def extract_ref_parents_and_relations(
 def resolve_ref_parents_and_relations(
     hierarchical_parents: List[int],
     left_siblings: Optional[List[int]] = None,
+    debug: bool = False,
 ) -> Tuple[List[int], List[str]]:
     """从 hierarchical_parents 和 left_siblings 解析出 ref_parent 和 relation
 
@@ -781,6 +782,7 @@ def resolve_ref_parents_and_relations(
     Args:
         hierarchical_parents: 层级父节点索引列表（格式B：顶层节点自指向）
         left_siblings: 左兄弟索引列表（格式B：无左兄弟时自指向）
+        debug: 是否输出调试日志
 
     Returns:
         ref_parents: 引用父节点索引列表（格式A：顶层节点为 -1）
@@ -810,11 +812,42 @@ def resolve_ref_parents_and_relations(
             for i in range(len(left_siblings))
         ]
 
+    if debug:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[resolve_ref_parents_and_relations] Input (Format B):")
+        logger.info(f"  hierarchical_parents: {hierarchical_parents[:20]}...")
+        logger.info(f"  left_siblings: {left_siblings[:20] if left_siblings else None}...")
+        logger.info(f"  hp_converted (self->-1): {hp_converted[:20]}...")
+        logger.info(f"  ls_converted (self->-1): {ls_converted[:20] if ls_converted else None}...")
+
     # 1. 构建树（使用转换后的值）
     root, nodes = build_tree_from_hierarchical_parents(hp_converted)
 
     # 2. 提取 ref_parent 和 relation（使用转换后的值）
-    return extract_ref_parents_and_relations(nodes, ls_converted)
+    ref_parents, relations = extract_ref_parents_and_relations(nodes, ls_converted)
+
+    if debug:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[resolve_ref_parents_and_relations] Output (Format A):")
+        logger.info(f"  ref_parents: {ref_parents[:20]}...")
+        logger.info(f"  relations: {relations[:20]}...")
+        # 统计 relation 分布
+        from collections import Counter
+        rel_counts = Counter(relations)
+        logger.info(f"  relation distribution: {dict(rel_counts)}")
+        # 找出 equality 变 contain 的情况
+        if left_siblings:
+            for i in range(min(n, 20)):
+                has_sib = left_siblings[i] != i
+                rel = relations[i]
+                if has_sib and rel == 'contain':
+                    logger.warning(f"  [BUG?] Node {i}: has left_sibling={left_siblings[i]} but relation=contain!")
+                elif not has_sib and rel == 'equality':
+                    logger.warning(f"  [BUG?] Node {i}: no left_sibling but relation=equality!")
+
+    return ref_parents, relations
 
 
 def flatten_full_tree_to_format_a(
@@ -1074,6 +1107,7 @@ __all__ = [
 def tree_insertion_decode(
     parent_logits: 'torch.Tensor',
     sibling_logits: 'torch.Tensor',
+    debug: bool = False,
 ) -> Tuple[List[int], List[int]]:
     """论文 Algorithm 1: Tree Insertion Algorithm
 
@@ -1083,6 +1117,7 @@ def tree_insertion_decode(
         parent_logits: [N, N] 父节点概率矩阵，parent_logits[i, j] 表示节点 i 选择 j 为父节点的 logit
         sibling_logits: [N, N] 左兄弟概率矩阵，sibling_logits[i, j] 表示节点 i 选择 j 为左兄弟的 logit
                         自指向（sibling_logits[i, i]）表示无左兄弟
+        debug: 是否输出调试日志
 
     Returns:
         hierarchical_parents: 层级父节点列表，自指向表示 ROOT
@@ -1204,5 +1239,17 @@ def tree_insertion_decode(
 
         # 更新树结构
         children[best_parent].append(i)
+
+    if debug:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[tree_insertion_decode] n={n}")
+        logger.info(f"  hierarchical_parents: {hierarchical_parents[:20]}...")
+        logger.info(f"  left_siblings: {left_siblings[:20]}...")
+        # 统计
+        root_count = sum(1 for i, p in enumerate(hierarchical_parents) if p == i)
+        has_sibling_count = sum(1 for i, s in enumerate(left_siblings) if s != i)
+        logger.info(f"  root_count (self-pointing parent): {root_count}")
+        logger.info(f"  has_sibling_count (non-self sibling): {has_sibling_count}")
 
     return hierarchical_parents, left_siblings

@@ -609,12 +609,15 @@ class InferenceService:
         parent_preds, sibling_preds = tree_insertion_decode(
             outputs["parent_logits"][0],  # [S, S]
             outputs["sibling_logits"][0],  # [S, S]
+            debug=True,  # 启用调试日志
         )
 
         # 反向转换: 格式B → 格式A
         # 格式B: hierarchical_parent + sibling (自指向方案)
         # 格式A: ref_parent + relation (顶层节点 parent=-1)
-        ref_parents, relations = resolve_ref_parents_and_relations(parent_preds, sibling_preds)
+        ref_parents, relations = resolve_ref_parents_and_relations(
+            parent_preds, sibling_preds, debug=True  # 启用调试日志
+        )
 
         # [DEBUG] 打印每个节点的 B→A 转换详情
         logger.info(f"[Construct] Format B→A 转换详情 ({num_sections} sections):")

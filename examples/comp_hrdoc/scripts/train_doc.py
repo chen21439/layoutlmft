@@ -764,7 +764,11 @@ def evaluate_with_stage_features(
             line_labels = compressed["categories"]
             reading_orders = compressed["reading_orders"]
             original_indices = compressed["original_indices"]  # 原始 line_id
-            sibling_labels = generate_sibling_labels_from_parents(line_parent_ids, line_mask, reading_orders)
+            # 第一个 batch 启用调试日志，检查 sibling 标签生成
+            debug_sibling = (num_batches == 0)
+            sibling_labels = generate_sibling_labels_from_parents(
+                line_parent_ids, line_mask, reading_orders, debug=debug_sibling
+            )
 
             # Skip batch if no sections
             if line_mask.sum() == 0:
