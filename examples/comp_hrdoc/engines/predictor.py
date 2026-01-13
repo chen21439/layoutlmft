@@ -27,6 +27,7 @@ def decode_construct_outputs(
     mask: Tensor,
     debug: bool = False,
     texts: Optional[List[str]] = None,
+    section_line_ids: Optional[List[int]] = None,
 ) -> Tuple[List[int], List[int]]:
     """解码 Construct 模型输出（论文 Algorithm 1: Tree Insertion Algorithm）
 
@@ -37,6 +38,7 @@ def decode_construct_outputs(
         mask: [N] 有效区域掩码
         debug: 是否打印调试信息
         texts: 节点文本（用于调试输出）
+        section_line_ids: 可选的 section line_id 列表，用于日志输出时将 section_index 转换为 line_id
 
     Returns:
         pred_parents: 预测的层级父节点（格式B，自指向方案）
@@ -48,7 +50,9 @@ def decode_construct_outputs(
 
     # 联合解码
     if sibling_logits is not None:
-        pred_parents, pred_siblings = tree_insertion_decode(parent_logits, sibling_logits, debug=debug)
+        pred_parents, pred_siblings = tree_insertion_decode(
+            parent_logits, sibling_logits, debug=debug, section_line_ids=section_line_ids
+        )
     else:
         # 无 sibling_logits 时退化为 argmax
         pred_parents = parent_logits.argmax(dim=-1).cpu().tolist()

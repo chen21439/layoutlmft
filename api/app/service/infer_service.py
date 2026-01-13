@@ -610,6 +610,7 @@ class InferenceService:
             outputs["parent_logits"][0],  # [S, S]
             outputs["sibling_logits"][0],  # [S, S]
             debug=True,  # 启用调试日志
+            section_line_ids=section_line_ids,  # 用于日志输出显示 line_id
         )
 
         # 反向转换: 格式B → 格式A

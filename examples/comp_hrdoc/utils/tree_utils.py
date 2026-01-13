@@ -86,6 +86,116 @@ RELATION_STR_TO_INT = RELATION_LABELS
 RELATION_INT_TO_STR = ID2RELATION
 
 
+class SectionIndexMapper:
+    """Section 索引映射器
+
+    用于 section_index（模型内部连续索引）与 line_id（原始数据标识符）之间的转换。
+
+    背景说明：
+        - Construct 模型只对 section 类型的节点进行 TOC 预测
+        - 模型内部使用连续的 section_index (0, 1, 2, ...) 作为矩阵索引
+        - 原始数据使用 line_id，可能不连续（如 0, 1, 3, 5, ...）
+        - 本类提供双向映射，便于日志输出和调试
+
+    示例：
+        原始数据（全量节点）:
+            line_id=0, class=section
+            line_id=1, class=section
+            line_id=2, class=table    ← 不是 section，被过滤
+            line_id=3, class=section
+
+        映射关系:
+            section_index=0 ↔ line_id=0
+            section_index=1 ↔ line_id=1
+            section_index=2 ↔ line_id=3  ← 注意跳过了 line_id=2
+
+    Usage:
+        mapper = SectionIndexMapper(section_line_ids=[0, 1, 3, 5])
+
+        # section_index → line_id
+        line_id = mapper.to_line_id(section_index=2)  # returns 3
+
+        # line_id → section_index
+        sec_idx = mapper.to_section_index(line_id=3)  # returns 2
+
+        # 格式化分数日志
+        log = mapper.format_score_log(i=1, j=0, score=0.85, score_type="sibling")
+        # "sibling_scores[line_id=1, line_id=0] = 0.85"
+    """
+
+    def __init__(self, section_line_ids: List[int]):
+        """
+        Args:
+            section_line_ids: section 节点的 line_id 列表，按阅读顺序排列
+                             索引位置就是 section_index
+        """
+        self.section_line_ids = section_line_ids
+        self._line_id_to_idx = {lid: idx for idx, lid in enumerate(section_line_ids)}
+
+    def __len__(self) -> int:
+        return len(self.section_line_ids)
+
+    def to_line_id(self, section_index: int) -> int:
+        """section_index → line_id"""
+        if section_index < 0 or section_index >= len(self.section_line_ids):
+            return -1
+        return self.section_line_ids[section_index]
+
+    def to_section_index(self, line_id: int) -> int:
+        """line_id → section_index，不存在返回 -1"""
+        return self._line_id_to_idx.get(line_id, -1)
+
+    def format_score(
+        self,
+        i: int,
+        j: int,
+        score: float,
+        score_type: str = "score",
+    ) -> str:
+        """格式化分数日志，使用 line_id 表示
+
+        Args:
+            i: 第一个 section_index
+            j: 第二个 section_index
+            score: 分数值
+            score_type: 分数类型 ("parent", "sibling", "joint")
+
+        Returns:
+            格式化的字符串，如 "sibling[line_id=3, line_id=1] = 0.85"
+        """
+        lid_i = self.to_line_id(i)
+        lid_j = self.to_line_id(j)
+        return f"{score_type}[line_id={lid_i}, line_id={lid_j}] = {score:.4f}"
+
+    def format_node(self, section_index: int) -> str:
+        """格式化节点表示
+
+        Args:
+            section_index: section 索引
+
+        Returns:
+            格式化的字符串，如 "idx=2 (line_id=3)"
+        """
+        line_id = self.to_line_id(section_index)
+        return f"idx={section_index} (line_id={line_id})"
+
+    def format_mapping_table(self, max_rows: int = 20) -> str:
+        """生成映射表字符串，用于日志输出
+
+        Args:
+            max_rows: 最多显示的行数
+
+        Returns:
+            映射表字符串
+        """
+        lines = ["Section 索引映射表:"]
+        for idx, lid in enumerate(self.section_line_ids[:max_rows]):
+            lines.append(f"  section_index={idx} ↔ line_id={lid}")
+        if len(self.section_line_ids) > max_rows:
+            lines.append(f"  ... (共 {len(self.section_line_ids)} 个)")
+        return "\n".join(lines)
+
+
 class Node:
     """文档树节点
 
@@ -1067,6 +1177,7 @@ def visualize_toc(
 
 __all__ = [
     'Node',
+    'SectionIndexMapper',
     'RELATION_STR_TO_INT',
     'RELATION_INT_TO_STR',
     'normalize_relation',
@@ -1108,20 +1219,39 @@ def tree_insertion_decode(
     parent_logits: 'torch.Tensor',
     sibling_logits: 'torch.Tensor',
     debug: bool = False,
+    section_line_ids: Optional[List[int]] = None,
 ) -> Tuple[List[int], List[int]]:
     """论文 Algorithm 1: Tree Insertion Algorithm
 
     通过联合解码 parent 和 sibling 概率来构建树，保证 sibling 约束。
+
+    索引说明（重要）:
+        本函数内部使用的索引是 **section_index**（0-based 连续索引），不是 line_id。
+        - section_index: 模型内部使用，矩阵索引，连续的 0, 1, 2, ...
+        - line_id: 原始数据标识符，可能不连续，如 0, 1, 3, 5, ...
+
+        示例：假设只有 4 个 section 参与预测
+            section_index   line_id   text
+            [0]             0         "标题"
+            [1]             1         "第一章"
+            [2]             3         "第二章"    ← line_id=3, 但 section_index=2
+            [3]             5         "第三章"
+
+        sibling_logits[i, j] 中 i, j 都是 section_index：
+            - sibling_logits[2, 1] 表示 section[2](line_id=3) 选择 section[1](line_id=1) 为左兄弟
+            - 不是 sibling_logits[3, 1]，因为 3 是 line_id 不是 section_index
 
     Args:
         parent_logits: [N, N] 父节点概率矩阵，parent_logits[i, j] 表示节点 i 选择 j 为父节点的 logit
         sibling_logits: [N, N] 左兄弟概率矩阵，sibling_logits[i, j] 表示节点 i 选择 j 为左兄弟的 logit
                         自指向（sibling_logits[i, i]）表示无左兄弟
         debug: 是否输出调试日志
+        section_line_ids: 可选的 section line_id 列表，用于日志输出时将 section_index 转换为 line_id
+                          如果提供，日志将显示 line_id 而非 section_index
 
     Returns:
-        hierarchical_parents: 层级父节点列表，自指向表示 ROOT
-        left_siblings: 左兄弟列表，自指向表示无左兄弟
+        hierarchical_parents: 层级父节点列表（section_index 空间），自指向表示 ROOT
+        left_siblings: 左兄弟列表（section_index 空间），自指向表示无左兄弟
 
     Note:
         输入节点按阅读顺序排列（索引 0, 1, 2, ... 就是阅读顺序）
@@ -1154,8 +1284,8 @@ def tree_insertion_decode(
         children[i] = []
 
     def get_rightmost_path(node_idx: int) -> List[int]:
-        """获取从 node_idx 开始的最右路径上的所有节点"""
-        path = [node_idx]
+        """获取从 node_idx 的子节点开始的最右路径（不含 node_idx 本身）"""
+        path = []
         current = node_idx
         while children[current]:
             current = children[current][-1]  # 最右子节点
@@ -1262,6 +1392,14 @@ def tree_insertion_decode(
     if debug:
         import logging
         logger = logging.getLogger(__name__)
+
+        # 创建索引映射器（如果提供了 section_line_ids）
+        mapper = None
+        if section_line_ids is not None:
+            mapper = SectionIndexMapper(section_line_ids)
+            logger.info(f"[tree_insertion_decode] 索引映射:")
+            logger.info(mapper.format_mapping_table(max_rows=10))
+
         logger.info(f"[tree_insertion_decode] n={n}")
         logger.info(f"  hierarchical_parents: {hierarchical_parents[:20]}...")
         logger.info(f"  left_siblings: {left_siblings[:20]}...")
@@ -1279,12 +1417,29 @@ def tree_insertion_decode(
                 candidates = tree_insertion_decode._debug_candidates[node_i]
                 final_parent = hierarchical_parents[node_i]
                 final_sibling = left_siblings[node_i]
-                # 找出被选中的候选
-                logger.info(f"  Node {node_i}: final_parent={final_parent}, final_sibling={final_sibling}")
+
+                # 格式化节点显示（使用 line_id 如果有映射）
+                if mapper:
+                    node_lid = mapper.to_line_id(node_i)
+                    parent_lid = mapper.to_line_id(final_parent) if final_parent != node_i else "ROOT"
+                    sibling_lid = mapper.to_line_id(final_sibling) if final_sibling != node_i else "无"
+                    logger.info(f"  Node line_id={node_lid}: parent_line_id={parent_lid}, sibling_line_id={sibling_lid}")
+                else:
+                    logger.info(f"  Node {node_i}: final_parent={final_parent}, final_sibling={final_sibling}")
+
                 for c in candidates:
-                    p_disp = c['parent'] if c['parent'] != -1 else 'ROOT'
+                    # 格式化候选显示
+                    if mapper:
+                        p_lid = mapper.to_line_id(c['parent']) if c['parent'] != -1 else "ROOT"
+                        sib_lid = mapper.to_line_id(c['left_sib']) if c['left_sib'] != node_i else "无"
+                        p_display = f"line_id={p_lid}"
+                        sib_display = f"line_id={sib_lid}"
+                    else:
+                        p_display = str(c['parent']) if c['parent'] != -1 else 'ROOT'
+                        sib_display = str(c['left_sib'])
+
                     selected = "✓" if (c['parent'] == final_parent or (c['parent'] == -1 and final_parent == node_i)) else ""
-                    logger.info(f"    候选 parent={p_disp}, sib={c['left_sib']}: "
+                    logger.info(f"    候选 parent={p_display}, sib={sib_display}: "
                                f"p={c['p_score']:.4f}, s={c['s_score']:.4f}, joint={c['joint']:.6f} {selected}")
             # 清理
             del tree_insertion_decode._debug_candidates
