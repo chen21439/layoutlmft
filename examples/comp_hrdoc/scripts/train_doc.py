@@ -1250,14 +1250,19 @@ def main():
         if model_bin.exists():
             logger.info(f"Loading model weights from {model_bin}")
             state_dict = torch.load(model_bin, map_location="cpu")
-            model.load_state_dict(state_dict)
+            # 过滤掉 RoPE 缓存 buffer（会在 forward 时重建）
+            state_dict = {k: v for k, v in state_dict.items()
+                          if 'cos_cached' not in k and 'sin_cached' not in k}
+            model.load_state_dict(state_dict, strict=False)
         else:
             # 兼容旧格式
             construct_pt = ckpt_path / "construct_model.pt"
             if construct_pt.exists():
                 logger.info(f"Loading construct_module weights from {construct_pt}")
                 state_dict = torch.load(construct_pt, map_location="cpu")
-                model.construct_module.load_state_dict(state_dict)
+                state_dict = {k: v for k, v in state_dict.items()
+                              if 'cos_cached' not in k and 'sin_cached' not in k}
+                model.construct_module.load_state_dict(state_dict, strict=False)
             else:
                 raise FileNotFoundError(f"No model found at {args.model_name_or_path}")
 
