@@ -795,17 +795,31 @@ def evaluate_with_stage_features(
         total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
         total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
 
-        # Compute metrics
+        # Compute metrics - 使用联合解码（与推理一致）
         if line_parent_ids is not None:
             batch_size = line_parent_ids.shape[0]
 
-            # 使用 argmax 解码（训练时的快速评估）
-            pred_parents = outputs["parent_logits"].argmax(dim=-1)
-            pred_siblings_batch = outputs["sibling_logits"].argmax(dim=-1) if "sibling_logits" in outputs else None
+            # 联合解码 (tree_insertion_decode) - 与推理保持一致
+            all_pred_parents = []
+            all_pred_siblings = []
+            for b in range(batch_size):
+                if "sibling_logits" in outputs:
+                    parents_b, siblings_b = tree_insertion_decode(
+                        outputs["parent_logits"][b],
+                        outputs["sibling_logits"][b],
+                    )
+                else:
+                    parents_b = outputs["parent_logits"][b].argmax(dim=-1).cpu().tolist()
+                    siblings_b = list(range(len(parents_b)))
+                all_pred_parents.append(parents_b)
+                all_pred_siblings.append(siblings_b)
+
+            pred_parents = torch.tensor(all_pred_parents, dtype=torch.long, device=device)
+            pred_siblings_batch = torch.tensor(all_pred_siblings, dtype=torch.long, device=device) if "sibling_logits" in outputs else None
 
             # [DEBUG] 打印第一个 batch 的预测详情
             if num_batches == 0:
-                logger.info(f"[Eval] 模型预测详情 (第一个 batch):")
+                logger.info(f"[Eval] 模型预测详情 (第一个 batch, 联合解码):")
                 for b in range(min(batch_size, 1)):  # 只打印第一个样本
                     mask_b = line_mask[b].cpu().tolist()
                     valid_count = sum(mask_b)
