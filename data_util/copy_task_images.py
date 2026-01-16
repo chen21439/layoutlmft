@@ -43,6 +43,32 @@ TRAIN_DOC_IDS_FILES = [
 ]
 
 
+def convert_location_to_box(item: dict) -> dict:
+    """
+    将 location 格式转换为 page + box 格式
+
+    输入格式:
+        location: [{page, l, t, r, b, coord_origin}]
+
+    输出格式:
+        page: "0" (字符串)
+        box: [l, t, r, b] (整数数组)
+    """
+    result = {k: v for k, v in item.items() if k != "location"}
+
+    if "location" in item and item["location"]:
+        loc = item["location"][0]
+        result["page"] = str(loc.get("page", 0))
+        result["box"] = [
+            int(loc.get("l", 0)),
+            int(loc.get("t", 0)),
+            int(loc.get("r", 0)),
+            int(loc.get("b", 0)),
+        ]
+
+    return result
+
+
 def get_max_image_number(image_dir: Path) -> int:
     """获取目录中最大的图片编号"""
     max_num = -1
@@ -157,10 +183,12 @@ def process_task(task_id: str) -> dict:
             TRAIN_DIR.mkdir(parents=True, exist_ok=True)
             with open(construct_src, "r", encoding="utf-8") as f:
                 construct_data = json.load(f)
-            prediction = construct_data.get("predictions", [])
+            predictions = construct_data.get("predictions", [])
+            # 转换 location 格式为 page + box 格式
+            converted = [convert_location_to_box(item) for item in predictions]
             construct_dst = TRAIN_DIR / f"{filename}.json"
             with open(construct_dst, "w", encoding="utf-8") as f:
-                json.dump(prediction, f, ensure_ascii=False, indent=2)
+                json.dump(converted, f, ensure_ascii=False, indent=2)
             result["step4_copied"] = True
 
         # ========== Step 5: 添加 filename 到 train_doc_ids.json ==========
