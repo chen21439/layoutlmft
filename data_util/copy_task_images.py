@@ -157,7 +157,7 @@ def process_task(task_id: str) -> dict:
             TRAIN_DIR.mkdir(parents=True, exist_ok=True)
             with open(construct_src, "r", encoding="utf-8") as f:
                 construct_data = json.load(f)
-            prediction = construct_data.get("prediction", [])
+            prediction = construct_data.get("predictions", [])
             construct_dst = TRAIN_DIR / f"{filename}.json"
             with open(construct_dst, "w", encoding="utf-8") as f:
                 json.dump(prediction, f, ensure_ascii=False, indent=2)
