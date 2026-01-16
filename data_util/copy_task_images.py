@@ -5,7 +5,7 @@
   1. 复制 static/{taskId}/images/{filename}/ → layoutlmft/images/{filename}/
   2. 追加 src/48-83.png（重命名）→ static/{taskId}/images/{filename}/
   3. 追加 src/48-83.png（重命名）→ layoutlmft/images/{filename}/
-  4. 提取 static/{taskId}/_construct.json 的 prediction 字段 → layoutlmft/train/{filename}.json
+  4. 提取 static/{taskId}/{filename}_construct.json 的 prediction 字段 → layoutlmft/train/{filename}.json
   5. 将 filename 添加到 train_doc_ids.json 数组中（如果不存在）
 
 用法:
@@ -151,8 +151,8 @@ def process_task(task_id: str) -> dict:
         if max_num_layoutlmft >= 0:
             result["step3_count"] = append_chapter4_images(layoutlmft_target, max_num_layoutlmft)
 
-        # ========== Step 4: 提取 _construct.json 的 prediction 字段到 train 目录 ==========
-        construct_src = SOURCE_BASE / task_id / "_construct.json"
+        # ========== Step 4: 提取 {filename}_construct.json 的 prediction 字段到 train 目录 ==========
+        construct_src = SOURCE_BASE / task_id / f"{filename}_construct.json"
         if construct_src.exists():
             TRAIN_DIR.mkdir(parents=True, exist_ok=True)
             with open(construct_src, "r", encoding="utf-8") as f:
