@@ -1444,4 +1444,43 @@ def tree_insertion_decode(
             # 清理
             del tree_insertion_decode._debug_candidates
 
+        # 打印指定 line_id 的完整 parent/sibling 预测矩阵
+        debug_line_ids = [1193, 1551]
+        if mapper:
+            import numpy as np
+            for target_lid in debug_line_ids:
+                try:
+                    target_idx = mapper.to_section_index(target_lid)
+                except (ValueError, KeyError):
+                    continue  # 该 line_id 不在当前 section 列表中
+
+                logger.info("")
+                logger.info(f"=" * 60)
+                logger.info(f"[DEBUG] line_id={target_lid} (section_idx={target_idx}) 的完整预测矩阵")
+                logger.info(f"=" * 60)
+
+                # 获取该节点的 parent 和 sibling 概率行
+                p_row = parent_scores[target_idx]  # [N]
+                s_row = sibling_scores[target_idx]  # [N]
+
+                # 打印 parent 预测 (按概率排序)
+                p_sorted_idxs = np.argsort(p_row)[::-1]  # 降序
+                logger.info(f"\n--- Parent 预测 (Top-15) ---")
+                logger.info(f"最终选择: parent={hierarchical_parents[target_idx]} (line_id={mapper.to_line_id(hierarchical_parents[target_idx]) if hierarchical_parents[target_idx] != target_idx else 'ROOT'})")
+                for rank, idx in enumerate(p_sorted_idxs[:15]):
+                    lid = mapper.to_line_id(idx)
+                    is_self = "(self->ROOT)" if idx == target_idx else ""
+                    is_selected = "✓" if idx == hierarchical_parents[target_idx] else ""
+                    logger.info(f"  #{rank+1:2d}: section_idx={idx:2d}, line_id={lid:4d}, prob={p_row[idx]:.4f} {is_self} {is_selected}")
+
+                # 打印 sibling 预测 (按概率排序)
+                s_sorted_idxs = np.argsort(s_row)[::-1]
+                logger.info(f"\n--- Sibling 预测 (Top-15) ---")
+                logger.info(f"最终选择: sibling={left_siblings[target_idx]} (line_id={mapper.to_line_id(left_siblings[target_idx]) if left_siblings[target_idx] != target_idx else '无'})")
+                for rank, idx in enumerate(s_sorted_idxs[:15]):
+                    lid = mapper.to_line_id(idx)
+                    is_self = "(self->无左兄弟)" if idx == target_idx else ""
+                    is_selected = "✓" if idx == left_siblings[target_idx] else ""
+                    logger.info(f"  #{rank+1:2d}: section_idx={idx:2d}, line_id={lid:4d}, prob={s_row[idx]:.4f} {is_self} {is_selected}")
+
     return hierarchical_parents, left_siblings
