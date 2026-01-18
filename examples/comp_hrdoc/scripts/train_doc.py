@@ -1013,6 +1013,9 @@ def train_epoch_with_stage1(
         image = batch.get("image")
         if image is not None and isinstance(image, torch.Tensor):
             image = image.to(device)
+        else:
+            # Collator 返回 list 时暂不支持，设为 None（不使用视觉特征）
+            image = None
 
         # Get line labels for classification
         line_labels = batch.get("line_labels")
@@ -1135,6 +1138,9 @@ def evaluate_with_stage1(
         image = batch.get("image")
         if image is not None and isinstance(image, torch.Tensor):
             image = image.to(device)
+        else:
+            # Collator 返回 list 时暂不支持，设为 None（不使用视觉特征）
+            image = None
 
         # Get line labels for classification
         line_labels = batch.get("line_labels")
