@@ -1010,12 +1010,8 @@ def train_epoch_with_stage1(
         if line_ids is not None:
             line_ids = line_ids.to(device)
 
+        # image 可以是 Tensor 或 list，模型内部会处理 list 的转换
         image = batch.get("image")
-        if image is not None and isinstance(image, torch.Tensor):
-            image = image.to(device)
-        else:
-            # Collator 返回 list 时暂不支持，设为 None（不使用视觉特征）
-            image = None
 
         # Get line labels for classification
         line_labels = batch.get("line_labels")
@@ -1135,12 +1131,8 @@ def evaluate_with_stage1(
         if line_ids is not None:
             line_ids = line_ids.to(device)
 
+        # image 可以是 Tensor 或 list，模型内部会处理 list 的转换
         image = batch.get("image")
-        if image is not None and isinstance(image, torch.Tensor):
-            image = image.to(device)
-        else:
-            # Collator 返回 list 时暂不支持，设为 None（不使用视觉特征）
-            image = None
 
         # Get line labels for classification
         line_labels = batch.get("line_labels")

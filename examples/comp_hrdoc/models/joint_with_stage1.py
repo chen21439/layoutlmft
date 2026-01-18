@@ -262,7 +262,7 @@ class JointModelWithStage1(nn.Module):
             bbox: [batch, seq_len, 4]
             attention_mask: [batch, seq_len]
             line_ids: [batch, seq_len] 每个 token 所属的 line_id
-            image: [batch, 3, H, W] 可选
+            image: [batch, 3, H, W] or List[Tensor] 可选
             line_labels: [batch, max_lines] 行级别标签
             parent_labels: [batch, max_sections] Section 的 parent 标签
             sibling_labels: [batch, max_sections] Section 的 sibling 标签
@@ -282,6 +282,14 @@ class JointModelWithStage1(nn.Module):
         device = input_ids.device
         batch_size = input_ids.shape[0]
         outputs = {}
+
+        # ========== Step 0: 处理 image list（复用 stage/models/joint_model.py 逻辑） ==========
+        if isinstance(image, list) and image:
+            # Collator 返回的 image 是 list，需要转换为 tensor
+            image = torch.stack([
+                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                for img in image
+            ]).to(device)
 
         # ========== Step 1: Backbone ==========
         backbone_outputs = self.backbone(
