@@ -299,7 +299,12 @@ class JointModelWithStage1(nn.Module):
             image=image,
             output_hidden_states=True,
         )
-        hidden_states = backbone_outputs.hidden_states[-1]  # [B, seq_len, H]
+        hidden_states = backbone_outputs.hidden_states[-1]  # [B, seq_len+visual_len, H]
+
+        # 截取文本部分的 hidden states（排除视觉 tokens）
+        # 复用 stage/models/joint_model.py 的处理逻辑
+        text_seq_len = input_ids.shape[1]
+        hidden_states = hidden_states[:, :text_seq_len, :]  # [B, seq_len, H]
 
         # ========== Step 2: LinePooling ==========
         # 逐样本处理（因为每个样本的行数可能不同）
