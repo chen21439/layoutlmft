@@ -176,15 +176,23 @@ class JointModelWithStage1(nn.Module):
         # 检测格式并加载
         # TODO: 模型格式统一后删除旧格式分支
         has_construct_prefix = any(k.startswith('construct.') for k in state_dict.keys())
+        has_construct_module_prefix = any(k.startswith('construct_module.') for k in state_dict.keys())
 
         if has_construct_prefix:
-            # 新格式：直接加载到整个模型
+            # 新格式 (JointModelWithStage1)：直接加载到整个模型
             missing, unexpected = self.load_state_dict(state_dict, strict=False)
             print(f"[JointModelWithStage1] Loaded new format checkpoint")
+        elif has_construct_module_prefix:
+            # 旧格式 (ConstructFromFeatures)：去掉 construct_module. 前缀
+            mapped = {k.replace('construct_module.', ''): v
+                      for k, v in state_dict.items()
+                      if k.startswith('construct_module.')}
+            missing, unexpected = self.construct.load_state_dict(mapped, strict=False)
+            print(f"[JointModelWithStage1] Loaded old format checkpoint (ConstructFromFeatures, mapped construct_module.*)")
         else:
-            # 旧格式：加载到 construct 子模块
+            # 直接格式：key 已经是 transformer.xxx
             missing, unexpected = self.construct.load_state_dict(state_dict, strict=False)
-            print(f"[JointModelWithStage1] Loaded old format checkpoint (ConstructFromFeatures)")
+            print(f"[JointModelWithStage1] Loaded old format checkpoint (direct)")
 
         if missing:
             print(f"  Missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")

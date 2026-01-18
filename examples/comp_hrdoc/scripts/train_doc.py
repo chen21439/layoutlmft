@@ -1011,7 +1011,7 @@ def train_epoch_with_stage1(
             line_ids = line_ids.to(device)
 
         image = batch.get("image")
-        if image is not None:
+        if image is not None and isinstance(image, torch.Tensor):
             image = image.to(device)
 
         # Get line labels for classification
@@ -1133,7 +1133,7 @@ def evaluate_with_stage1(
             line_ids = line_ids.to(device)
 
         image = batch.get("image")
-        if image is not None:
+        if image is not None and isinstance(image, torch.Tensor):
             image = image.to(device)
 
         # Get line labels for classification
