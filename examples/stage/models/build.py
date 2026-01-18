@@ -69,6 +69,39 @@ def build_joint_model(
     )
 
 
+def resolve_stage1_paths(checkpoint_path: str) -> Tuple[str, str]:
+    """解析 stage checkpoint 路径，返回 stage1 模型路径和 tokenizer 路径
+
+    支持两种格式：
+    1. stage checkpoint: checkpoint_path/stage1/ 子目录包含 config.json
+    2. 原始 LayoutXLM: checkpoint_path 直接包含 config.json
+
+    Args:
+        checkpoint_path: checkpoint 目录路径
+
+    Returns:
+        (stage1_path, tokenizer_path) 元组
+    """
+    stage1_subdir = os.path.join(checkpoint_path, "stage1")
+
+    # 检查 stage1 子目录
+    if os.path.exists(os.path.join(stage1_subdir, "config.json")):
+        stage1_path = stage1_subdir
+        # tokenizer 优先从根目录加载
+        if os.path.exists(os.path.join(checkpoint_path, "tokenizer.json")):
+            tokenizer_path = checkpoint_path
+        else:
+            tokenizer_path = stage1_subdir
+        logger.info(f"Resolved stage1 path: {stage1_path} (stage checkpoint format)")
+    else:
+        # 原始 LayoutXLM 格式
+        stage1_path = checkpoint_path
+        tokenizer_path = checkpoint_path
+        logger.info(f"Resolved stage1 path: {stage1_path} (original format)")
+
+    return stage1_path, tokenizer_path
+
+
 def load_joint_model(
     model_path: str,
     device: torch.device = None,

@@ -479,6 +479,11 @@ def build_joint_model_with_stage1(
     Returns:
         (model, tokenizer)
     """
+    # 复用 stage/models/build.py 的路径解析逻辑
+    from examples.stage.models.build import resolve_stage1_paths
+
+    stage1_path, tokenizer_path = resolve_stage1_paths(layoutxlm_path)
+
     from layoutlmft.models.layoutxlm import (
         LayoutXLMForTokenClassification,
         LayoutXLMConfig,
@@ -486,16 +491,11 @@ def build_joint_model_with_stage1(
     )
 
     # 加载 LayoutXLM
-    config = LayoutXLMConfig.from_pretrained(layoutxlm_path)
+    config = LayoutXLMConfig.from_pretrained(stage1_path)
     config.num_labels = num_classes
 
-    backbone = LayoutXLMForTokenClassification.from_pretrained(
-        layoutxlm_path,
-        config=config,
-    )
-
-    # 加载 tokenizer
-    tokenizer = LayoutXLMTokenizerFast.from_pretrained(layoutxlm_path)
+    backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
+    tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
 
     # 创建联合模型
     model = JointModelWithStage1(
