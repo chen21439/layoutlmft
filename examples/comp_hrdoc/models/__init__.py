@@ -90,6 +90,11 @@ from .intra_region import (
     LogicalRoleLoss,
 )
 
+from .joint_with_stage1 import (
+    JointModelWithStage1,
+    build_joint_model_with_stage1,
+)
+
 __all__ = [
     # Embeddings
     'PositionalEmbedding2D',
