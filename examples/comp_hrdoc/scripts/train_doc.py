@@ -1169,6 +1169,10 @@ def evaluate_with_stage1(
     num_batches = 0
     parent_correct = 0
     parent_total = 0
+    sibling_correct = 0
+    sibling_total = 0
+    root_correct = 0
+    root_total = 0
 
     for batch in tqdm(dataloader, desc="Evaluating (Stage1 + Construct)"):
         input_ids = batch["input_ids"].to(device)
@@ -1275,7 +1279,7 @@ def evaluate_with_stage1(
         total_loss += construct_outputs["loss"].item()
         num_batches += 1
 
-        # Parent accuracy
+        # Parent accuracy and Root accuracy
         if parent_labels is not None:
             parent_logits = construct_outputs["parent_logits"]
             parent_preds = parent_logits.argmax(dim=-1)
@@ -1287,13 +1291,34 @@ def evaluate_with_stage1(
                     parent_correct += (preds == gts).sum().item()
                     parent_total += valid_mask.sum().item()
 
+                    # Root accuracy: 预测 parent == self 的节点
+                    # 创建有效节点的索引
+                    valid_indices = torch.arange(parent_labels[b].shape[0], device=parent_labels.device)[valid_mask]
+                    root_gt_mask = (gts == valid_indices)  # ground truth 是 root 的节点
+                    root_pred_mask = (preds == valid_indices)  # 预测是 root 的节点
+                    root_correct += (root_gt_mask & root_pred_mask).sum().item()
+                    root_total += root_gt_mask.sum().item()
+
+        # Sibling accuracy
+        if sibling_labels is not None and "sibling_logits" in construct_outputs:
+            sibling_logits = construct_outputs["sibling_logits"]
+            sibling_preds = sibling_logits.argmax(dim=-1)
+            for b in range(num_docs):
+                valid_mask = region_mask[b]
+                if valid_mask.any():
+                    preds = sibling_preds[b][valid_mask]
+                    gts = sibling_labels[b][valid_mask]
+                    sibling_correct += (preds == gts).sum().item()
+                    sibling_total += valid_mask.sum().item()
+
     return {
         "loss": total_loss / max(num_batches, 1),
         "cls_loss": 0.0,
         "construct_loss": total_loss / max(num_batches, 1),
         "cls_accuracy": 0.0,
         "parent_accuracy": parent_correct / max(parent_total, 1),
-        "root_accuracy": 0.0,
+        "sibling_accuracy": sibling_correct / max(sibling_total, 1),
+        "root_accuracy": root_correct / max(root_total, 1),
     }
 
 
@@ -1579,7 +1604,6 @@ def main():
         # 1. 加载 Backbone (LayoutXLM)
         # 复用 load_joint_model 的加载逻辑：从根目录的 pytorch_model.bin 加载
         # 这样确保和 StageFeatureExtractor 用的是同样的 backbone 权重
-        import os
         stage1_path, tokenizer_path = resolve_stage1_paths(layoutxlm_path)
         config = LayoutXLMConfig.from_pretrained(stage1_path)
         config.num_labels = args.num_classes
@@ -1930,6 +1954,7 @@ def main():
             logger.info(
                 f"[Stage1] Cls Acc: {val_metrics['cls_accuracy']:.4f}, "
                 f"[Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
+                f"Sibling Acc: {val_metrics['sibling_accuracy']:.4f}, "
                 f"Root Acc: {val_metrics['root_accuracy']:.4f}"
             )
         elif args.use_stage_features:
