@@ -249,24 +249,28 @@ class JointModelWithStage1(nn.Module):
         attention_mask: torch.Tensor,
         line_ids: torch.Tensor,
         image: Optional[torch.Tensor] = None,
-        line_labels: Optional[torch.Tensor] = None,  # [batch, max_lines]
-        parent_labels: Optional[torch.Tensor] = None,  # [batch, max_sections]
-        sibling_labels: Optional[torch.Tensor] = None,  # [batch, max_sections]
-        reading_orders: Optional[torch.Tensor] = None,  # [batch, max_sections]
+        line_labels: Optional[torch.Tensor] = None,  # [num_docs, max_lines]
+        parent_labels: Optional[torch.Tensor] = None,  # [num_docs, max_sections]
+        sibling_labels: Optional[torch.Tensor] = None,  # [num_docs, max_sections]
+        reading_orders: Optional[torch.Tensor] = None,  # [num_docs, max_sections]
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[List[int]] = None,
         return_line_features: bool = False,
     ) -> Dict[str, torch.Tensor]:
-        """前向传播
+        """前向传播（复用 stage/models/joint_model.py 的文档级别处理逻辑）
 
         Args:
-            input_ids: [batch, seq_len]
-            bbox: [batch, seq_len, 4]
-            attention_mask: [batch, seq_len]
-            line_ids: [batch, seq_len] 每个 token 所属的 line_id
-            image: [batch, 3, H, W] or List[Tensor] 可选
-            line_labels: [batch, max_lines] 行级别标签
-            parent_labels: [batch, max_sections] Section 的 parent 标签
-            sibling_labels: [batch, max_sections] Section 的 sibling 标签
-            reading_orders: [batch, max_sections] Section 的阅读顺序
+            input_ids: [total_chunks, seq_len]
+            bbox: [total_chunks, seq_len, 4]
+            attention_mask: [total_chunks, seq_len]
+            line_ids: [total_chunks, seq_len] 每个 token 所属的 line_id
+            image: [total_chunks, 3, H, W] or List[Tensor] 可选
+            line_labels: [num_docs, max_lines] 行级别标签
+            parent_labels: [num_docs, max_sections] Section 的 parent 标签
+            sibling_labels: [num_docs, max_sections] Section 的 sibling 标签
+            reading_orders: [num_docs, max_sections] Section 的阅读顺序
+            num_docs: 文档数量
+            chunks_per_doc: 每个文档的 chunk 数量列表
             return_line_features: 是否返回 line features
 
         Returns:
@@ -274,18 +278,17 @@ class JointModelWithStage1(nn.Module):
                 - loss: 总损失
                 - cls_loss: 分类损失
                 - construct_loss: Construct 损失
-                - cls_logits: [batch, max_lines, num_classes]
-                - parent_logits: [batch, max_sections, max_sections]
-                - sibling_logits: [batch, max_sections, max_sections]
-                - line_features: [batch, max_lines, hidden] (如果 return_line_features=True)
+                - cls_logits: [num_docs, max_lines, num_classes]
+                - parent_logits: [num_docs, max_sections, max_sections]
+                - sibling_logits: [num_docs, max_sections, max_sections]
+                - line_features: [num_docs, max_lines, hidden] (如果 return_line_features=True)
         """
         device = input_ids.device
-        batch_size = input_ids.shape[0]
+        total_chunks = input_ids.shape[0]
         outputs = {}
 
         # ========== Step 0: 处理 image list（复用 stage/models/joint_model.py 逻辑） ==========
         if isinstance(image, list) and image:
-            # Collator 返回的 image 是 list，需要转换为 tensor
             image = torch.stack([
                 torch.tensor(img) if not isinstance(img, torch.Tensor) else img
                 for img in image
@@ -299,39 +302,59 @@ class JointModelWithStage1(nn.Module):
             image=image,
             output_hidden_states=True,
         )
-        hidden_states = backbone_outputs.hidden_states[-1]  # [B, seq_len+visual_len, H]
+        hidden_states = backbone_outputs.hidden_states[-1]  # [total_chunks, seq_len+visual_len, H]
 
         # 截取文本部分的 hidden states（排除视觉 tokens）
-        # 复用 stage/models/joint_model.py 的处理逻辑
         text_seq_len = input_ids.shape[1]
-        hidden_states = hidden_states[:, :text_seq_len, :]  # [B, seq_len, H]
+        hidden_states = hidden_states[:, :text_seq_len, :]  # [total_chunks, seq_len, H]
 
-        # ========== Step 2: LinePooling ==========
-        # 逐样本处理（因为每个样本的行数可能不同）
-        all_line_features = []
-        all_line_masks = []
+        # ========== Step 2: LinePooling（复用 stage/models/joint_model.py 文档级别逻辑） ==========
+        # 文档级别模式：每个样本是一个文档，包含多个 chunks
+        if num_docs is None or chunks_per_doc is None:
+            raise ValueError("num_docs and chunks_per_doc are required for document-level training")
+
+        doc_line_features_list = []
+        doc_line_masks_list = []
+
+        chunk_idx = 0
+        for doc_idx in range(num_docs):
+            num_chunks_in_doc = chunks_per_doc[doc_idx]
+
+            # 收集该文档所有 chunks 的 hidden states 和 line_ids
+            doc_hidden = hidden_states[chunk_idx:chunk_idx + num_chunks_in_doc]
+            doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks_in_doc]
+
+            # 使用 LinePooling 聚合
+            doc_features, doc_mask = self.line_pooling(doc_hidden, doc_line_ids)
+            doc_line_features_list.append(doc_features)
+            doc_line_masks_list.append(doc_mask)
+
+            chunk_idx += num_chunks_in_doc
+
+        # 填充到相同长度
+        max_lines = max(f.shape[0] for f in doc_line_features_list)
+        batch_line_features = torch.zeros(num_docs, max_lines, self.hidden_size, device=device)
+        batch_line_masks = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
+
+        for doc_idx, (features, mask) in enumerate(zip(doc_line_features_list, doc_line_masks_list)):
+            num_lines_in_doc = features.shape[0]
+            batch_line_features[doc_idx, :num_lines_in_doc] = features
+            batch_line_masks[doc_idx, :num_lines_in_doc] = mask
+
+        # ========== Step 3: Classification ==========
         all_cls_logits = []
         all_cls_losses = []
-        max_lines = 0
 
-        for b in range(batch_size):
-            sample_hidden = hidden_states[b:b+1]
-            sample_line_ids = line_ids[b:b+1]
+        for doc_idx in range(num_docs):
+            num_lines = int(batch_line_masks[doc_idx].sum().item())
+            doc_features = batch_line_features[doc_idx, :num_lines]
 
-            line_features, line_mask = self.line_pooling(sample_hidden, sample_line_ids)
-            num_lines = line_features.shape[0]
-            max_lines = max(max_lines, num_lines)
-
-            all_line_features.append(line_features)
-            all_line_masks.append(line_mask)
-
-            # ========== Step 3: Classification ==========
-            cls_logits = self.cls_head(line_features)
+            cls_logits = self.cls_head(doc_features)
             all_cls_logits.append(cls_logits)
 
             # 计算分类 loss
             if line_labels is not None:
-                sample_labels = line_labels[b, :num_lines]
+                sample_labels = line_labels[doc_idx, :num_lines]
                 valid_mask = sample_labels != -100
                 if valid_mask.any():
                     loss = F.cross_entropy(
@@ -341,30 +364,11 @@ class JointModelWithStage1(nn.Module):
                     )
                     all_cls_losses.append(loss)
 
-        # Padding
-        padded_line_features = []
-        padded_cls_logits = []
-        padded_line_masks = []
-
-        for b in range(batch_size):
-            lf = all_line_features[b]
-            cl = all_cls_logits[b]
-            lm = all_line_masks[b]
-            num_lines = lf.shape[0]
-
-            if num_lines < max_lines:
-                pad_size = max_lines - num_lines
-                lf = torch.cat([lf, torch.zeros(pad_size, self.hidden_size, device=device)], dim=0)
-                cl = torch.cat([cl, torch.zeros(pad_size, self.num_classes, device=device)], dim=0)
-                lm = torch.cat([lm, torch.zeros(pad_size, dtype=torch.bool, device=device)], dim=0)
-
-            padded_line_features.append(lf)
-            padded_cls_logits.append(cl)
-            padded_line_masks.append(lm)
-
-        batch_line_features = torch.stack(padded_line_features, dim=0)  # [B, max_lines, H]
-        batch_cls_logits = torch.stack(padded_cls_logits, dim=0)  # [B, max_lines, C]
-        batch_line_masks = torch.stack(padded_line_masks, dim=0)  # [B, max_lines]
+        # Padding cls_logits to [num_docs, max_lines, num_classes]
+        batch_cls_logits = torch.zeros(num_docs, max_lines, self.num_classes, device=device)
+        for doc_idx, cls_logits in enumerate(all_cls_logits):
+            num_lines = cls_logits.shape[0]
+            batch_cls_logits[doc_idx, :num_lines] = cls_logits
 
         outputs["cls_logits"] = batch_cls_logits
 
@@ -381,28 +385,30 @@ class JointModelWithStage1(nn.Module):
         # ========== Step 4: Filter Sections for Construct ==========
         # 根据预测或 GT 类别过滤 section 行
         if line_labels is not None:
-            # 训练时使用 GT 类别
-            section_mask = (line_labels == self.section_label_id)
+            # 训练时使用 GT 类别（需要 padding 到 max_lines）
+            padded_line_labels = torch.full((num_docs, max_lines), -100, dtype=torch.long, device=device)
+            for doc_idx in range(num_docs):
+                n = min(line_labels.shape[1], max_lines)
+                padded_line_labels[doc_idx, :n] = line_labels[doc_idx, :n]
+            section_mask = (padded_line_labels == self.section_label_id)
         else:
             # 推理时使用预测类别
             pred_classes = batch_cls_logits.argmax(dim=-1)
             section_mask = (pred_classes == self.section_label_id)
 
         # 提取 section features
-        # 这里简化处理：假设每个样本的 section 数量相同（用 padding）
-        # TODO: 更灵活的处理方式
         all_section_features = []
         all_section_masks = []
         max_sections = 0
 
-        for b in range(batch_size):
-            mask = section_mask[b] & batch_line_masks[b]
+        for doc_idx in range(num_docs):
+            mask = section_mask[doc_idx] & batch_line_masks[doc_idx]
             indices = mask.nonzero(as_tuple=True)[0]
             num_sections = len(indices)
             max_sections = max(max_sections, num_sections)
 
             if num_sections > 0:
-                section_feats = batch_line_features[b, indices]
+                section_feats = batch_line_features[doc_idx, indices]
             else:
                 section_feats = torch.zeros(1, self.hidden_size, device=device)
                 num_sections = 1
@@ -430,13 +436,13 @@ class JointModelWithStage1(nn.Module):
             padded_section_features.append(section_feats)
             padded_section_masks.append(mask)
 
-        batch_section_features = torch.stack(padded_section_features, dim=0)  # [B, max_S, H]
-        batch_section_masks = torch.stack(padded_section_masks, dim=0)  # [B, max_S]
+        batch_section_features = torch.stack(padded_section_features, dim=0)  # [num_docs, max_S, H]
+        batch_section_masks = torch.stack(padded_section_masks, dim=0)  # [num_docs, max_S]
 
         # ========== Step 5: Construct Module ==========
         # Reading order（如果没有提供，使用顺序索引）
         if reading_orders is None:
-            reading_orders = torch.arange(max_sections, device=device).unsqueeze(0).expand(batch_size, -1)
+            reading_orders = torch.arange(max_sections, device=device).unsqueeze(0).expand(num_docs, -1)
 
         construct_outputs = self.construct(
             features=batch_section_features,
