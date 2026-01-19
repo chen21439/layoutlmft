@@ -1579,40 +1579,26 @@ def main():
         construct_model = construct_model.to(device)
 
         # 加载 Construct 预训练权重（如果有）
+        # 复用非 train_stage1 模式的加载逻辑
         if args.model_name_or_path:
             ckpt_path = Path(args.model_name_or_path)
             model_bin = ckpt_path / "pytorch_model.bin"
             construct_pt = ckpt_path / "construct_model.pt"
             if model_bin.exists():
+                logger.info(f"Loading construct weights from {model_bin}")
                 state_dict = torch.load(model_bin, map_location="cpu")
-                # 检查 key 格式，提取 construct_module 部分
-                if any(k.startswith('construct_module.') for k in state_dict.keys()):
-                    # pytorch_model.bin 包含 construct_module.xxx 格式
-                    # 提取并加载到 construct_model.construct_module
-                    construct_state = {k.replace('construct_module.', ''): v
-                                       for k, v in state_dict.items()
-                                       if k.startswith('construct_module.')}
-                    # 过滤 RoPE 缓存
-                    construct_state = {k: v for k, v in construct_state.items()
-                                       if 'cos_cached' not in k and 'sin_cached' not in k}
-                    missing, unexpected = construct_model.construct_module.load_state_dict(
-                        construct_state, strict=False)
-                    logger.info(f"Loaded construct_module weights from {model_bin}")
-                    if missing:
-                        logger.warning(f"Missing keys: {missing[:5]}...")
-                    if unexpected:
-                        logger.warning(f"Unexpected keys: {unexpected[:5]}...")
-                else:
-                    # 直接加载到整个 construct_model
-                    construct_model.load_state_dict(state_dict, strict=False)
-                    logger.info(f"Loaded full construct weights from {model_bin}")
+                # 过滤 RoPE 缓存
+                state_dict = {k: v for k, v in state_dict.items()
+                              if 'cos_cached' not in k and 'sin_cached' not in k}
+                # 直接加载整个 state_dict（包含 type_embedding, combine, construct_module）
+                construct_model.load_state_dict(state_dict, strict=False)
             elif construct_pt.exists():
                 # construct_model.pt 存的是 construct_module 的权重
+                logger.info(f"Loading construct_module weights from {construct_pt}")
                 state_dict = torch.load(construct_pt, map_location="cpu")
                 state_dict = {k: v for k, v in state_dict.items()
                               if 'cos_cached' not in k and 'sin_cached' not in k}
                 construct_model.construct_module.load_state_dict(state_dict, strict=False)
-                logger.info(f"Loaded construct_module weights from {construct_pt}")
 
         # 冻结视觉编码器
         if args.freeze_visual:
