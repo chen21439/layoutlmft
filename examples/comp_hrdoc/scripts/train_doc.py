@@ -1577,12 +1577,41 @@ def main():
         logger.info(f"  Stage1 micro-batch size: {args.stage1_micro_batch_size}")
 
         # 1. 加载 Backbone (LayoutXLM)
+        # 复用 load_joint_model 的加载逻辑：从根目录的 pytorch_model.bin 加载
+        # 这样确保和 StageFeatureExtractor 用的是同样的 backbone 权重
+        import os
         stage1_path, tokenizer_path = resolve_stage1_paths(layoutxlm_path)
         config = LayoutXLMConfig.from_pretrained(stage1_path)
         config.num_labels = args.num_classes
         if args.gradient_checkpointing:
             config.gradient_checkpointing = True
-        backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
+
+        # 创建空模型（不加载权重）
+        backbone = LayoutXLMForTokenClassification(config=config)
+
+        # 从根目录的 pytorch_model.bin 加载权重（和 load_joint_model 一致）
+        root_model_file = os.path.join(layoutxlm_path, "pytorch_model.bin")
+        if os.path.exists(root_model_file):
+            logger.info(f"Loading backbone weights from root: {root_model_file}")
+            state_dict = torch.load(root_model_file, map_location="cpu")
+            # 提取 backbone 部分的权重（key 格式: backbone.xxx -> xxx）
+            backbone_state = {k.replace('backbone.', ''): v
+                             for k, v in state_dict.items()
+                             if k.startswith('backbone.')}
+            if backbone_state:
+                missing, unexpected = backbone.load_state_dict(backbone_state, strict=False)
+                logger.info(f"Loaded backbone from root pytorch_model.bin ({len(backbone_state)} keys)")
+                if missing:
+                    logger.warning(f"Missing keys: {missing[:3]}...")
+            else:
+                # 如果没有 backbone. 前缀，尝试直接加载
+                logger.info("No 'backbone.' prefix found, trying direct load from stage1/")
+                backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
+        else:
+            # fallback: 从 stage1/ 目录加载
+            logger.info(f"Loading backbone from stage1/: {stage1_path}")
+            backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
+
         tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
         backbone = backbone.to(device)
 
