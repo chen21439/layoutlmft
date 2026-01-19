@@ -1651,31 +1651,26 @@ def main():
         save_fn = save_doc_model
 
     # Load pretrained weights (model_name_or_path)
-    # TODO: 模型格式统一后简化此逻辑
-    if args.model_name_or_path:
+    # train_stage1 模式在上面已经加载过了，这里只处理其他模式
+    if args.model_name_or_path and not args.train_stage1:
         ckpt_path = Path(args.model_name_or_path)
-        if args.train_stage1:
-            # Stage1 联合训练：使用兼容新旧格式的加载方法
-            model.load_construct_weights(str(ckpt_path))
+        model_bin = ckpt_path / "pytorch_model.bin"
+        if model_bin.exists():
+            logger.info(f"Loading model weights from {model_bin}")
+            state_dict = torch.load(model_bin, map_location="cpu")
+            state_dict = {k: v for k, v in state_dict.items()
+                          if 'cos_cached' not in k and 'sin_cached' not in k}
+            model.load_state_dict(state_dict, strict=False)
         else:
-            # 其他模式：原有逻辑
-            model_bin = ckpt_path / "pytorch_model.bin"
-            if model_bin.exists():
-                logger.info(f"Loading model weights from {model_bin}")
-                state_dict = torch.load(model_bin, map_location="cpu")
+            construct_pt = ckpt_path / "construct_model.pt"
+            if construct_pt.exists():
+                logger.info(f"Loading construct_module weights from {construct_pt}")
+                state_dict = torch.load(construct_pt, map_location="cpu")
                 state_dict = {k: v for k, v in state_dict.items()
                               if 'cos_cached' not in k and 'sin_cached' not in k}
-                model.load_state_dict(state_dict, strict=False)
+                model.construct_module.load_state_dict(state_dict, strict=False)
             else:
-                construct_pt = ckpt_path / "construct_model.pt"
-                if construct_pt.exists():
-                    logger.info(f"Loading construct_module weights from {construct_pt}")
-                    state_dict = torch.load(construct_pt, map_location="cpu")
-                    state_dict = {k: v for k, v in state_dict.items()
-                                  if 'cos_cached' not in k and 'sin_cached' not in k}
-                    model.construct_module.load_state_dict(state_dict, strict=False)
-                else:
-                    raise FileNotFoundError(f"No model found at {args.model_name_or_path}")
+                raise FileNotFoundError(f"No model found at {args.model_name_or_path}")
 
     # Move to device (如果不是 train_stage1 模式，模型还没有 to(device))
     if not args.train_stage1:
