@@ -178,6 +178,8 @@ def parse_args():
                         help="Number of classification classes for Stage1")
     parser.add_argument("--freeze-visual", action="store_true", default=False,
                         help="Freeze visual encoder (ResNet), only train text Transformer")
+    parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
+                        help="Enable gradient checkpointing for Stage1 backbone (saves memory, slower)")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
@@ -1523,11 +1525,14 @@ def main():
         logger.info(f"  Stage1 LR: {args.stage1_lr}")
         logger.info(f"  Construct LR: {args.learning_rate}")
         logger.info(f"  Freeze visual: {args.freeze_visual}")
+        logger.info(f"  Gradient checkpointing: {args.gradient_checkpointing}")
 
         # 1. 加载 Backbone (LayoutXLM)
         stage1_path, tokenizer_path = resolve_stage1_paths(layoutxlm_path)
         config = LayoutXLMConfig.from_pretrained(stage1_path)
         config.num_labels = args.num_classes
+        if args.gradient_checkpointing:
+            config.gradient_checkpointing = True
         backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
         tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
         backbone = backbone.to(device)
