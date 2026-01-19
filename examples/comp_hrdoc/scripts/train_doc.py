@@ -1094,6 +1094,17 @@ def train_epoch_with_stage1(
         # reading_orders
         reading_orders = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1)
 
+        # 调整 parent_labels 和 sibling_labels 的维度以匹配 max_lines_actual
+        # parent_labels 原始维度是 [num_docs, max_lines]，需要截取或填充到 [num_docs, max_lines_actual]
+        if parent_labels.shape[1] != max_lines_actual:
+            new_parent_labels = torch.full((num_docs, max_lines_actual), -100, dtype=torch.long, device=device)
+            new_sibling_labels = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1).clone()
+            copy_len = min(parent_labels.shape[1], max_lines_actual)
+            new_parent_labels[:, :copy_len] = parent_labels[:, :copy_len]
+            new_sibling_labels[:, :copy_len] = sibling_labels[:, :copy_len]
+            parent_labels = new_parent_labels
+            sibling_labels = new_sibling_labels
+
         # Step 3: Construct
         construct_outputs = construct_model(
             region_features=region_features,
@@ -1241,6 +1252,16 @@ def evaluate_with_stage1(
                 categories[doc_idx, :n] = line_labels[doc_idx, :n].clamp(min=0)
 
         reading_orders = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1)
+
+        # 调整 parent_labels 和 sibling_labels 的维度以匹配 max_lines_actual
+        if parent_labels.shape[1] != max_lines_actual:
+            new_parent_labels = torch.full((num_docs, max_lines_actual), -100, dtype=torch.long, device=device)
+            new_sibling_labels = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1).clone()
+            copy_len = min(parent_labels.shape[1], max_lines_actual)
+            new_parent_labels[:, :copy_len] = parent_labels[:, :copy_len]
+            new_sibling_labels[:, :copy_len] = sibling_labels[:, :copy_len]
+            parent_labels = new_parent_labels
+            sibling_labels = new_sibling_labels
 
         construct_outputs = construct_model(
             region_features=region_features,
