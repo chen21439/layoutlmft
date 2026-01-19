@@ -180,6 +180,8 @@ def parse_args():
                         help="Freeze visual encoder (ResNet), only train text Transformer")
     parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
                         help="Enable gradient checkpointing for Stage1 backbone (saves memory, slower)")
+    parser.add_argument("--stage1-micro-batch-size", type=int, default=8,
+                        help="Micro-batch size for Stage1 backbone forward (prevents OOM on large documents)")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
@@ -1032,19 +1034,31 @@ def train_epoch_with_stage1(
         )
 
         # ========== Forward: Backbone -> LinePooling -> Construct ==========
-        # Step 1: Backbone
-        backbone_outputs = backbone(
-            input_ids=input_ids,
-            bbox=bbox,
-            attention_mask=attention_mask,
-            image=image,
-            output_hidden_states=True,
-        )
-        hidden_states = backbone_outputs.hidden_states[-1]
-
-        # 排除视觉 tokens
+        # Step 1: Backbone (micro-batch 处理，避免大文档 OOM)
+        total_chunks = input_ids.shape[0]
+        micro_bs = args.stage1_micro_batch_size
         text_seq_len = input_ids.shape[1]
-        hidden_states = hidden_states[:, :text_seq_len, :]
+
+        all_hidden = []
+        for start_idx in range(0, total_chunks, micro_bs):
+            end_idx = min(start_idx + micro_bs, total_chunks)
+            mb_input_ids = input_ids[start_idx:end_idx]
+            mb_bbox = bbox[start_idx:end_idx]
+            mb_attention_mask = attention_mask[start_idx:end_idx]
+            mb_image = image[start_idx:end_idx] if image is not None else None
+
+            mb_outputs = backbone(
+                input_ids=mb_input_ids,
+                bbox=mb_bbox,
+                attention_mask=mb_attention_mask,
+                image=mb_image,
+                output_hidden_states=True,
+            )
+            # 排除视觉 tokens，只保留文本部分
+            mb_hidden = mb_outputs.hidden_states[-1][:, :text_seq_len, :]
+            all_hidden.append(mb_hidden)
+
+        hidden_states = torch.cat(all_hidden, dim=0)
 
         # Step 2: LinePooling（按文档聚合）
         doc_features_list = []
@@ -1172,17 +1186,30 @@ def evaluate_with_stage1(
             batch, max_lines, device
         )
 
-        # Forward: Backbone -> LinePooling -> Construct
-        backbone_outputs = backbone(
-            input_ids=input_ids,
-            bbox=bbox,
-            attention_mask=attention_mask,
-            image=image,
-            output_hidden_states=True,
-        )
-        hidden_states = backbone_outputs.hidden_states[-1]
+        # Forward: Backbone -> LinePooling -> Construct (micro-batch)
+        total_chunks = input_ids.shape[0]
+        micro_bs = args.stage1_micro_batch_size
         text_seq_len = input_ids.shape[1]
-        hidden_states = hidden_states[:, :text_seq_len, :]
+
+        all_hidden = []
+        for start_idx in range(0, total_chunks, micro_bs):
+            end_idx = min(start_idx + micro_bs, total_chunks)
+            mb_input_ids = input_ids[start_idx:end_idx]
+            mb_bbox = bbox[start_idx:end_idx]
+            mb_attention_mask = attention_mask[start_idx:end_idx]
+            mb_image = image[start_idx:end_idx] if image is not None else None
+
+            mb_outputs = backbone(
+                input_ids=mb_input_ids,
+                bbox=mb_bbox,
+                attention_mask=mb_attention_mask,
+                image=mb_image,
+                output_hidden_states=True,
+            )
+            mb_hidden = mb_outputs.hidden_states[-1][:, :text_seq_len, :]
+            all_hidden.append(mb_hidden)
+
+        hidden_states = torch.cat(all_hidden, dim=0)
 
         # LinePooling
         doc_features_list = []
@@ -1526,6 +1553,7 @@ def main():
         logger.info(f"  Construct LR: {args.learning_rate}")
         logger.info(f"  Freeze visual: {args.freeze_visual}")
         logger.info(f"  Gradient checkpointing: {args.gradient_checkpointing}")
+        logger.info(f"  Stage1 micro-batch size: {args.stage1_micro_batch_size}")
 
         # 1. 加载 Backbone (LayoutXLM)
         stage1_path, tokenizer_path = resolve_stage1_paths(layoutxlm_path)
