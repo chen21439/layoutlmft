@@ -78,18 +78,110 @@ class StageFeatureExtractor:
         logger.info(f"  hidden_size: 768")
 
     def _load_model(self, checkpoint_path: str, config: Any = None):
-        """加载 stage JointModel"""
-        from models.build import load_joint_model
+        """加载 stage JointModel
 
-        model, tokenizer = load_joint_model(
-            model_path=checkpoint_path,
-            device=self.device,
-            config=config,
+        支持两种路径格式：
+        1. 标准 JointModel checkpoint（包含 stage3.pt, stage4.pt 等）
+           - 使用 load_joint_model() 加载完整的 JointModel
+        2. 联合训练保存的路径（包含 stage1/ 子目录，但没有 stage3.pt）
+           - 只加载 backbone + line_pooling
+        """
+        # 检查是否是联合训练保存的格式
+        stage1_subdir = os.path.join(checkpoint_path, "stage1")
+        stage3_file = os.path.join(checkpoint_path, "stage3.pt")
+        is_joint_training_format = os.path.isdir(stage1_subdir) and not os.path.exists(stage3_file)
+
+        if is_joint_training_format:
+            # 联合训练格式：只加载 backbone + line_pooling
+            logger.info(f"Detected joint training checkpoint format")
+            return self._load_from_joint_training_checkpoint(checkpoint_path)
+        else:
+            # 标准 JointModel 格式
+            from models.build import load_joint_model
+            model, tokenizer = load_joint_model(
+                model_path=checkpoint_path,
+                device=self.device,
+                config=config,
+            )
+            return model, tokenizer
+
+    def _load_from_joint_training_checkpoint(self, checkpoint_path: str):
+        """从联合训练 checkpoint 加载 backbone + line_pooling
+
+        联合训练 checkpoint 结构：
+        - stage1/: backbone 权重 (HuggingFace 格式)
+        - pytorch_model.bin: Construct 权重 (不需要加载)
+        - tokenizer files
+
+        复用 JointModel 以获得完整的 encode_with_micro_batch 实现
+        """
+        from layoutlmft.models.layoutxlm import (
+            LayoutXLMForTokenClassification,
+            LayoutXLMConfig,
+            LayoutXLMTokenizerFast,
         )
+        from layoutlmft.data.labels import NUM_LABELS, get_id2label, get_label2id
+        from models.joint_model import JointModel
+
+        # 延迟导入 stage3/stage4 相关模块
+        import sys
+        STAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        stage_dir = os.path.join(STAGE_ROOT, "stage")
+        if stage_dir not in sys.path:
+            sys.path.insert(0, stage_dir)
+        from train_parent_finder import SimpleParentFinder
+        from layoutlmft.models.relation_classifier import MultiClassRelationClassifier
+
+        stage1_path = os.path.join(checkpoint_path, "stage1")
+        logger.info(f"Loading backbone from: {stage1_path}")
+
+        # 加载 backbone
+        stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
+        stage1_config.num_labels = NUM_LABELS
+        stage1_config.id2label = get_id2label()
+        stage1_config.label2id = get_label2id()
+
+        backbone = LayoutXLMForTokenClassification.from_pretrained(
+            stage1_path,
+            config=stage1_config,
+        )
+
+        # 创建 dummy stage3/stage4（只为了能创建 JointModel，不会被使用）
+        dummy_stage3 = SimpleParentFinder(hidden_size=768, dropout=0.0)
+        dummy_stage4 = MultiClassRelationClassifier(hidden_size=768, num_relations=3, dropout=0.0)
+
+        # 创建完整的 JointModel，复用其 encode_with_micro_batch
+        model = JointModel(
+            stage1_model=backbone,
+            stage3_model=dummy_stage3,
+            stage4_model=dummy_stage4,
+            use_gru=False,
+        )
+
+        # 加载 cls_head 权重（如果存在）
+        cls_head_path = os.path.join(checkpoint_path, "cls_head.pt")
+        if os.path.exists(cls_head_path):
+            logger.info(f"Loading cls_head from: {cls_head_path}")
+            cls_head_state = torch.load(cls_head_path, map_location="cpu")
+            model.cls_head.load_state_dict(cls_head_state)
+            logger.info("  cls_head loaded successfully")
+        else:
+            logger.warning(f"cls_head weights not found: {cls_head_path}")
+            logger.warning("  cls_head will use random initialization")
+
+        model = model.to(self.device)
+
+        # 加载 tokenizer
+        try:
+            tokenizer = LayoutXLMTokenizerFast.from_pretrained(checkpoint_path)
+            logger.info(f"Loaded tokenizer from: {checkpoint_path}")
+        except Exception:
+            tokenizer = LayoutXLMTokenizerFast.from_pretrained(stage1_path)
+            logger.info(f"Loaded tokenizer from: {stage1_path}")
+
         return model, tokenizer
 
-    @torch.no_grad()
-    def extract_features(
+    def _extract_features_impl(
         self,
         input_ids: torch.Tensor,
         bbox: torch.Tensor,
@@ -98,9 +190,10 @@ class StageFeatureExtractor:
         image: Optional[torch.Tensor] = None,
         num_docs: Optional[int] = None,
         chunks_per_doc: Optional[list] = None,
+        no_grad: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        提取 line-level 特征
+        提取 line-level 特征的内部实现
 
         Args:
             input_ids: [total_chunks, seq_len] tokenized input
@@ -110,6 +203,7 @@ class StageFeatureExtractor:
             image: [total_chunks, C, H, W] 可选图像输入
             num_docs: 文档数量（文档级别模式）
             chunks_per_doc: 每个文档的 chunk 数量列表
+            no_grad: 是否禁用梯度（True=推理模式，False=训练模式）
 
         Returns:
             line_features: [num_docs, max_lines, hidden_size]
@@ -130,7 +224,7 @@ class StageFeatureExtractor:
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
-            no_grad=True,
+            no_grad=no_grad,  # 关键：控制梯度
         )
 
         # 截取文本部分（排除视觉 tokens）
@@ -149,6 +243,93 @@ class StageFeatureExtractor:
             return self._aggregate_document_level(
                 text_hidden, line_ids, num_docs, chunks_per_doc
             )
+
+    @torch.no_grad()
+    def extract_features(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        line_ids: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        提取 line-level 特征（无梯度，推理/评估用）
+
+        Args:
+            input_ids: [total_chunks, seq_len] tokenized input
+            bbox: [total_chunks, seq_len, 4] bounding boxes
+            attention_mask: [total_chunks, seq_len]
+            line_ids: [total_chunks, seq_len] 每个 token 的 line_id
+            image: [total_chunks, C, H, W] 可选图像输入
+            num_docs: 文档数量（文档级别模式）
+            chunks_per_doc: 每个文档的 chunk 数量列表
+
+        Returns:
+            line_features: [num_docs, max_lines, hidden_size]
+            line_mask: [num_docs, max_lines] bool mask
+        """
+        return self._extract_features_impl(
+            input_ids, bbox, attention_mask, line_ids,
+            image, num_docs, chunks_per_doc, no_grad=True
+        )
+
+    def extract_features_with_grad(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        line_ids: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        提取 line-level 特征（允许梯度回传，用于 train_stage1 模式）
+
+        与 extract_features() 参数相同，但梯度从 line_features 回传到 backbone。
+        使用前需要调用 set_train_mode() 设置 backbone 为训练模式。
+
+        Returns:
+            line_features: [num_docs, max_lines, hidden_size]，梯度流向 backbone
+            line_mask: [num_docs, max_lines] bool mask
+        """
+        return self._extract_features_impl(
+            input_ids, bbox, attention_mask, line_ids,
+            image, num_docs, chunks_per_doc, no_grad=False
+        )
+
+    def set_train_mode(self, freeze_visual: bool = True):
+        """
+        设置 backbone 为训练模式（用于 train_stage1）
+
+        Args:
+            freeze_visual: 是否冻结视觉编码器
+        """
+        self.model.train()
+        if freeze_visual:
+            backbone = self.model.backbone
+            if hasattr(backbone, 'layoutlmv2'):
+                visual = backbone.layoutlmv2.visual
+                for param in visual.parameters():
+                    param.requires_grad = False
+                visual.eval()  # 保持 BatchNorm 等层为 eval 模式
+                logger.info("Froze visual encoder, set to eval mode")
+
+    def set_eval_mode(self):
+        """设置 backbone 为评估模式"""
+        self.model.eval()
+
+    def get_trainable_params(self) -> list:
+        """
+        获取可训练参数（用于 train_stage1 的优化器）
+
+        Returns:
+            可训练参数列表
+        """
+        return [p for p in self.model.parameters() if p.requires_grad]
 
     def _aggregate_page_level(
         self,

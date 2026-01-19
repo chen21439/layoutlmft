@@ -137,12 +137,12 @@ class HRDoc(datasets.GeneratorBasedBuilder):
 
             if os.path.exists(train_ids_file):
                 with open(train_ids_file, 'r') as f:
-                    train_doc_ids = set(json.load(f))
+                    train_doc_ids = json.load(f)  # 保持列表顺序
                 logger.info(f"Using covmatch split: {len(train_doc_ids)} train docs from {train_ids_file}")
 
             if os.path.exists(dev_ids_file):
                 with open(dev_ids_file, 'r') as f:
-                    dev_doc_ids = set(json.load(f))
+                    dev_doc_ids = json.load(f)  # 保持列表顺序
                 logger.info(f"Using covmatch split: {len(dev_doc_ids)} dev docs from {dev_ids_file}")
 
         splits = []
@@ -239,10 +239,19 @@ class HRDoc(datasets.GeneratorBasedBuilder):
         guid = 0
         doc_count = 0
 
-        # 获取文件列表并计算总数，用于显示进度
-        all_files = sorted([f for f in os.listdir(ann_dir) if f.endswith('.json')])
-        total_files = len(all_files)
-        logger.info(f"  Found {total_files} JSON files in {ann_dir}")
+        # 获取文件列表
+        # 如果指定了 doc_ids（列表），按 doc_ids 顺序遍历；否则按文件名排序
+        if doc_ids is not None and isinstance(doc_ids, list):
+            # 按 doc_ids 列表顺序遍历
+            all_files = [f"{doc_id}.json" for doc_id in doc_ids]
+            doc_ids_set = set(doc_ids)  # 用于快速查找
+            total_files = len(all_files)
+            logger.info(f"  Processing {total_files} docs in doc_ids order")
+        else:
+            all_files = sorted([f for f in os.listdir(ann_dir) if f.endswith('.json')])
+            doc_ids_set = set(doc_ids) if doc_ids is not None else None
+            total_files = len(all_files)
+            logger.info(f"  Found {total_files} JSON files in {ann_dir}")
 
         for file_idx, file in enumerate(all_files):
             # 每 10 个文件输出一次进度（避免日志过多）
@@ -258,7 +267,7 @@ class HRDoc(datasets.GeneratorBasedBuilder):
             document_name = os.path.splitext(file)[0]
 
             # 如果指定了 doc_ids，只处理在列表中的文档
-            if doc_ids is not None and document_name not in doc_ids:
+            if doc_ids_set is not None and document_name not in doc_ids_set:
                 continue
 
             file_path = os.path.join(ann_dir, file)
