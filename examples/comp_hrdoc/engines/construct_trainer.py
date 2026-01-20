@@ -17,6 +17,8 @@ import torch
 import torch.nn as nn
 from torch.optim import Optimizer
 
+from examples.comp_hrdoc.utils.label_utils import convert_stage_labels_to_construct
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,31 +99,16 @@ def train_epoch(
         # 准备 Construct 输入（截断到 max_lines）
         max_lines = line_mask.size(1)  # 实际的 max_lines (受 max_regions 限制)
 
-        # 截断 categories 到 max_lines
-        categories = batch.get("line_labels", torch.zeros_like(line_mask, dtype=torch.long))
-        if categories.size(1) > max_lines:
-            categories = categories[:, :max_lines]
-        categories = categories.to(device)
+        # 转换标签：从 stage collator 的输出转换为 Construct 需要的格式
+        parent_labels, sibling_labels, categories = convert_stage_labels_to_construct(
+            batch, max_lines, device
+        )
 
         # 截断 reading_orders 到 max_lines
         reading_orders = batch.get("reading_orders", torch.zeros_like(line_mask, dtype=torch.long))
         if reading_orders.size(1) > max_lines:
             reading_orders = reading_orders[:, :max_lines]
         reading_orders = reading_orders.to(device)
-
-        # 截断 parent_labels 到 max_lines
-        parent_labels = batch.get("parent_labels")
-        if parent_labels is not None:
-            if parent_labels.size(1) > max_lines:
-                parent_labels = parent_labels[:, :max_lines]
-            parent_labels = parent_labels.to(device)
-
-        # 截断 sibling_labels 到 max_lines
-        sibling_labels = batch.get("sibling_labels")
-        if sibling_labels is not None:
-            if sibling_labels.size(1) > max_lines:
-                sibling_labels = sibling_labels[:, :max_lines]
-            sibling_labels = sibling_labels.to(device)
 
         # Forward
         if use_amp and scaler is not None:
@@ -240,31 +227,16 @@ def evaluate(
             # 准备输入（截断到 max_lines）
             max_lines = line_mask.size(1)  # 实际的 max_lines (受 max_regions 限制)
 
-            # 截断 categories 到 max_lines
-            categories = batch.get("line_labels", torch.zeros_like(line_mask, dtype=torch.long))
-            if categories.size(1) > max_lines:
-                categories = categories[:, :max_lines]
-            categories = categories.to(device)
+            # 转换标签：从 stage collator 的输出转换为 Construct 需要的格式
+            parent_labels, sibling_labels, categories = convert_stage_labels_to_construct(
+                batch, max_lines, device
+            )
 
             # 截断 reading_orders 到 max_lines
             reading_orders = batch.get("reading_orders", torch.zeros_like(line_mask, dtype=torch.long))
             if reading_orders.size(1) > max_lines:
                 reading_orders = reading_orders[:, :max_lines]
             reading_orders = reading_orders.to(device)
-
-            # 截断 parent_labels 到 max_lines
-            parent_labels = batch.get("parent_labels")
-            if parent_labels is not None:
-                if parent_labels.size(1) > max_lines:
-                    parent_labels = parent_labels[:, :max_lines]
-                parent_labels = parent_labels.to(device)
-
-            # 截断 sibling_labels 到 max_lines
-            sibling_labels = batch.get("sibling_labels")
-            if sibling_labels is not None:
-                if sibling_labels.size(1) > max_lines:
-                    sibling_labels = sibling_labels[:, :max_lines]
-                sibling_labels = sibling_labels.to(device)
 
             # Forward
             outputs = model(
