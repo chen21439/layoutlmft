@@ -275,3 +275,4 @@ backup/
 # End of https://www.toptal.com/developers/gitignore/api/python,macos,pycharm+allHRDoc/
 output/
 /outputs/
+.claude/ -> .gitignore
