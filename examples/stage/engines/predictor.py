@@ -146,13 +146,13 @@ class Predictor:
             }
 
         # Stage 1: Backbone encoding
+        # 梯度由 model.eval() 和 torch.no_grad() 上下文自动控制
         hidden_states = self.model.encode_with_micro_batch(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
             micro_batch_size=self.micro_batch_size,
-            no_grad=True,
         )
 
         seq_len = input_ids.shape[1]
@@ -227,14 +227,13 @@ class Predictor:
 
         # ==================== Stage 1: Classification ====================
         # 使用 encode_with_micro_batch 复用 micro-batching 逻辑（与训练一致）
-        # 推理时强制 no_grad=True 节省显存
+        # 梯度由 model.eval() 和 torch.no_grad() 上下文自动控制
         hidden_states = self.model.encode_with_micro_batch(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
             micro_batch_size=self.micro_batch_size,
-            no_grad=True,
         )
 
         # 截取文本部分的 hidden states（排除视觉 tokens）
