@@ -124,7 +124,7 @@ def load_config(env: str, config_path: str = None) -> dict:
     if config_path:
         config_file = Path(config_path)
     else:
-        config_file = PROJECT_ROOT / "examples" / "comp_hrdoc" / "configs" / f"{env}.yml"
+        config_file = PROJECT_ROOT / "examples" / "comp_hrdoc" / "configs" / f"{env}.yaml"
 
     if not config_file.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
