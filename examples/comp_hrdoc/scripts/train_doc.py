@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.optim import AdamW
+from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 
 # 添加项目路径
@@ -28,7 +29,8 @@ from examples.comp_hrdoc.utils.stage_feature_extractor import StageFeatureExtrac
 from examples.comp_hrdoc.models.build import build_construct_from_features
 from examples.comp_hrdoc.engines.construct_trainer import train_epoch, evaluate, save_model
 from examples.comp_hrdoc.utils.label_utils import convert_stage_labels_to_construct
-from examples.comp_hrdoc.data.build import build_dataloader
+from examples.stage.data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
+from examples.stage.joint_data_collator import HRDocDocumentLevelCollator
 
 logger = logging.getLogger(__name__)
 
@@ -238,34 +240,48 @@ def main():
     logger.info("="*80)
     logger.info("Building dataloaders")
 
-    train_loader = build_dataloader(
-        config=config,
-        tokenizer=tokenizer,
+    # 构建 HRDocDataLoader config
+    data_loader_config = HRDocDataLoaderConfig(
         data_dir=data_dir,
         dataset_name=args.dataset,
-        split="train",
-        batch_size=args.batch_size,
-        max_samples=args.max_train_samples if args.quick or args.max_train_samples else None,
         document_level=args.document_level,
-        max_lines=args.max_regions,
+        max_length=512,
+        max_train_samples=args.max_train_samples if args.quick or args.max_train_samples else None,
+        max_val_samples=args.max_val_samples if args.quick or args.max_val_samples else None,
         force_rebuild=force_rebuild,
     )
 
-    val_loader = build_dataloader(
-        config=config,
-        tokenizer=tokenizer,
-        data_dir=data_dir,
-        dataset_name=args.dataset,
-        split="val",
+    # 创建数据加载器（只调用一次 prepare_datasets）
+    data_loader = HRDocDataLoader(tokenizer, data_loader_config)
+    datasets = data_loader.prepare_datasets()
+
+    train_dataset = datasets.get("train", [])
+    val_dataset = datasets.get("validation", [])
+
+    logger.info(f"Train dataset: {len(train_dataset)} documents")
+    logger.info(f"Val dataset: {len(val_dataset)} documents")
+
+    # 复用 stage 的 collator
+    collator = HRDocDocumentLevelCollator(tokenizer)
+
+    # 创建 DataLoader
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
-        max_samples=args.max_val_samples if args.quick or args.max_val_samples else None,
-        document_level=args.document_level,
-        max_lines=args.max_regions,
-        force_rebuild=force_rebuild,
+        shuffle=True,
+        collate_fn=collator,
+        num_workers=0,
     )
 
-    logger.info(f"  train batches: {len(train_loader)}")
-    logger.info(f"  val batches: {len(val_loader)}")
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=0,
+    )
+
+    logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
     # ==================== 配置优化器（分层学习率）====================
     logger.info("="*80)

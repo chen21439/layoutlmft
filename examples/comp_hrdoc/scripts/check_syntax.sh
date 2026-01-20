@@ -5,7 +5,6 @@ set -e
 
 echo "=== Python 语法检查 ==="
 python3 -m py_compile examples/comp_hrdoc/scripts/train_doc.py
-python3 -m py_compile examples/comp_hrdoc/data/build.py
 python3 -m py_compile examples/comp_hrdoc/engines/construct_trainer.py
 python3 -m py_compile examples/comp_hrdoc/utils/stage_feature_extractor.py
 python3 -m py_compile examples/comp_hrdoc/utils/label_utils.py
@@ -35,9 +34,8 @@ check_import() {
 check_import "examples.comp_hrdoc.utils.stage_feature_extractor" "examples/comp_hrdoc/scripts/train_doc.py"
 check_import "examples.comp_hrdoc.models.build" "examples/comp_hrdoc/scripts/train_doc.py"
 check_import "examples.comp_hrdoc.engines.construct_trainer" "examples/comp_hrdoc/scripts/train_doc.py"
-
-# data/build.py 的导入
-check_import "examples.stage.joint_data_collator" "examples/comp_hrdoc/data/build.py"
+check_import "examples.stage.data.hrdoc_data_loader" "examples/comp_hrdoc/scripts/train_doc.py"
+check_import "examples.stage.joint_data_collator" "examples/comp_hrdoc/scripts/train_doc.py"
 
 echo "✓ 导入路径检查通过"
 
