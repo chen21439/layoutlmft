@@ -329,10 +329,13 @@ class JointModel(nn.Module):
         attention_mask: torch.Tensor,
         image: torch.Tensor = None,
         micro_batch_size: int = None,
-        no_grad: bool = None,
     ) -> torch.Tensor:
         """
         使用 micro-batching 获取 backbone hidden states（可复用的前向计算组件）
+
+        梯度行为由模型状态自动控制：
+        - 训练时：model.train() → 自动有梯度
+        - 推理时：model.eval() + with torch.no_grad() → 无梯度
 
         供 forward() 和 predictor.py 调用，避免代码重复。
 
@@ -342,7 +345,6 @@ class JointModel(nn.Module):
             attention_mask: [num_chunks, seq_len]
             image: [num_chunks, C, H, W] or List[Tensor] or None
             micro_batch_size: micro-batch 大小（默认使用 self.stage1_micro_batch_size）
-            no_grad: 是否禁用梯度（默认使用 self.stage1_no_grad）
 
         Returns:
             hidden_states: [num_chunks, seq_len+visual_len, hidden_dim]
@@ -350,7 +352,6 @@ class JointModel(nn.Module):
         device = input_ids.device
         total_chunks = input_ids.shape[0]
         micro_bs = micro_batch_size if micro_batch_size is not None else self.stage1_micro_batch_size
-        use_no_grad = no_grad if no_grad is not None else self.stage1_no_grad
 
         # 检测 image 类型
         image_is_list = isinstance(image, list) if image is not None else False
@@ -405,12 +406,8 @@ class JointModel(nn.Module):
             else:
                 mb_image = None
 
-            if use_no_grad:
-                with torch.no_grad():
-                    mb_outputs = _run_backbone(mb_input_ids, mb_bbox, mb_attention_mask, mb_image)
-            else:
-                mb_outputs = _run_backbone(mb_input_ids, mb_bbox, mb_attention_mask, mb_image)
-
+            # 梯度由模型状态自动控制（train/eval）
+            mb_outputs = _run_backbone(mb_input_ids, mb_bbox, mb_attention_mask, mb_image)
             all_hidden.append(mb_outputs.hidden_states[-1])
             del mb_image
 

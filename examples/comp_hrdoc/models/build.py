@@ -12,6 +12,10 @@ import torch.nn as nn
 from .backbone import LayoutXLMBackbone
 from .heads import OrderHead, OrderLoss
 from .modules.pooling import aggregate_document_line_features
+from .construct_only import (
+    build_construct_from_features,
+    ConstructFromFeatures,
+)
 
 
 class OrderModel(nn.Module):

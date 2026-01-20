@@ -257,6 +257,11 @@ class Predictor:
         line_features, line_mask = self.model.line_pooling(text_hidden, line_ids)
         # line_features: [num_lines, H], line_mask: [num_lines]
 
+        # TODO: 添加 line_enhancer 支持（论文 4.2.2）
+        # 如果 JointModel 包含 line_enhancer，应该在这里调用以增强行间上下文
+        # if hasattr(self.model, 'line_enhancer') and self.model.line_enhancer is not None:
+        #     line_features = self.model.line_enhancer(line_features, line_mask)
+
         actual_num_lines = int(line_mask.sum().item())
 
         if actual_num_lines == 0:
