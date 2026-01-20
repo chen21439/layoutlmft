@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup
 
 # 添加项目路径
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
