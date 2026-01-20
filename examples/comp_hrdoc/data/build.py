@@ -11,7 +11,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from examples.stage.data.hrdoc_data_loader import HRDocDataLoader, HRDocDataLoaderConfig
-from examples.stage.data.hrdoc_collator import HRDocDocumentLevelCollator
+from examples.stage.joint_data_collator import HRDocDocumentLevelCollator
 from examples.comp_hrdoc.utils.label_utils import convert_stage_labels_to_construct
 
 logger = logging.getLogger(__name__)
