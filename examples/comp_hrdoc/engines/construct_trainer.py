@@ -16,7 +16,6 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +25,8 @@ def train_epoch(
     dataloader,
     feature_extractor,
     optimizer: Optimizer,
-    scheduler: Optional[LRScheduler],
-    device: torch.device,
+    scheduler: Optional = None,
+    device: torch.device = None,
     gradient_accumulation_steps: int = 1,
     max_grad_norm: float = 1.0,
     scaler: Optional[torch.cuda.amp.GradScaler] = None,

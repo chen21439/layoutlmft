@@ -54,6 +54,7 @@ class StageFeatureExtractor:
         device: str = None,
         config: Any = None,
         max_lines: int = 128,
+        gradient_checkpointing: bool = False,
     ):
         """
         Args:
@@ -61,6 +62,7 @@ class StageFeatureExtractor:
             device: 计算设备 ("cuda" / "cpu")
             config: 配置对象（可选，用于 tokenizer fallback）
             max_lines: 固定的最大行数（用于 padding）
+            gradient_checkpointing: 是否启用梯度检查点（节省显存）
         """
         self.checkpoint_path = checkpoint_path
         self.max_lines = max_lines
@@ -71,6 +73,14 @@ class StageFeatureExtractor:
         # 加载模型
         self.model, self.tokenizer = self._load_model(checkpoint_path, config)
         self.model.eval()
+
+        # 启用梯度检查点（如果支持）
+        if gradient_checkpointing:
+            if hasattr(self.model, 'backbone') and hasattr(self.model.backbone, 'gradient_checkpointing_enable'):
+                self.model.backbone.gradient_checkpointing_enable()
+                logger.info("  gradient_checkpointing: enabled")
+            else:
+                logger.warning("  gradient_checkpointing: not supported by this model")
 
         logger.info(f"StageFeatureExtractor initialized")
         logger.info(f"  checkpoint: {checkpoint_path}")

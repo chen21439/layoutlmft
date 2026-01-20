@@ -42,15 +42,19 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
 
     # ==================== Model ====================
-    parser.add_argument("--stage-checkpoint", type=str, required=True,
-                        help="Path to stage checkpoint (contains backbone + cls_head + line_enhancer)")
+    parser.add_argument("--model-name-or-path", type=str, required=True,
+                        help="Path to pretrained model checkpoint (Stage1 + Construct joint training)")
     parser.add_argument("--hidden-size", type=int, default=768)
     parser.add_argument("--num-heads", type=int, default=12)
     parser.add_argument("--construct-num-layers", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
+                        help="Enable gradient checkpointing to save memory")
 
     # ==================== Data ====================
     parser.add_argument("--dataset", type=str, default="hrds", choices=["hrds", "hrdh", "tender"])
+    parser.add_argument("--covmatch", type=str, default=None,
+                        help="Covmatch split name (e.g., doc_random_dev2_section)")
     parser.add_argument("--max-regions", type=int, default=1024,
                         help="Max lines per document")
     parser.add_argument("--document-level", action="store_true", default=True,
@@ -160,13 +164,14 @@ def main():
     # ==================== 初始化 StageFeatureExtractor ====================
     logger.info("="*80)
     logger.info("Initializing StageFeatureExtractor")
-    logger.info(f"  checkpoint: {args.stage_checkpoint}")
+    logger.info(f"  checkpoint: {args.model_name_or_path}")
 
     stage_feature_extractor = StageFeatureExtractor(
-        checkpoint_path=args.stage_checkpoint,
+        checkpoint_path=args.model_name_or_path,
         device=str(device),
         config=config,
         max_lines=args.max_regions,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
 
     # 设置训练模式
