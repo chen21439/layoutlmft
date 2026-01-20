@@ -94,15 +94,33 @@ def train_epoch(
                     cls_loss = nn.CrossEntropyLoss()(cls_logits_flat, line_labels_flat)
 
         # ==================== Construct 前向 ====================
-        # 准备 Construct 输入
-        categories = batch.get("line_labels", torch.zeros_like(line_mask, dtype=torch.long)).to(device)
-        reading_orders = batch.get("reading_orders", torch.zeros_like(line_mask, dtype=torch.long)).to(device)
-        parent_labels = batch.get("parent_labels")
-        sibling_labels = batch.get("sibling_labels")
+        # 准备 Construct 输入（截断到 max_lines）
+        max_lines = line_mask.size(1)  # 实际的 max_lines (受 max_regions 限制)
 
+        # 截断 categories 到 max_lines
+        categories = batch.get("line_labels", torch.zeros_like(line_mask, dtype=torch.long))
+        if categories.size(1) > max_lines:
+            categories = categories[:, :max_lines]
+        categories = categories.to(device)
+
+        # 截断 reading_orders 到 max_lines
+        reading_orders = batch.get("reading_orders", torch.zeros_like(line_mask, dtype=torch.long))
+        if reading_orders.size(1) > max_lines:
+            reading_orders = reading_orders[:, :max_lines]
+        reading_orders = reading_orders.to(device)
+
+        # 截断 parent_labels 到 max_lines
+        parent_labels = batch.get("parent_labels")
         if parent_labels is not None:
+            if parent_labels.size(1) > max_lines:
+                parent_labels = parent_labels[:, :max_lines]
             parent_labels = parent_labels.to(device)
+
+        # 截断 sibling_labels 到 max_lines
+        sibling_labels = batch.get("sibling_labels")
         if sibling_labels is not None:
+            if sibling_labels.size(1) > max_lines:
+                sibling_labels = sibling_labels[:, :max_lines]
             sibling_labels = sibling_labels.to(device)
 
         # Forward
@@ -219,15 +237,33 @@ def evaluate(
                 chunks_per_doc=batch.get("chunks_per_doc"),
             )
 
-            # 准备输入
-            categories = batch.get("line_labels", torch.zeros_like(line_mask, dtype=torch.long)).to(device)
-            reading_orders = batch.get("reading_orders", torch.zeros_like(line_mask, dtype=torch.long)).to(device)
-            parent_labels = batch.get("parent_labels")
-            sibling_labels = batch.get("sibling_labels")
+            # 准备输入（截断到 max_lines）
+            max_lines = line_mask.size(1)  # 实际的 max_lines (受 max_regions 限制)
 
+            # 截断 categories 到 max_lines
+            categories = batch.get("line_labels", torch.zeros_like(line_mask, dtype=torch.long))
+            if categories.size(1) > max_lines:
+                categories = categories[:, :max_lines]
+            categories = categories.to(device)
+
+            # 截断 reading_orders 到 max_lines
+            reading_orders = batch.get("reading_orders", torch.zeros_like(line_mask, dtype=torch.long))
+            if reading_orders.size(1) > max_lines:
+                reading_orders = reading_orders[:, :max_lines]
+            reading_orders = reading_orders.to(device)
+
+            # 截断 parent_labels 到 max_lines
+            parent_labels = batch.get("parent_labels")
             if parent_labels is not None:
+                if parent_labels.size(1) > max_lines:
+                    parent_labels = parent_labels[:, :max_lines]
                 parent_labels = parent_labels.to(device)
+
+            # 截断 sibling_labels 到 max_lines
+            sibling_labels = batch.get("sibling_labels")
             if sibling_labels is not None:
+                if sibling_labels.size(1) > max_lines:
+                    sibling_labels = sibling_labels[:, :max_lines]
                 sibling_labels = sibling_labels.to(device)
 
             # Forward
