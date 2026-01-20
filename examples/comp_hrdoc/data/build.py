@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 def build_dataloader(
     config: dict,
     tokenizer,
+    data_dir: str,
+    dataset_name: str,
     split: str = "train",
     batch_size: int = 1,
     max_samples: int = None,
@@ -31,8 +33,10 @@ def build_dataloader(
     构建数据加载器（复用 stage 的 HRDocDataLoader）
 
     Args:
-        config: 环境配置字典（包含 data_dir）
+        config: 环境配置字典（保留用于未来扩展）
         tokenizer: LayoutXLM tokenizer
+        data_dir: 数据集目录路径（从 global_config 获取）
+        dataset_name: 数据集名称（hrds/hrdh/tender）
         split: "train" 或 "val"
         batch_size: 批次大小
         max_samples: 最大样本数（用于调试）
@@ -43,21 +47,13 @@ def build_dataloader(
     Returns:
         DataLoader
     """
-    # 从 config 获取数据目录
-    data_dirs = config.get("data", {}).get("data_dirs", {})
-    dataset_name = config.get("data", {}).get("dataset_name", "hrds")
-
-    # 选择数据集目录
-    if dataset_name in data_dirs:
-        data_dir = data_dirs[dataset_name]
-    else:
-        raise ValueError(f"Dataset {dataset_name} not found in config")
-
+    # 直接使用传入的参数，不再从 config 读取
     data_dir = Path(data_dir)
     if not data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
 
     logger.info(f"Building {split} dataloader from: {data_dir}")
+    logger.info(f"  dataset: {dataset_name}")
 
     # 构建 HRDocDataLoader config
     data_loader_config = HRDocDataLoaderConfig(

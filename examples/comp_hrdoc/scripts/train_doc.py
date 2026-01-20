@@ -157,6 +157,44 @@ def main():
     config = load_config(args.env, args.config)
     logger.info(f"Loaded config from env: {args.env}")
 
+    # ==================== 获取数据目录（使用全局 config）====================
+    from configs.config_loader import load_config as load_global_config
+
+    global_config = load_global_config(args.env).get_effective_config()
+    data_dir = global_config.dataset.get_data_dir(args.dataset)
+    logger.info(f"Data directory: {data_dir}")
+
+    # ==================== 处理 covmatch ====================
+    covmatch = args.covmatch or global_config.dataset.covmatch
+    if not covmatch:
+        logger.warning("No covmatch specified, using default from config")
+    logger.info(f"Covmatch: {covmatch}")
+
+    # 设置 covmatch 环境变量
+    if covmatch:
+        # 如果命令行指定了 covmatch，更新 config
+        if args.covmatch:
+            global_config.dataset.covmatch = args.covmatch
+
+        covmatch_dir = global_config.dataset.get_covmatch_dir(args.dataset)
+
+        if os.path.exists(covmatch_dir):
+            os.environ["HRDOC_SPLIT_DIR"] = covmatch_dir
+            logger.info(f"Covmatch directory: {covmatch_dir}")
+        else:
+            logger.error(f"Covmatch directory not found: {covmatch_dir}")
+            parent_dir = os.path.dirname(covmatch_dir)
+            if os.path.exists(parent_dir):
+                available = [d for d in os.listdir(parent_dir) if d.startswith("doc_")]
+                if available:
+                    logger.error(f"Available splits: {', '.join(sorted(available)[:5])}")
+            raise FileNotFoundError(f"Covmatch directory not found: {covmatch_dir}")
+
+    # tender 数据集默认强制 rebuild
+    force_rebuild = args.dataset == "tender"
+    if force_rebuild:
+        logger.info("tender dataset: force_rebuild enabled by default")
+
     # ==================== 设备 ====================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
@@ -203,21 +241,27 @@ def main():
     train_loader = build_dataloader(
         config=config,
         tokenizer=tokenizer,
+        data_dir=data_dir,
+        dataset_name=args.dataset,
         split="train",
         batch_size=args.batch_size,
         max_samples=args.max_train_samples if args.quick or args.max_train_samples else None,
         document_level=args.document_level,
         max_lines=args.max_regions,
+        force_rebuild=force_rebuild,
     )
 
     val_loader = build_dataloader(
         config=config,
         tokenizer=tokenizer,
+        data_dir=data_dir,
+        dataset_name=args.dataset,
         split="val",
         batch_size=args.batch_size,
         max_samples=args.max_val_samples if args.quick or args.max_val_samples else None,
         document_level=args.document_level,
         max_lines=args.max_regions,
+        force_rebuild=force_rebuild,
     )
 
     logger.info(f"  train batches: {len(train_loader)}")
