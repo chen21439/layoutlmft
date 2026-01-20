@@ -54,31 +54,63 @@ async def predict(request: PredictRequest):
 
         service = get_infer_service()
 
-        # 1. 原有 Stage 1/3/4 推理
-        result = service.predict_single(
-            task_id=request.task_id,
-            document_name=request.document_name,
-            return_original=True,
-        )
-        logger.info(f"[Predict] Stage done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
+        if model_loader.is_joint_training_model:
+            # 联合训练模型：直接使用 predict_with_construct（不需要 stage3/stage4）
+            logger.info("[Predict] Using joint training model (Stage1 + Construct)")
+            construct_result = service.predict_with_construct(
+                task_id=request.task_id,
+                document_name=request.document_name,
+                full_tree=True,
+            )
+            logger.info(f"[Predict] Done: {construct_result['num_lines']} lines, {construct_result['inference_time_ms']:.2f}ms")
 
-        # 2. Construct 推理（如果模型可用）
-        if model_loader.has_construct_model:
-            try:
-                construct_result = service.predict_with_construct(
-                    task_id=request.task_id,
-                    document_name=request.document_name,
-                )
-                logger.info(f"[Predict] Construct done: {construct_result['inference_time_ms']:.2f}ms")
-            except Exception as e:
-                logger.warning(f"[Predict] Construct failed (non-fatal): {e}")
+            # 从 construct_result 构建返回结果
+            # predict_with_construct 的 predictions 已包含所有行（full_tree=True）
+            predictions = construct_result.get("construct_result", {}).get("predictions", [])
+            result_data = []
+            for pred in predictions:
+                result_data.append({
+                    "line_id": pred.get("line_id"),
+                    "text": pred.get("text", ""),
+                    "class": pred.get("class", ""),
+                    "parent_id": pred.get("parent_id", -1),
+                    "relation": pred.get("relation", ""),
+                    "location": pred.get("location"),
+                })
 
-        return PredictResponse(
-            document_name=result["document_name"],
-            num_lines=result["num_lines"],
-            inference_time_ms=result["inference_time_ms"],
-            data=result["data"],
-        )
+            return PredictResponse(
+                document_name=request.document_name,
+                num_lines=construct_result["num_lines"],
+                inference_time_ms=construct_result["inference_time_ms"],
+                data=result_data,
+            )
+        else:
+            # 标准 JointModel：原有流程
+            # 1. Stage 1/3/4 推理
+            result = service.predict_single(
+                task_id=request.task_id,
+                document_name=request.document_name,
+                return_original=True,
+            )
+            logger.info(f"[Predict] Stage done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
+
+            # 2. Construct 推理（如果模型可用）
+            if model_loader.has_construct_model:
+                try:
+                    construct_result = service.predict_with_construct(
+                        task_id=request.task_id,
+                        document_name=request.document_name,
+                    )
+                    logger.info(f"[Predict] Construct done: {construct_result['inference_time_ms']:.2f}ms")
+                except Exception as e:
+                    logger.warning(f"[Predict] Construct failed (non-fatal): {e}")
+
+            return PredictResponse(
+                document_name=result["document_name"],
+                num_lines=result["num_lines"],
+                inference_time_ms=result["inference_time_ms"],
+                data=result["data"],
+            )
 
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")

@@ -163,25 +163,19 @@ def parse_args():
     parser.add_argument("--section-label-id", type=int, default=4,
                         help="Label ID for section headings (default=4 per labels.py: section)")
 
-    # Stage1 联合训练 (端到端训练 LayoutXLM + Construct)
+    # Stage1 + Construct 联合训练
     parser.add_argument("--train-stage1", action="store_true", default=False,
-                        help="Enable Stage1 (LayoutXLM) joint training with Construct")
+                        help="Enable Stage1 + Construct joint training (backbone gradients enabled)")
     parser.add_argument("--layoutxlm-path", type=str, default=None,
-                        help="LayoutXLM model path (HuggingFace or local). If None, uses config default.")
-    parser.add_argument("--stage1-lr", type=float, default=5e-5,
-                        help="Learning rate for Stage1 backbone")
-    parser.add_argument("--freeze-backbone", action="store_true", default=False,
-                        help="Freeze LayoutXLM backbone, only train cls_head + Construct")
-    parser.add_argument("--lambda-cls", type=float, default=1.0,
-                        help="Weight for Stage1 classification loss")
-    parser.add_argument("--num-classes", type=int, default=14,
-                        help="Number of classification classes for Stage1")
-    parser.add_argument("--freeze-visual", action="store_true", default=False,
-                        help="Freeze visual encoder (ResNet), only train text Transformer")
-    parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
-                        help="Enable gradient checkpointing for Stage1 backbone (saves memory, slower)")
+                        help="Path to pre-trained JointModel checkpoint (required if --train-stage1)")
+    parser.add_argument("--freeze-visual", action="store_true", default=True,
+                        help="Freeze visual encoder during Stage1 training")
+    parser.add_argument("--stage1-lr", type=float, default=2e-5,
+                        help="Learning rate for backbone (typically smaller than construct lr)")
     parser.add_argument("--stage1-micro-batch-size", type=int, default=8,
-                        help="Micro-batch size for Stage1 backbone forward (prevents OOM on large documents)")
+                        help="Micro-batch size for backbone forward (reduces memory)")
+    parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
+                        help="Enable gradient checkpointing in backbone (saves memory)")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
@@ -546,6 +540,7 @@ def train_epoch_with_stage_features(
     device: torch.device,
     args,
     scaler=None,
+    train_backbone: bool = False,
 ) -> Dict[str, float]:
     """Train ConstructFromFeatures model using stage features.
 
@@ -558,20 +553,28 @@ def train_epoch_with_stage_features(
         device: Device
         args: Arguments
         scaler: GradScaler for FP16
+        train_backbone: 是否同时训练 backbone（用于 train_stage1 模式）
     """
     model.train()
 
     total_loss = 0.0
     total_parent_loss = 0.0
     total_sibling_loss = 0.0
+    total_cls_loss = 0.0  # Stage1 分类 loss
     num_batches = 0
 
-    progress_bar = tqdm(dataloader, desc="Training (stage features)")
+    # Stage1 分类相关
+    has_cls_head = train_backbone and hasattr(feature_extractor.model, 'cls_head') and feature_extractor.model.cls_head is not None
+    cls_criterion = torch.nn.CrossEntropyLoss(ignore_index=-100) if has_cls_head else None
+
+    desc = "Training (Stage1 + Construct)" if train_backbone else "Training (stage features)"
+    progress_bar = tqdm(dataloader, desc=desc)
 
     for step, batch in enumerate(progress_bar):
         # Extract line features using stage model
-        with torch.no_grad():
-            line_features, line_mask = feature_extractor.extract_features(
+        # train_backbone=True 时梯度流向 backbone，否则无梯度
+        if train_backbone:
+            line_features, line_mask = feature_extractor.extract_features_with_grad(
                 input_ids=batch["input_ids"],
                 bbox=batch["bbox"],
                 attention_mask=batch["attention_mask"],
@@ -580,6 +583,22 @@ def train_epoch_with_stage_features(
                 num_docs=batch.get("num_docs"),
                 chunks_per_doc=batch.get("chunks_per_doc"),
             )
+            # 第一个 step 检查梯度是否连接到 backbone
+            if step == 0:
+                has_grad = line_features.requires_grad and line_features.grad_fn is not None
+                logger.info(f"[Stage1] line_features.requires_grad={line_features.requires_grad}, "
+                           f"grad_fn={line_features.grad_fn is not None} → backbone gradient: {'ON' if has_grad else 'OFF'}")
+        else:
+            with torch.no_grad():
+                line_features, line_mask = feature_extractor.extract_features(
+                    input_ids=batch["input_ids"],
+                    bbox=batch["bbox"],
+                    attention_mask=batch["attention_mask"],
+                    line_ids=batch.get("line_ids"),
+                    image=batch.get("image"),
+                    num_docs=batch.get("num_docs"),
+                    chunks_per_doc=batch.get("chunks_per_doc"),
+                )
 
         # 从 stage collator 输出转换为 Construct 标签
         # 使用 tree_utils 处理 contain/connect/equality 关系
@@ -587,6 +606,11 @@ def train_epoch_with_stage_features(
         line_parent_ids, sibling_labels_matrix, line_labels = convert_stage_labels_to_construct(
             batch, max_lines_from_features, device
         )
+
+        # 保存压缩前的原始数据（用于 Stage1 分类 loss）
+        orig_line_features = line_features
+        orig_line_mask = line_mask
+        orig_line_labels = line_labels
 
         # TOC-only mode: compress to section-only subgraph (align with paper 4.4)
         if args.toc_only and line_labels is not None:
@@ -624,7 +648,30 @@ def train_epoch_with_stage_features(
             # 使用已转换的 sibling_labels_matrix
             sibling_labels = sibling_labels_matrix
 
-        # Forward pass
+        # Stage1 分类 loss（在 TOC 压缩前使用原始 line_features 和 line_labels）
+        # 注意：TOC 压缩后 line_features 只包含 section，所以需要用压缩前的数据
+        cls_loss = torch.tensor(0.0, device=device)
+        if has_cls_head and orig_line_labels is not None:
+            # 使用压缩前的原始特征和标签计算分类 loss
+            batch_size = orig_line_features.shape[0]
+            all_cls_logits = []
+            all_cls_labels = []
+            for b in range(batch_size):
+                num_lines = int(orig_line_mask[b].sum().item())
+                if num_lines == 0:
+                    continue
+                valid_features = orig_line_features[b, :num_lines]  # [num_lines, H]
+                valid_labels = orig_line_labels[b, :num_lines]  # [num_lines]
+                # 分类预测
+                cls_logits = feature_extractor.model.cls_head(valid_features)  # [num_lines, num_classes]
+                all_cls_logits.append(cls_logits)
+                all_cls_labels.append(valid_labels)
+            if all_cls_logits:
+                all_logits = torch.cat(all_cls_logits, dim=0)
+                all_labels = torch.cat(all_cls_labels, dim=0)
+                cls_loss = cls_criterion(all_logits, all_labels)
+
+        # Forward pass (Construct)
         if args.fp16 and scaler is not None:
             with torch.cuda.amp.autocast():
                 outputs = model(
@@ -635,7 +682,8 @@ def train_epoch_with_stage_features(
                     parent_labels=line_parent_ids,
                     sibling_labels=sibling_labels,
                 )
-                loss = outputs["loss"] / args.gradient_accumulation_steps
+                # Total loss = Construct loss + Stage1 cls loss
+                loss = (outputs["loss"] + cls_loss) / args.gradient_accumulation_steps
         else:
             outputs = model(
                 region_features=line_features,
@@ -645,7 +693,8 @@ def train_epoch_with_stage_features(
                 parent_labels=line_parent_ids,
                 sibling_labels=sibling_labels,
             )
-            loss = outputs["loss"] / args.gradient_accumulation_steps
+            # Total loss = Construct loss + Stage1 cls loss
+            loss = (outputs["loss"] + cls_loss) / args.gradient_accumulation_steps
 
         # Backward pass
         if args.fp16 and scaler is not None:
@@ -664,23 +713,30 @@ def train_epoch_with_stage_features(
             optimizer.zero_grad()
 
         # Record losses
-        total_loss += outputs["loss"].item()
+        total_loss += outputs["loss"].item() + cls_loss.item()
         total_parent_loss += outputs.get("parent_loss", torch.tensor(0.0)).item()
         total_sibling_loss += outputs.get("sibling_loss", torch.tensor(0.0)).item()
+        total_cls_loss += cls_loss.item()
         num_batches += 1
 
         # Update progress bar
-        progress_bar.set_postfix({
-            "loss": f"{outputs['loss'].item():.4f}",
+        postfix = {
+            "loss": f"{(outputs['loss'].item() + cls_loss.item()):.4f}",
             "parent": f"{outputs.get('parent_loss', torch.tensor(0.0)).item():.4f}",
             "sibling": f"{outputs.get('sibling_loss', torch.tensor(0.0)).item():.4f}",
-        })
+        }
+        if has_cls_head:
+            postfix["cls"] = f"{cls_loss.item():.4f}"
+        progress_bar.set_postfix(postfix)
 
-    return {
+    result = {
         "loss": total_loss / max(num_batches, 1),
         "parent_loss": total_parent_loss / max(num_batches, 1),
         "sibling_loss": total_sibling_loss / max(num_batches, 1),
     }
+    if total_cls_loss > 0:
+        result["cls_loss"] = total_cls_loss / max(num_batches, 1)
+    return result
 
 
 def compute_prf1(tp: int, fp: int, fn: int) -> Dict[str, float]:
@@ -722,6 +778,11 @@ def evaluate_with_stage_features(
     sibling_fp = 0
     sibling_fn = 0
 
+    # Stage1 分类指标（如果有 cls_head）
+    stage1_cls_correct = 0
+    stage1_cls_total = 0
+    has_cls_head = hasattr(feature_extractor.model, 'cls_head') and feature_extractor.model.cls_head is not None
+
     # TEDS - 复用 metrics/teds.TEDSMetric
     teds_metric = TEDSMetric() if HAS_APTED else None
 
@@ -749,6 +810,24 @@ def evaluate_with_stage_features(
         line_parent_ids, sibling_labels_matrix, line_labels = convert_stage_labels_to_construct(
             batch, max_lines_from_features, device
         )
+
+        # Stage1 分类评估（在 TOC 压缩之前，评估所有行的分类准确率）
+        if has_cls_head and line_labels is not None:
+            batch_size = line_features.shape[0]
+            for b in range(batch_size):
+                num_lines = int(line_mask[b].sum().item())
+                if num_lines == 0:
+                    continue
+                valid_features = line_features[b, :num_lines]  # [num_lines, H]
+                valid_labels = line_labels[b, :num_lines]  # [num_lines]
+                # 分类预测
+                cls_logits = feature_extractor.model.cls_head(valid_features)  # [num_lines, num_classes]
+                cls_preds = cls_logits.argmax(dim=-1)  # [num_lines]
+                # 只计算有效标签（!= -100）
+                valid_mask = valid_labels != -100
+                if valid_mask.any():
+                    stage1_cls_correct += (cls_preds[valid_mask] == valid_labels[valid_mask]).sum().item()
+                    stage1_cls_total += valid_mask.sum().item()
 
         # TOC-only mode: compress to section-only subgraph
         if toc_only and line_labels is not None:
@@ -933,8 +1012,11 @@ def evaluate_with_stage_features(
                         sample_texts = [text_map.get(oid, f"node_{oid}") for oid in orig_ids]
                     else:
                         sample_texts = [text_map.get(i, f"node_{i}") for i in valid_indices]
+                    # 获取文档名称
+                    doc_name = batch.get("document_names", [None] * batch_size)[b] or f"unknown_{b}"
                     sample = {
                         "sample_id": f"batch{num_batches}_sample{b}",
+                        "document_name": doc_name,
                         "texts": sample_texts,
                         "pred_parents": [pred_parents[b, i].item() for i in valid_indices],
                         "gt_parents": [line_parent_ids[b, i].item() for i in valid_indices],
@@ -956,6 +1038,10 @@ def evaluate_with_stage_features(
         "parent_accuracy": all_parent_correct / max(all_parent_total, 1),
     }
 
+    # Stage1 分类准确率（如果有 cls_head）
+    if stage1_cls_total > 0:
+        results["stage1_cls_accuracy"] = stage1_cls_correct / stage1_cls_total
+
     # Sibling accuracy (for N选1 CE formulation)
     total_sibling = sibling_tp + sibling_fp  # sibling_tp = correct, sibling_fp = incorrect
     results["sibling_accuracy"] = sibling_tp / max(total_sibling, 1)
@@ -974,353 +1060,7 @@ def evaluate_with_stage_features(
     return results
 
 
-# ==================== Stage1 Joint Training ====================
-
-def train_epoch_with_stage1(
-    model: Dict,  # {'backbone', 'line_pooling', 'construct'}
-    dataloader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler._LRScheduler,
-    device: torch.device,
-    args,
-    scaler=None,
-) -> Dict[str, float]:
-    """Train Stage1 (LayoutXLM) + Construct 联合训练（简化方案）。
-
-    直接复用 backbone + line_pooling + ConstructFromFeatures。
-    """
-    backbone = model['backbone']
-    line_pooling = model['line_pooling']
-    construct_model = model['construct']
-
-    backbone.train()
-    construct_model.train()
-
-    total_loss = 0.0
-    total_construct_loss = 0.0
-    num_batches = 0
-
-    progress_bar = tqdm(dataloader, desc="Training (Stage1 + Construct)")
-
-    for step, batch in enumerate(progress_bar):
-        # Move inputs to device
-        input_ids = batch["input_ids"].to(device)
-        bbox = batch["bbox"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        line_ids = batch.get("line_ids")
-        if line_ids is not None:
-            line_ids = line_ids.to(device)
-
-        # 处理 image（list -> tensor）
-        image = batch.get("image")
-        if isinstance(image, list) and image:
-            image = torch.stack([
-                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
-                for img in image
-            ]).to(device)
-
-        # 文档级别参数
-        num_docs = batch.get("num_docs", 1)
-        chunks_per_doc = batch.get("chunks_per_doc", [input_ids.shape[0]])
-
-        # 获取标签
-        line_labels = batch.get("line_labels")
-        if line_labels is not None:
-            line_labels = line_labels.to(device)
-
-        max_lines = line_ids.max().item() + 1 if line_ids is not None else 100
-        parent_labels, sibling_labels, _ = convert_stage_labels_to_construct(
-            batch, max_lines, device
-        )
-
-        # ========== Forward: Backbone -> LinePooling -> Construct ==========
-        # Step 1: Backbone (micro-batch 处理，避免大文档 OOM)
-        total_chunks = input_ids.shape[0]
-        micro_bs = args.stage1_micro_batch_size
-        text_seq_len = input_ids.shape[1]
-
-        all_hidden = []
-        for start_idx in range(0, total_chunks, micro_bs):
-            end_idx = min(start_idx + micro_bs, total_chunks)
-            mb_input_ids = input_ids[start_idx:end_idx]
-            mb_bbox = bbox[start_idx:end_idx]
-            mb_attention_mask = attention_mask[start_idx:end_idx]
-            mb_image = image[start_idx:end_idx] if image is not None else None
-
-            mb_outputs = backbone(
-                input_ids=mb_input_ids,
-                bbox=mb_bbox,
-                attention_mask=mb_attention_mask,
-                image=mb_image,
-                output_hidden_states=True,
-            )
-            # 排除视觉 tokens，只保留文本部分
-            mb_hidden = mb_outputs.hidden_states[-1][:, :text_seq_len, :]
-            all_hidden.append(mb_hidden)
-
-        hidden_states = torch.cat(all_hidden, dim=0)
-
-        # Step 2: LinePooling（按文档聚合）
-        doc_features_list = []
-        doc_masks_list = []
-        chunk_idx = 0
-        for doc_idx in range(num_docs):
-            num_chunks = chunks_per_doc[doc_idx]
-            doc_hidden = hidden_states[chunk_idx:chunk_idx + num_chunks]
-            doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks]
-            features, mask = line_pooling(doc_hidden, doc_line_ids)
-            doc_features_list.append(features)
-            doc_masks_list.append(mask)
-            chunk_idx += num_chunks
-
-        # Padding to same length
-        max_lines_actual = max(f.shape[0] for f in doc_features_list)
-        hidden_size = doc_features_list[0].shape[1]
-        region_features = torch.zeros(num_docs, max_lines_actual, hidden_size, device=device)
-        region_mask = torch.zeros(num_docs, max_lines_actual, dtype=torch.bool, device=device)
-
-        for doc_idx, (features, mask) in enumerate(zip(doc_features_list, doc_masks_list)):
-            n = features.shape[0]
-            region_features[doc_idx, :n] = features
-            region_mask[doc_idx, :n] = mask
-
-        # 准备 categories（使用 GT line_labels）
-        categories = torch.zeros(num_docs, max_lines_actual, dtype=torch.long, device=device)
-        if line_labels is not None:
-            for doc_idx in range(num_docs):
-                n = min(line_labels.shape[1], max_lines_actual)
-                categories[doc_idx, :n] = line_labels[doc_idx, :n].clamp(min=0)
-
-        # reading_orders
-        reading_orders = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1)
-
-        # 调整 parent_labels 和 sibling_labels 的维度以匹配 max_lines_actual
-        # parent_labels 原始维度是 [num_docs, max_lines]，需要截取或填充到 [num_docs, max_lines_actual]
-        if parent_labels.shape[1] != max_lines_actual:
-            new_parent_labels = torch.full((num_docs, max_lines_actual), -100, dtype=torch.long, device=device)
-            new_sibling_labels = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1).clone()
-            copy_len = min(parent_labels.shape[1], max_lines_actual)
-            new_parent_labels[:, :copy_len] = parent_labels[:, :copy_len]
-            new_sibling_labels[:, :copy_len] = sibling_labels[:, :copy_len]
-            parent_labels = new_parent_labels
-            sibling_labels = new_sibling_labels
-
-        # Step 3: Construct
-        construct_outputs = construct_model(
-            region_features=region_features,
-            categories=categories,
-            region_mask=region_mask,
-            reading_orders=reading_orders,
-            parent_labels=parent_labels,
-            sibling_labels=sibling_labels,
-        )
-
-        loss = construct_outputs["loss"] / args.gradient_accumulation_steps
-
-        # Backward pass
-        if args.fp16 and scaler is not None:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
-
-        # Gradient accumulation
-        if (step + 1) % args.gradient_accumulation_steps == 0:
-            if args.fp16 and scaler is not None:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-
-        # Record losses
-        total_loss += construct_outputs["loss"].item()
-        total_construct_loss += construct_outputs["loss"].item()
-        num_batches += 1
-
-        # Update progress bar
-        progress_bar.set_postfix({
-            "loss": f"{construct_outputs['loss'].item():.4f}",
-        })
-
-    return {
-        "loss": total_loss / max(num_batches, 1),
-        "cls_loss": 0.0,  # 简化方案不单独计算 cls_loss
-        "construct_loss": total_construct_loss / max(num_batches, 1),
-    }
-
-
-@torch.no_grad()
-def evaluate_with_stage1(
-    model: Dict,  # {'backbone', 'line_pooling', 'construct'}
-    dataloader: DataLoader,
-    device: torch.device,
-    args=None,
-) -> Dict[str, float]:
-    """Evaluate Stage1 + Construct（简化方案）。"""
-    backbone = model['backbone']
-    line_pooling = model['line_pooling']
-    construct_model = model['construct']
-
-    backbone.eval()
-    construct_model.eval()
-
-    total_loss = 0.0
-    num_batches = 0
-    parent_correct = 0
-    parent_total = 0
-    sibling_correct = 0
-    sibling_total = 0
-    root_correct = 0
-    root_total = 0
-
-    for batch in tqdm(dataloader, desc="Evaluating (Stage1 + Construct)"):
-        input_ids = batch["input_ids"].to(device)
-        bbox = batch["bbox"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        line_ids = batch.get("line_ids")
-        if line_ids is not None:
-            line_ids = line_ids.to(device)
-
-        image = batch.get("image")
-        if isinstance(image, list) and image:
-            image = torch.stack([
-                torch.tensor(img) if not isinstance(img, torch.Tensor) else img
-                for img in image
-            ]).to(device)
-
-        num_docs = batch.get("num_docs", 1)
-        chunks_per_doc = batch.get("chunks_per_doc", [input_ids.shape[0]])
-
-        line_labels = batch.get("line_labels")
-        if line_labels is not None:
-            line_labels = line_labels.to(device)
-
-        max_lines = line_ids.max().item() + 1 if line_ids is not None else 100
-        parent_labels, sibling_labels, _ = convert_stage_labels_to_construct(
-            batch, max_lines, device
-        )
-
-        # Forward: Backbone -> LinePooling -> Construct (micro-batch)
-        total_chunks = input_ids.shape[0]
-        micro_bs = args.stage1_micro_batch_size
-        text_seq_len = input_ids.shape[1]
-
-        all_hidden = []
-        for start_idx in range(0, total_chunks, micro_bs):
-            end_idx = min(start_idx + micro_bs, total_chunks)
-            mb_input_ids = input_ids[start_idx:end_idx]
-            mb_bbox = bbox[start_idx:end_idx]
-            mb_attention_mask = attention_mask[start_idx:end_idx]
-            mb_image = image[start_idx:end_idx] if image is not None else None
-
-            mb_outputs = backbone(
-                input_ids=mb_input_ids,
-                bbox=mb_bbox,
-                attention_mask=mb_attention_mask,
-                image=mb_image,
-                output_hidden_states=True,
-            )
-            mb_hidden = mb_outputs.hidden_states[-1][:, :text_seq_len, :]
-            all_hidden.append(mb_hidden)
-
-        hidden_states = torch.cat(all_hidden, dim=0)
-
-        # LinePooling
-        doc_features_list = []
-        doc_masks_list = []
-        chunk_idx = 0
-        for doc_idx in range(num_docs):
-            num_chunks = chunks_per_doc[doc_idx]
-            doc_hidden = hidden_states[chunk_idx:chunk_idx + num_chunks]
-            doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks]
-            features, mask = line_pooling(doc_hidden, doc_line_ids)
-            doc_features_list.append(features)
-            doc_masks_list.append(mask)
-            chunk_idx += num_chunks
-
-        max_lines_actual = max(f.shape[0] for f in doc_features_list)
-        hidden_size = doc_features_list[0].shape[1]
-        region_features = torch.zeros(num_docs, max_lines_actual, hidden_size, device=device)
-        region_mask = torch.zeros(num_docs, max_lines_actual, dtype=torch.bool, device=device)
-
-        for doc_idx, (features, mask) in enumerate(zip(doc_features_list, doc_masks_list)):
-            n = features.shape[0]
-            region_features[doc_idx, :n] = features
-            region_mask[doc_idx, :n] = mask
-
-        categories = torch.zeros(num_docs, max_lines_actual, dtype=torch.long, device=device)
-        if line_labels is not None:
-            for doc_idx in range(num_docs):
-                n = min(line_labels.shape[1], max_lines_actual)
-                categories[doc_idx, :n] = line_labels[doc_idx, :n].clamp(min=0)
-
-        reading_orders = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1)
-
-        # 调整 parent_labels 和 sibling_labels 的维度以匹配 max_lines_actual
-        if parent_labels.shape[1] != max_lines_actual:
-            new_parent_labels = torch.full((num_docs, max_lines_actual), -100, dtype=torch.long, device=device)
-            new_sibling_labels = torch.arange(max_lines_actual, device=device).unsqueeze(0).expand(num_docs, -1).clone()
-            copy_len = min(parent_labels.shape[1], max_lines_actual)
-            new_parent_labels[:, :copy_len] = parent_labels[:, :copy_len]
-            new_sibling_labels[:, :copy_len] = sibling_labels[:, :copy_len]
-            parent_labels = new_parent_labels
-            sibling_labels = new_sibling_labels
-
-        construct_outputs = construct_model(
-            region_features=region_features,
-            categories=categories,
-            region_mask=region_mask,
-            reading_orders=reading_orders,
-            parent_labels=parent_labels,
-            sibling_labels=sibling_labels,
-        )
-
-        total_loss += construct_outputs["loss"].item()
-        num_batches += 1
-
-        # Parent accuracy and Root accuracy
-        if parent_labels is not None:
-            parent_logits = construct_outputs["parent_logits"]
-            parent_preds = parent_logits.argmax(dim=-1)
-            for b in range(num_docs):
-                valid_mask = parent_labels[b] != -100
-                if valid_mask.any():
-                    preds = parent_preds[b][valid_mask]
-                    gts = parent_labels[b][valid_mask]
-                    parent_correct += (preds == gts).sum().item()
-                    parent_total += valid_mask.sum().item()
-
-                    # Root accuracy: 预测 parent == self 的节点
-                    # 创建有效节点的索引
-                    valid_indices = torch.arange(parent_labels[b].shape[0], device=parent_labels.device)[valid_mask]
-                    root_gt_mask = (gts == valid_indices)  # ground truth 是 root 的节点
-                    root_pred_mask = (preds == valid_indices)  # 预测是 root 的节点
-                    root_correct += (root_gt_mask & root_pred_mask).sum().item()
-                    root_total += root_gt_mask.sum().item()
-
-        # Sibling accuracy
-        if sibling_labels is not None and "sibling_logits" in construct_outputs:
-            sibling_logits = construct_outputs["sibling_logits"]
-            sibling_preds = sibling_logits.argmax(dim=-1)
-            for b in range(num_docs):
-                valid_mask = region_mask[b]
-                if valid_mask.any():
-                    preds = sibling_preds[b][valid_mask]
-                    gts = sibling_labels[b][valid_mask]
-                    sibling_correct += (preds == gts).sum().item()
-                    sibling_total += valid_mask.sum().item()
-
-    return {
-        "loss": total_loss / max(num_batches, 1),
-        "cls_loss": 0.0,
-        "construct_loss": total_loss / max(num_batches, 1),
-        "cls_accuracy": 0.0,
-        "parent_accuracy": parent_correct / max(parent_total, 1),
-        "sibling_accuracy": sibling_correct / max(sibling_total, 1),
-        "root_accuracy": root_correct / max(root_total, 1),
-    }
-
+# ==================== Stage1 + Construct 联合训练 ====================
 
 def main():
     args = parse_args()
@@ -1381,12 +1121,165 @@ def main():
         args.max_val_samples = args.max_val_samples or 20
         args.num_epochs = min(args.num_epochs, 2)
 
-    # ==================== Stage Feature Mode / Stage1 Joint Training ====================
-    # 两种模式都需要 token-level 数据 (input_ids, bbox, line_ids)
-    stage_feature_extractor = None
-    if args.use_stage_features or args.train_stage1:
+    # ==================== Stage1 + Construct 联合训练 Mode ====================
+    # 复用 use_stage_features 的全部逻辑，只是 backbone 参与梯度更新
+    stage_feature_extractor = None  # Used in both train_stage1 and use_stage_features mode
+    if args.train_stage1:
+        logger.info("=" * 60)
+        logger.info("Stage1 + Construct Joint Training Mode")
+        logger.info("  Backbone gradients: ENABLED")
+        logger.info("  Reusing use_stage_features logic for data processing")
+        logger.info("=" * 60)
+
+        # 确定 backbone 路径
+        # 优先使用 --layoutxlm-path，否则检查 --model-name-or-path 下是否有 stage1/ 子目录
+        backbone_path = args.layoutxlm_path
+        if not backbone_path and args.model_name_or_path:
+            stage1_subdir = os.path.join(args.model_name_or_path, "stage1")
+            if os.path.isdir(stage1_subdir):
+                backbone_path = args.model_name_or_path  # StageFeatureExtractor 会自动检测 stage1/
+                logger.info(f"Auto-detected stage1/ in model_name_or_path: {stage1_subdir}")
+
+        if not backbone_path:
+            raise ValueError("--layoutxlm-path is required, or --model-name-or-path must contain stage1/ subdirectory")
+
+        # 使用 StageFeatureExtractor（和 use_stage_features 相同）
+        from examples.comp_hrdoc.utils.stage_feature_extractor import StageFeatureExtractor
+
+        stage_feature_extractor = StageFeatureExtractor(
+            checkpoint_path=backbone_path,
+            device=str(device),
+            max_lines=args.max_regions,
+        )
+        logger.info(f"Loaded StageFeatureExtractor from: {backbone_path}")
+
+        # 设置 backbone 为训练模式
+        stage_feature_extractor.set_train_mode(freeze_visual=args.freeze_visual)
+        logger.info(f"Set backbone to train mode (freeze_visual={args.freeze_visual})")
+
+        # Gradient checkpointing
+        if args.gradient_checkpointing:
+            backbone = stage_feature_extractor.model.backbone
+            if hasattr(backbone, 'gradient_checkpointing_enable'):
+                backbone.gradient_checkpointing_enable()
+                logger.info("Enabled gradient checkpointing")
+
+        # Log toc_only mode
+        if args.toc_only:
+            logger.info("=" * 60)
+            logger.info("TOC-Only Mode: Training on section headings only (paper 4.4)")
+            logger.info(f"  Section label ID: {args.section_label_id}")
+            logger.info("=" * 60)
+
+        # 获取数据目录
         from configs.config_loader import load_config as load_global_config
         global_config = load_global_config(args.env).get_effective_config()
+        data_dir = global_config.dataset.get_data_dir(args.dataset)
+        logger.info(f"Data directory: {data_dir}")
+
+        # 获取 covmatch
+        covmatch = args.covmatch or global_config.dataset.covmatch
+        logger.info(f"Covmatch: {covmatch}")
+
+        # 设置 covmatch 环境变量
+        if covmatch:
+            covmatch_dir = global_config.dataset.get_covmatch_dir(args.dataset)
+            if args.covmatch:
+                global_config.dataset.covmatch = args.covmatch
+                covmatch_dir = global_config.dataset.get_covmatch_dir(args.dataset)
+            if os.path.exists(covmatch_dir):
+                os.environ["HRDOC_SPLIT_DIR"] = covmatch_dir
+                logger.info(f"Covmatch directory: {covmatch_dir}")
+            else:
+                logger.error(f"Covmatch directory not found: {covmatch_dir}")
+                parent_dir = os.path.dirname(covmatch_dir)
+                if os.path.exists(parent_dir):
+                    available = [d for d in os.listdir(parent_dir) if d.startswith("doc_")]
+                    if available:
+                        logger.error(f"Available: {', '.join(sorted(available)[:5])}")
+                raise FileNotFoundError(f"Covmatch directory not found: {covmatch_dir}")
+
+        # 使用 stage_feature_extractor 的 tokenizer
+        tokenizer = stage_feature_extractor.tokenizer
+
+        # 复用 stage 的 DataLoader
+        force_rebuild = args.dataset == "tender"
+        if force_rebuild:
+            logger.info("tender dataset: force_rebuild enabled by default")
+
+        data_loader_config = HRDocDataLoaderConfig(
+            data_dir=data_dir,
+            dataset_name=args.dataset,
+            document_level=True,
+            max_length=512,
+            max_train_samples=args.max_train_samples,
+            max_val_samples=args.max_val_samples,
+            force_rebuild=force_rebuild,
+        )
+        data_loader = HRDocDataLoader(tokenizer, data_loader_config)
+        datasets = data_loader.prepare_datasets()
+
+        train_dataset = datasets.get("train", [])
+        val_dataset = datasets.get("validation", [])
+
+        logger.info(f"Train dataset: {len(train_dataset)} documents")
+        logger.info(f"Val dataset: {len(val_dataset)} documents")
+
+        # 复用 stage 的 collator
+        collator = HRDocDocumentLevelCollator(tokenizer)
+        logger.info("Using stage HRDocDocumentLevelCollator (multi-chunk support)")
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            collate_fn=collator,
+            num_workers=0,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collator,
+            num_workers=0,
+        )
+
+        logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
+
+        # 定义保存函数（保存 backbone + cls_head + construct）
+        def save_stage1_model(construct_model, save_path, feature_extractor=stage_feature_extractor, tok=tokenizer):
+            """保存 Stage1 + Construct 联合模型"""
+            import os
+            os.makedirs(save_path, exist_ok=True)
+
+            # 保存 construct 权重
+            construct_path = os.path.join(save_path, "pytorch_model.bin")
+            torch.save(construct_model.state_dict(), construct_path)
+            logger.info(f"Saved construct to: {construct_path}")
+
+            # 保存 backbone（stage1 目录）
+            backbone_path = os.path.join(save_path, "stage1")
+            os.makedirs(backbone_path, exist_ok=True)
+            feature_extractor.model.backbone.save_pretrained(backbone_path)
+            logger.info(f"Saved backbone to: {backbone_path}")
+
+            # 保存 cls_head 权重（联合训练时 cls_head 也被训练）
+            if hasattr(feature_extractor.model, 'cls_head') and feature_extractor.model.cls_head is not None:
+                cls_head_path = os.path.join(save_path, "cls_head.pt")
+                torch.save(feature_extractor.model.cls_head.state_dict(), cls_head_path)
+                logger.info(f"Saved cls_head to: {cls_head_path}")
+
+            # 保存 tokenizer
+            tok.save_pretrained(save_path)
+            logger.info(f"Saved tokenizer to: {save_path}")
+
+        save_fn = save_stage1_model
+
+    # ==================== Stage Feature Mode ====================
+    elif args.use_stage_features:
+        logger.info("=" * 60)
+        logger.info("Stage Feature Mode: Using pre-trained stage model")
+        logger.info("=" * 60)
 
         # Stage Feature Mode: 加载预训练的 stage 模型提取特征
         if args.use_stage_features:
@@ -1571,144 +1464,7 @@ def main():
         )
 
     # Build model
-    tokenizer = None  # 用于 Stage1 联合训练
-
-    if args.train_stage1:
-        # ==================== Stage1 + Construct 联合训练（简化方案：复用现有组件） ====================
-        from examples.stage.models.build import resolve_stage1_paths
-        from examples.stage.models.modules import LinePooling
-        from examples.comp_hrdoc.models.construct_only import ConstructFromFeatures
-        from layoutlmft.models.layoutxlm import (
-            LayoutXLMForTokenClassification,
-            LayoutXLMConfig,
-            LayoutXLMTokenizerFast,
-        )
-
-        # 获取 LayoutXLM 路径
-        layoutxlm_path = args.layoutxlm_path
-        if layoutxlm_path is None:
-            from configs.config_loader import load_config as load_global_config
-            global_config = load_global_config(args.env).get_effective_config()
-            layoutxlm_path = global_config.model.local_path or global_config.model.name_or_path
-
-        logger.info("=" * 60)
-        logger.info("Stage1 + Construct Joint Training (简化方案)")
-        logger.info("=" * 60)
-        logger.info(f"  LayoutXLM path: {layoutxlm_path}")
-        logger.info(f"  Stage1 LR: {args.stage1_lr}")
-        logger.info(f"  Construct LR: {args.learning_rate}")
-        logger.info(f"  Freeze visual: {args.freeze_visual}")
-        logger.info(f"  Gradient checkpointing: {args.gradient_checkpointing}")
-        logger.info(f"  Stage1 micro-batch size: {args.stage1_micro_batch_size}")
-
-        # 1. 加载 Backbone (LayoutXLM)
-        # 复用 load_joint_model 的加载逻辑：从根目录的 pytorch_model.bin 加载
-        # 这样确保和 StageFeatureExtractor 用的是同样的 backbone 权重
-        stage1_path, tokenizer_path = resolve_stage1_paths(layoutxlm_path)
-        config = LayoutXLMConfig.from_pretrained(stage1_path)
-        config.num_labels = args.num_classes
-        if args.gradient_checkpointing:
-            config.gradient_checkpointing = True
-
-        # 创建空模型（不加载权重）
-        backbone = LayoutXLMForTokenClassification(config=config)
-
-        # 从根目录的 pytorch_model.bin 加载权重（和 load_joint_model 一致）
-        root_model_file = os.path.join(layoutxlm_path, "pytorch_model.bin")
-        if os.path.exists(root_model_file):
-            logger.info(f"Loading backbone weights from root: {root_model_file}")
-            state_dict = torch.load(root_model_file, map_location="cpu")
-            # 提取 backbone 部分的权重（key 格式: backbone.xxx -> xxx）
-            backbone_state = {k.replace('backbone.', ''): v
-                             for k, v in state_dict.items()
-                             if k.startswith('backbone.')}
-            if backbone_state:
-                missing, unexpected = backbone.load_state_dict(backbone_state, strict=False)
-                logger.info(f"Loaded backbone from root pytorch_model.bin ({len(backbone_state)} keys)")
-                if missing:
-                    logger.warning(f"Missing keys: {missing[:3]}...")
-            else:
-                # 如果没有 backbone. 前缀，尝试直接加载
-                logger.info("No 'backbone.' prefix found, trying direct load from stage1/")
-                backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
-        else:
-            # fallback: 从 stage1/ 目录加载
-            logger.info(f"Loading backbone from stage1/: {stage1_path}")
-            backbone = LayoutXLMForTokenClassification.from_pretrained(stage1_path, config=config)
-
-        tokenizer = LayoutXLMTokenizerFast.from_pretrained(tokenizer_path)
-        backbone = backbone.to(device)
-
-        # 2. LinePooling（复用 stage 的实现）
-        line_pooling = LinePooling(pooling_method="mean")
-
-        # 3. ConstructFromFeatures（复用现有实现）
-        construct_model = ConstructFromFeatures(
-            hidden_size=args.hidden_size,
-            num_categories=args.num_classes,
-            num_heads=args.num_heads,
-            num_layers=args.construct_num_layers,
-            dropout=args.dropout,
-        )
-        construct_model = construct_model.to(device)
-
-        # 加载 Construct 预训练权重（如果有）
-        # 复用非 train_stage1 模式的加载逻辑
-        if args.model_name_or_path:
-            ckpt_path = Path(args.model_name_or_path)
-            model_bin = ckpt_path / "pytorch_model.bin"
-            construct_pt = ckpt_path / "construct_model.pt"
-            if model_bin.exists():
-                logger.info(f"Loading construct weights from {model_bin}")
-                state_dict = torch.load(model_bin, map_location="cpu")
-                # 过滤 RoPE 缓存
-                state_dict = {k: v for k, v in state_dict.items()
-                              if 'cos_cached' not in k and 'sin_cached' not in k}
-                # 直接加载整个 state_dict（包含 type_embedding, combine, construct_module）
-                construct_model.load_state_dict(state_dict, strict=False)
-            elif construct_pt.exists():
-                # construct_model.pt 存的是 construct_module 的权重
-                logger.info(f"Loading construct_module weights from {construct_pt}")
-                state_dict = torch.load(construct_pt, map_location="cpu")
-                state_dict = {k: v for k, v in state_dict.items()
-                              if 'cos_cached' not in k and 'sin_cached' not in k}
-                construct_model.construct_module.load_state_dict(state_dict, strict=False)
-
-        # 冻结视觉编码器
-        if args.freeze_visual:
-            frozen_count = 0
-            if hasattr(backbone, 'layoutlmv2'):
-                if hasattr(backbone.layoutlmv2, 'visual'):
-                    backbone.layoutlmv2.visual.requires_grad_(False)
-                    frozen_count += sum(p.numel() for p in backbone.layoutlmv2.visual.parameters())
-                if hasattr(backbone.layoutlmv2, 'visual_proj'):
-                    backbone.layoutlmv2.visual_proj.requires_grad_(False)
-                    frozen_count += sum(p.numel() for p in backbone.layoutlmv2.visual_proj.parameters())
-            logger.info(f"Frozen visual encoder: {frozen_count:,} parameters")
-
-        # 打包成 dict 方便传递（不用新建 class）
-        model = {
-            'backbone': backbone,
-            'line_pooling': line_pooling,
-            'construct': construct_model,
-        }
-
-        # 保存函数
-        def save_fn(model_dict, path):
-            import os
-            os.makedirs(path, exist_ok=True)
-            # 保存 backbone
-            backbone_path = os.path.join(path, "stage1")
-            os.makedirs(backbone_path, exist_ok=True)
-            model_dict['backbone'].save_pretrained(backbone_path)
-            # 保存 construct
-            torch.save(model_dict['construct'].state_dict(), os.path.join(path, "construct_model.pt"))
-            # 保存 tokenizer
-            if tokenizer:
-                tokenizer.save_pretrained(path)
-            logger.info(f"Saved model to {path}")
-
-    elif args.use_stage_features:
+    if args.train_stage1 or args.use_stage_features:
         # Use ConstructFromFeatures when using stage features
         from examples.comp_hrdoc.models.construct_only import (
             ConstructFromFeatures,
@@ -1723,7 +1479,9 @@ def main():
             num_layers=args.construct_num_layers,
             dropout=args.dropout,
         )
-        save_fn = lambda m, p: save_construct_model(m, p, save_order=False)
+        # save_fn 只为 use_stage_features 设置，train_stage1 已经在上面设置了
+        if not args.train_stage1:
+            save_fn = lambda m, p: save_construct_model(m, p, save_order=False)
     elif args.model_type == "order-only":
         logger.info("Building Order-only model...")
         model = build_order_only_model(
@@ -1762,8 +1520,8 @@ def main():
         save_fn = save_doc_model
 
     # Load pretrained weights (model_name_or_path)
-    # train_stage1 模式在上面已经加载过了，这里只处理其他模式
-    if args.model_name_or_path and not args.train_stage1:
+    # train_stage1 和 use_stage_features 都使用 ConstructFromFeatures，从 model_name_or_path 加载
+    if args.model_name_or_path:
         ckpt_path = Path(args.model_name_or_path)
         model_bin = ckpt_path / "pytorch_model.bin"
         if model_bin.exists():
@@ -1802,37 +1560,34 @@ def main():
         logger.info(f"Model parameters: {total_params:,} (trainable: {trainable_params:,})")
 
     # Optimizer and scheduler
+    num_training_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps
+    num_warmup_steps = int(num_training_steps * args.warmup_ratio)
+
     if args.train_stage1:
-        # Stage1 联合训练：使用分组参数（简化方案）
+        # train_stage1: 分层学习率 - backbone 和 construct 使用不同的 LR
+        backbone_params = stage_feature_extractor.get_trainable_params()
+        construct_params = list(model.parameters())
         param_groups = [
-            {"params": list(model['backbone'].parameters()), "lr": args.stage1_lr, "name": "backbone"},
-            {"params": list(model['construct'].parameters()), "lr": args.learning_rate, "name": "construct"},
+            {"params": backbone_params, "lr": args.stage1_lr, "name": "backbone"},
+            {"params": construct_params, "lr": args.learning_rate, "name": "construct"},
         ]
         optimizer = AdamW(param_groups, weight_decay=args.weight_decay)
-        logger.info("Optimizer param groups:")
-        for pg in param_groups:
-            logger.info(f"  {pg['name']}: lr={pg['lr']}, params={sum(p.numel() for p in pg['params']):,}")
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=[args.stage1_lr, args.learning_rate],
+            total_steps=num_training_steps,
+            pct_start=args.warmup_ratio,
+        )
+        logger.info(f"Optimizer: AdamW with layered LR")
+        logger.info(f"  Backbone LR: {args.stage1_lr}, params: {sum(p.numel() for p in backbone_params):,}")
+        logger.info(f"  Construct LR: {args.learning_rate}, params: {sum(p.numel() for p in construct_params):,}")
     else:
+        # use_stage_features 或其他模式：只优化 model
         optimizer = AdamW(
             model.parameters(),
             lr=args.learning_rate,
             weight_decay=args.weight_decay,
         )
-
-    num_training_steps = len(train_loader) * args.num_epochs // args.gradient_accumulation_steps
-    num_warmup_steps = int(num_training_steps * args.warmup_ratio)
-
-    # Configure scheduler max_lr based on training mode
-    if args.train_stage1:
-        # For Stage1, use different lr for each param group
-        max_lrs = [pg['lr'] for pg in param_groups]
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=max_lrs,
-            total_steps=num_training_steps,
-            pct_start=args.warmup_ratio,
-        )
-    else:
         scheduler = OneCycleLR(
             optimizer,
             max_lr=args.learning_rate,
@@ -1872,33 +1627,55 @@ def main():
 
     # Training loop
     logger.info("Starting training...")
-    if args.train_stage1:
-        best_metric_name = "parent_accuracy"
-    elif args.use_stage_features:
+    if args.train_stage1 or args.use_stage_features:
         best_metric_name = "parent_accuracy"
     else:
         best_metric_name = "order_accuracy"
 
+    # 训练前先评估一次，验证模型初始状态和数据流程
+    if args.train_stage1:
+        logger.info("=" * 60)
+        logger.info("Initial evaluation (before training)...")
+        logger.info("=" * 60)
+        # train_stage1 使用 evaluate_with_stage_features（复用同一逻辑）
+        stage_feature_extractor.set_eval_mode()  # 评估时使用 eval 模式
+        init_metrics = evaluate_with_stage_features(
+            model, val_loader, stage_feature_extractor, device, args,
+            visualize_samples=0,
+        )
+        stage_feature_extractor.set_train_mode(freeze_visual=args.freeze_visual)  # 恢复训练模式
+        # Stage1 分类
+        if 'stage1_cls_accuracy' in init_metrics:
+            logger.info(f"Initial - [Stage1] Line Cls Acc: {init_metrics['stage1_cls_accuracy']:.4f}")
+        # Construct
+        logger.info(
+            f"Initial - [Construct] Loss: {init_metrics['loss']:.4f}, "
+            f"Parent Acc: {init_metrics['parent_accuracy']:.4f}, "
+            f"Sibling Acc: {init_metrics.get('sibling_accuracy', 0):.4f}"
+        )
+        logger.info("=" * 60)
+
+    # 用于检测 backbone 参数变化
+    def get_backbone_param_norm(fe):
+        """计算 backbone 参数的 L2 norm（用于检测参数是否更新）"""
+        total = 0.0
+        for p in fe.model.backbone.parameters():
+            if p.requires_grad:
+                total += p.data.norm().item() ** 2
+        return total ** 0.5
+
     for epoch in range(start_epoch, args.num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{args.num_epochs} =====")
 
-        # Train
+        # 记录训练前的 backbone 参数 norm（仅 train_stage1 模式）
+        backbone_norm_before = None
         if args.train_stage1:
-            train_metrics = train_epoch_with_stage1(
-                model=model,
-                dataloader=train_loader,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                device=device,
-                args=args,
-                scaler=scaler,
-            )
-            train_log = (
-                f"Train - Loss: {train_metrics['loss']:.4f}, "
-                f"Cls: {train_metrics['cls_loss']:.4f}, "
-                f"Construct: {train_metrics['construct_loss']:.4f}"
-            )
-        elif args.use_stage_features:
+            backbone_norm_before = get_backbone_param_norm(stage_feature_extractor)
+
+        # Train
+        if args.train_stage1 or args.use_stage_features:
+            # train_stage1 和 use_stage_features 使用相同的训练函数
+            # 区别只是 train_backbone 参数
             train_metrics = train_epoch_with_stage_features(
                 model=model,
                 dataloader=train_loader,
@@ -1908,12 +1685,15 @@ def main():
                 device=device,
                 args=args,
                 scaler=scaler,
+                train_backbone=args.train_stage1,  # 关键区别
             )
             train_log = (
                 f"Train - Loss: {train_metrics['loss']:.4f}, "
                 f"Parent: {train_metrics['parent_loss']:.4f}, "
                 f"Sibling: {train_metrics['sibling_loss']:.4f}"
             )
+            if 'cls_loss' in train_metrics:
+                train_log += f", Cls: {train_metrics['cls_loss']:.4f}"
         else:
             train_metrics = train_epoch(
                 model=model,
@@ -1934,36 +1714,31 @@ def main():
         logger.info(train_log)
 
         # Evaluate
-        if args.train_stage1:
-            val_metrics = evaluate_with_stage1(model, val_loader, device, args)
-        elif args.use_stage_features:
+        if args.train_stage1 or args.use_stage_features:
+            # train_stage1 评估时设置为 eval 模式
+            if args.train_stage1:
+                stage_feature_extractor.set_eval_mode()
             val_metrics = evaluate_with_stage_features(
                 model, val_loader, stage_feature_extractor, device, args,
                 visualize_samples=3,  # 每个 epoch 可视化 3 个样本
             )
+            # 恢复训练模式
+            if args.train_stage1:
+                stage_feature_extractor.set_train_mode(freeze_visual=args.freeze_visual)
         else:
             val_metrics = evaluate(model, val_loader, device)
         # Log validation metrics
-        if args.train_stage1:
-            val_log = (
-                f"Val - Loss: {val_metrics['loss']:.4f}, "
-                f"Cls: {val_metrics['cls_loss']:.4f}, "
-                f"Construct: {val_metrics['construct_loss']:.4f}"
-            )
-            logger.info(val_log)
-            logger.info(
-                f"[Stage1] Cls Acc: {val_metrics['cls_accuracy']:.4f}, "
-                f"[Construct] Parent Acc: {val_metrics['parent_accuracy']:.4f}, "
-                f"Sibling Acc: {val_metrics['sibling_accuracy']:.4f}, "
-                f"Root Acc: {val_metrics['root_accuracy']:.4f}"
-            )
-        elif args.use_stage_features:
+        if args.train_stage1 or args.use_stage_features:
             val_log = (
                 f"Val - Loss: {val_metrics['loss']:.4f}, "
                 f"Parent: {val_metrics['parent_loss']:.4f}, "
                 f"Sibling: {val_metrics['sibling_loss']:.4f}"
             )
             logger.info(val_log)
+
+            # Stage1 分类指标（如果有）
+            if 'stage1_cls_accuracy' in val_metrics:
+                logger.info(f"[Stage1] Line Cls Acc: {val_metrics['stage1_cls_accuracy']:.4f}")
 
             # 4.4 Construct metrics (stage feature mode)
             logger.info(
@@ -1983,12 +1758,15 @@ def main():
                 logger.info("TOC Visualization (3 samples)")
                 logger.info("="*60)
                 for sample in val_metrics["_vis_samples"]:
+                    # 显示文档名称
+                    doc_name = sample.get("document_name", "unknown")
+                    sample_id_with_doc = f"{sample['sample_id']} ({doc_name})"
                     vis_str = visualize_toc(
                         texts=sample["texts"],
                         pred_parents=sample["pred_parents"],
                         gt_parents=sample["gt_parents"],
                         mask=sample["mask"],
-                        sample_id=sample["sample_id"],
+                        sample_id=sample_id_with_doc,
                         pred_siblings=sample.get("pred_siblings"),
                         gt_siblings=sample.get("gt_siblings"),
                     )

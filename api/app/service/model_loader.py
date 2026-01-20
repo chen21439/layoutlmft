@@ -3,8 +3,11 @@
 """
 Model Loader - Singleton pattern for model loading
 
-Loads the joint model once at startup and reuses it for all requests.
-Optionally loads Construct model for TOC generation.
+Loads model from a single checkpoint directory that contains:
+- stage1/: Backbone (LayoutXLM) weights
+- cls_head.pt: Classification head weights
+- pytorch_model.bin: Construct model weights (parent/sibling heads)
+- config.json: Construct model config
 """
 
 import os
@@ -50,7 +53,7 @@ class ModelLoader:
         self._construct_model = None  # Construct model for TOC
         self._device = None
         self._checkpoint_path = None
-        self._construct_checkpoint_path = None
+        self._is_joint_training_model = False  # 是否是联合训练模型
         self._initialized = True
 
     def load(
@@ -58,26 +61,26 @@ class ModelLoader:
         checkpoint_path: str,
         device: str = None,
         config: Any = None,
-        construct_checkpoint: str = None,
     ) -> None:
         """
         Load model from checkpoint.
+
+        支持两种格式：
+        1. 联合训练模型（包含 stage1/ 子目录，没有 stage3.pt）
+           - 所有组件在同一目录：stage1/ + cls_head.pt + pytorch_model.bin
+        2. 标准 JointModel（包含 stage3.pt, stage4.pt）
+           - 用于兼容旧格式
 
         Args:
             checkpoint_path: Path to checkpoint directory
             device: Device to use ('cuda' or 'cpu')
             config: Optional config object
-            construct_checkpoint: Path to Construct model checkpoint (optional)
         """
         if self._model is not None and self._checkpoint_path == checkpoint_path:
             logger.info(f"Model already loaded from: {checkpoint_path}")
-            # Still try to load construct if not loaded
-            if construct_checkpoint and self._construct_model is None:
-                self._load_construct_model(construct_checkpoint, device)
             return
 
         import torch
-        from models.build import load_joint_model
         from engines.predictor import Predictor
 
         if device is None:
@@ -86,18 +89,101 @@ class ModelLoader:
         logger.info(f"Loading model from: {checkpoint_path}")
         logger.info(f"Device: {device}")
 
-        self._model, self._tokenizer = load_joint_model(
-            checkpoint_path, torch.device(device), config
-        )
+        # 检测 checkpoint 格式
+        stage1_subdir = os.path.join(checkpoint_path, "stage1")
+        stage3_file = os.path.join(checkpoint_path, "stage3.pt")
+        is_joint_training_format = os.path.isdir(stage1_subdir) and not os.path.exists(stage3_file)
+
+        if is_joint_training_format:
+            # 联合训练格式：创建 JointModel 并加载权重
+            logger.info("Detected joint training checkpoint format")
+            self._model, self._tokenizer = self._load_joint_training_model(
+                checkpoint_path, device, config
+            )
+            # 联合训练格式：Construct 在同一目录
+            self._load_construct_model(checkpoint_path, device)
+            self._is_joint_training_model = True
+        else:
+            # 标准 JointModel 格式（兼容旧格式）
+            logger.info("Detected standard JointModel checkpoint format")
+            from models.build import load_joint_model
+            self._model, self._tokenizer = load_joint_model(
+                checkpoint_path, torch.device(device), config
+            )
+            self._is_joint_training_model = False
+
         self._predictor = Predictor(self._model, torch.device(device))
         self._device = device
         self._checkpoint_path = checkpoint_path
 
         logger.info("Model loaded successfully")
 
-        # Load Construct model if provided
-        if construct_checkpoint:
-            self._load_construct_model(construct_checkpoint, device)
+    def _load_joint_training_model(self, checkpoint_path: str, device: str, config: Any = None):
+        """加载联合训练 checkpoint（stage1/ + cls_head.pt + pytorch_model.bin）
+
+        创建完整的 JointModel 以复用 Predictor 的特征提取逻辑。
+        """
+        import torch
+        from layoutlmft.models.layoutxlm import (
+            LayoutXLMForTokenClassification,
+            LayoutXLMConfig,
+            LayoutXLMTokenizerFast,
+        )
+        from layoutlmft.data.labels import NUM_LABELS, get_id2label, get_label2id
+        from models.joint_model import JointModel
+
+        # 延迟导入 stage3/stage4 相关模块
+        from train_parent_finder import SimpleParentFinder
+        from layoutlmft.models.relation_classifier import MultiClassRelationClassifier
+
+        stage1_path = os.path.join(checkpoint_path, "stage1")
+        logger.info(f"Loading backbone from: {stage1_path}")
+
+        # 加载 backbone
+        stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
+        stage1_config.num_labels = NUM_LABELS
+        stage1_config.id2label = get_id2label()
+        stage1_config.label2id = get_label2id()
+
+        backbone = LayoutXLMForTokenClassification.from_pretrained(
+            stage1_path,
+            config=stage1_config,
+        )
+
+        # 创建 dummy stage3/stage4（Predictor.extract_features 不需要它们）
+        dummy_stage3 = SimpleParentFinder(hidden_size=768, dropout=0.0)
+        dummy_stage4 = MultiClassRelationClassifier(hidden_size=768, num_relations=3, dropout=0.0)
+
+        # 创建 JointModel
+        model = JointModel(
+            stage1_model=backbone,
+            stage3_model=dummy_stage3,
+            stage4_model=dummy_stage4,
+            use_gru=False,
+        )
+
+        # 加载 cls_head 权重（如果存在）
+        cls_head_path = os.path.join(checkpoint_path, "cls_head.pt")
+        if os.path.exists(cls_head_path):
+            logger.info(f"Loading cls_head from: {cls_head_path}")
+            cls_head_state = torch.load(cls_head_path, map_location="cpu")
+            model.cls_head.load_state_dict(cls_head_state)
+        else:
+            logger.warning(f"cls_head weights not found: {cls_head_path}")
+
+        model = model.to(device)
+        model.eval()
+
+        # 加载 tokenizer
+        try:
+            tokenizer = LayoutXLMTokenizerFast.from_pretrained(checkpoint_path)
+            logger.info(f"Loaded tokenizer from: {checkpoint_path}")
+        except Exception:
+            tokenizer = LayoutXLMTokenizerFast.from_pretrained(stage1_path)
+            logger.info(f"Loaded tokenizer from: {stage1_path}")
+
+        logger.info("Joint training model loaded successfully")
+        return model, tokenizer
 
     def _load_construct_model(self, construct_checkpoint: str, device: str) -> None:
         """Load Construct model for TOC generation."""
@@ -132,7 +218,10 @@ class ModelLoader:
         weights_path = os.path.join(construct_checkpoint, "pytorch_model.bin")
         if os.path.exists(weights_path):
             state_dict = torch.load(weights_path, map_location=device)
-            model.load_state_dict(state_dict)
+            # 过滤掉 RoPE 缓存 buffer（联合训练格式可能包含这些）
+            state_dict = {k: v for k, v in state_dict.items()
+                          if 'cos_cached' not in k and 'sin_cached' not in k}
+            model.load_state_dict(state_dict, strict=False)
         else:
             # Fallback to old format
             construct_weights = os.path.join(construct_checkpoint, "construct_model.pt")
@@ -144,7 +233,6 @@ class ModelLoader:
         model = model.to(device)
         model.eval()
         self._construct_model = model
-        self._construct_checkpoint_path = construct_checkpoint
 
         logger.info("Construct model loaded successfully")
 
@@ -183,6 +271,11 @@ class ModelLoader:
     def has_construct_model(self) -> bool:
         return self._construct_model is not None
 
+    @property
+    def is_joint_training_model(self) -> bool:
+        """是否是联合训练模型（Stage1 + Construct，无 stage3/stage4）"""
+        return self._is_joint_training_model
+
 
 # Global singleton instance
 _model_loader: Optional[ModelLoader] = None
@@ -200,20 +293,23 @@ def load_model(
     checkpoint_path: str,
     device: str = None,
     config: Any = None,
-    construct_checkpoint: str = None,
 ) -> ModelLoader:
     """
     Load model (convenience function).
+
+    Checkpoint directory should contain:
+    - stage1/: Backbone weights
+    - cls_head.pt: Classification head
+    - pytorch_model.bin: Construct model (parent/sibling heads)
 
     Args:
         checkpoint_path: Path to checkpoint directory
         device: Device to use
         config: Optional config object
-        construct_checkpoint: Path to Construct model checkpoint (optional)
 
     Returns:
         ModelLoader instance
     """
     loader = get_model_loader()
-    loader.load(checkpoint_path, device, config, construct_checkpoint)
+    loader.load(checkpoint_path, device, config)
     return loader
