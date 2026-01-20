@@ -482,6 +482,8 @@ class InferenceService:
                 section_ids = set(pred["line_id"] for pred in construct_result["predictions"])
 
                 # 准备全量数据（按 line_id 排序，作为阅读顺序）
+                # 使用 Stage1 预测的 class，而不是原始 JSON 的 class
+                line_classes = features["line_classes"]  # {line_id: class_id}
                 all_lines = []
                 for item in original_data:
                     lid = item.get("line_id", item.get("id", -1))
@@ -490,10 +492,16 @@ class InferenceService:
                             lid = int(lid)
                         except ValueError:
                             continue
+                    # 使用 Stage1 预测的 class，回退到原始 JSON
+                    pred_class_id = line_classes.get(lid)
+                    if pred_class_id is not None:
+                        pred_class = ID2LABEL.get(pred_class_id, f"cls_{pred_class_id}")
+                    else:
+                        pred_class = normalize_class(item.get("class", item.get("category", "")))
                     all_lines.append({
                         "line_id": lid,
                         "text": item.get("text", ""),
-                        "class": normalize_class(item.get("class", item.get("category", ""))),
+                        "class": pred_class,
                         "location": build_location(item),
                     })
                 all_lines.sort(key=lambda x: x["line_id"])
