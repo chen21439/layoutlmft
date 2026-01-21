@@ -29,6 +29,9 @@ from .order import (
     TextRegionAttentionFusion,
     RegionFeatureBuilder,
     DOCPipeline,
+    FullDOCPipeline,
+    build_full_doc_pipeline,
+    save_full_doc_pipeline,
 )
 
 from .construct import (
@@ -88,6 +91,11 @@ from .intra_region import (
     SpatialCompatibilityFeatures as IntraSpatialFeatures,
     LogicalRoleHead,
     LogicalRoleLoss,
+    save_intra_region_head,
+    load_intra_region_head,
+    save_detect_module,
+    load_detect_module,
+    build_detect_module,
 )
 
 from .joint_with_stage1 import (
@@ -112,6 +120,9 @@ __all__ = [
     'TextRegionAttentionFusion',
     'RegionFeatureBuilder',
     'DOCPipeline',
+    'FullDOCPipeline',
+    'build_full_doc_pipeline',
+    'save_full_doc_pipeline',
     # Construct Module
     'ConstructModule',
     'RoPETransformerEncoder',
@@ -159,4 +170,9 @@ __all__ = [
     'IntraSpatialFeatures',
     'LogicalRoleHead',
     'LogicalRoleLoss',
+    'save_intra_region_head',
+    'load_intra_region_head',
+    'save_detect_module',
+    'load_detect_module',
+    'build_detect_module',
 ]

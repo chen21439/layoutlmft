@@ -12,6 +12,7 @@ Based on Section 4.2.3 and 4.2.4 of "Detect-Order-Construct" paper.
 - Uses plurality voting to determine region's logical role
 """
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1132,3 +1133,173 @@ class MultiModalLineEncoder(nn.Module):
         concat = torch.cat(features, dim=-1)
         fused = self.fusion(concat)
         return self.norm(fused)
+
+
+# =============================================================================
+# 9. Save/Load Functions for DetectModule
+# =============================================================================
+
+def save_intra_region_head(
+    detect_module: DetectModule,
+    save_path: str,
+):
+    """Save only IntraRegionHead (without LogicalRoleHead)
+
+    Useful for independent Intra-region training without role classification.
+
+    Args:
+        detect_module: DetectModule instance
+        save_path: Path to save checkpoint (.pt file)
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+    torch.save(detect_module.intra_head.state_dict(), save_path)
+    logger.info(f"Saved IntraRegionHead to {save_path}")
+
+
+def load_intra_region_head(
+    detect_module: DetectModule,
+    checkpoint_path: str,
+):
+    """Load IntraRegionHead weights into DetectModule
+
+    Args:
+        detect_module: DetectModule instance
+        checkpoint_path: Path to IntraRegionHead checkpoint
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    detect_module.intra_head.load_state_dict(state_dict)
+    logger.info(f"Loaded IntraRegionHead from {checkpoint_path}")
+
+
+def save_detect_module(
+    detect_module: DetectModule,
+    save_path: str,
+    save_heads_separately: bool = True,
+):
+    """Save DetectModule with optional separate head files
+
+    Args:
+        detect_module: DetectModule to save
+        save_path: Directory to save files
+        save_heads_separately: If True, save intra_head and role_head separately
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    os.makedirs(save_path, exist_ok=True)
+
+    # Save complete module
+    full_path = os.path.join(save_path, "detect_module.pt")
+    torch.save(detect_module.state_dict(), full_path)
+    logger.info(f"Saved DetectModule to {full_path}")
+
+    if save_heads_separately:
+        # Save IntraRegionHead separately
+        intra_path = os.path.join(save_path, "intra_head.pt")
+        torch.save(detect_module.intra_head.state_dict(), intra_path)
+        logger.info(f"Saved IntraRegionHead to {intra_path}")
+
+        # Save LogicalRoleHead separately
+        role_path = os.path.join(save_path, "role_head.pt")
+        torch.save(detect_module.role_head.state_dict(), role_path)
+        logger.info(f"Saved LogicalRoleHead to {role_path}")
+
+
+def load_detect_module(
+    checkpoint_path: str,
+    num_roles: int = 10,
+    hidden_size: int = 768,
+    device: str = None,
+    load_intra_only: str = None,
+    load_role_only: str = None,
+) -> DetectModule:
+    """Load DetectModule with flexible head loading
+
+    Args:
+        checkpoint_path: Path to detect_module.pt
+        num_roles: Number of role categories
+        hidden_size: Hidden dimension size
+        device: Device to load on
+        load_intra_only: If provided, load only intra_head from this path
+        load_role_only: If provided, load only role_head from this path
+
+    Returns:
+        DetectModule instance
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    # Create model
+    model = DetectModule(
+        input_size=hidden_size,
+        hidden_size=hidden_size,
+        num_roles=num_roles,
+    )
+
+    # Load complete checkpoint
+    if os.path.exists(checkpoint_path):
+        state_dict = torch.load(checkpoint_path, map_location='cpu')
+        model.load_state_dict(state_dict)
+        logger.info(f"Loaded DetectModule from {checkpoint_path}")
+
+    # Override with separate head checkpoints if provided
+    if load_intra_only and os.path.exists(load_intra_only):
+        intra_state = torch.load(load_intra_only, map_location='cpu')
+        model.intra_head.load_state_dict(intra_state)
+        logger.info(f"Overridden IntraRegionHead from {load_intra_only}")
+
+    if load_role_only and os.path.exists(load_role_only):
+        role_state = torch.load(load_role_only, map_location='cpu')
+        model.role_head.load_state_dict(role_state)
+        logger.info(f"Overridden LogicalRoleHead from {load_role_only}")
+
+    if device:
+        model = model.to(device)
+
+    return model
+
+
+def build_detect_module(
+    checkpoint_path: str = None,
+    num_roles: int = 10,
+    hidden_size: int = 768,
+    device: str = None,
+    **kwargs,
+) -> DetectModule:
+    """Build DetectModule with optional pretrained weights
+
+    Args:
+        checkpoint_path: Path to checkpoint (.pt file)
+        num_roles: Number of logical role categories
+        hidden_size: Hidden dimension size
+        device: Device to load model on
+        **kwargs: Additional DetectModule parameters
+
+    Returns:
+        DetectModule instance
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    model = DetectModule(
+        input_size=hidden_size,
+        hidden_size=hidden_size,
+        num_roles=num_roles,
+        **kwargs,
+    )
+
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        state_dict = torch.load(checkpoint_path, map_location='cpu')
+        model.load_state_dict(state_dict)
+        logger.info(f"Loaded DetectModule from {checkpoint_path}")
+
+    if device:
+        model = model.to(device)
+
+    return model

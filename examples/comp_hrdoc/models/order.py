@@ -1012,3 +1012,355 @@ def predict_reading_order(
                 curr = succ
 
     return reading_order
+
+
+# =============================================================================
+# Full DOC Pipeline: Detect + Order + Construct
+# =============================================================================
+
+class FullDOCPipeline(nn.Module):
+    """Complete Detect-Order-Construct Pipeline
+
+    Extends DOCPipeline with ConstructModule (4.4) for full end-to-end training.
+
+    Architecture:
+        Line Features → Detect (4.2) → Order (4.3) → Construct (4.4) → Tree
+
+    Usage:
+        >>> pipeline = FullDOCPipeline(...)
+        >>> outputs = pipeline(
+        ...     line_features, line_bboxes, line_mask,
+        ...     successor_labels, role_labels,  # Detect labels
+        ...     region_order_labels, relation_labels,  # Order labels
+        ...     parent_labels, sibling_labels,  # Construct labels
+        ... )
+    """
+
+    def __init__(
+        self,
+        # DetectModule params
+        input_size: int = 768,
+        hidden_size: int = 768,
+        detect_num_heads: int = 12,
+        detect_num_layers: int = 1,
+        num_roles: int = 10,
+        # OrderModule params
+        order_num_heads: int = 12,
+        order_num_layers: int = 3,
+        num_relations: int = 3,
+        # ConstructModule params
+        construct_num_heads: int = 12,
+        construct_num_layers: int = 3,
+        # Weights
+        lambda_detect: float = 1.0,
+        lambda_order: float = 1.0,
+        lambda_construct: float = 1.0,
+        # General
+        dropout: float = 0.1,
+        use_spatial: bool = True,
+        use_construct: bool = True,
+    ):
+        """
+        Args:
+            input_size: Feature dimension from LayoutXLM (768)
+            hidden_size: Transformer hidden dimension (768)
+            detect_num_heads: Heads for Detect Transformer (12)
+            detect_num_layers: Layers for Detect Transformer (1)
+            num_roles: Number of logical role categories
+            order_num_heads: Heads for Order Transformer (12)
+            order_num_layers: Layers for Order Transformer (3)
+            num_relations: Number of relation type categories
+            construct_num_heads: Heads for Construct Transformer (12)
+            construct_num_layers: Layers for Construct Transformer (3)
+            lambda_detect: Weight for Detect stage loss
+            lambda_order: Weight for Order stage loss
+            lambda_construct: Weight for Construct stage loss
+            dropout: Dropout rate
+            use_spatial: Whether to use spatial features
+            use_construct: Whether to use Construct module
+        """
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.use_construct = use_construct
+
+        # Loss weights
+        self.lambda_detect = lambda_detect
+        self.lambda_order = lambda_order
+        self.lambda_construct = lambda_construct
+
+        # 4.2 + 4.3: DOCPipeline (Detect + Order)
+        self.doc_pipeline = DOCPipeline(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            detect_num_heads=detect_num_heads,
+            detect_num_layers=detect_num_layers,
+            num_roles=num_roles,
+            order_num_heads=order_num_heads,
+            order_num_layers=order_num_layers,
+            num_relations=num_relations,
+            dropout=dropout,
+            use_spatial=use_spatial,
+        )
+
+        # 4.4: ConstructModule
+        if use_construct:
+            from .construct import ConstructModule, ConstructLoss
+            self.construct = ConstructModule(
+                hidden_size=hidden_size,
+                num_heads=construct_num_heads,
+                num_layers=construct_num_layers,
+                dropout=dropout,
+            )
+            self.construct_loss_fn = ConstructLoss()
+
+    def forward(
+        self,
+        # Detect inputs
+        line_features: torch.Tensor,
+        line_bboxes: torch.Tensor,
+        line_mask: torch.Tensor = None,
+        successor_labels: torch.Tensor = None,
+        role_labels: torch.Tensor = None,
+        # Order inputs
+        graphical_bboxes: torch.Tensor = None,
+        graphical_mask: torch.Tensor = None,
+        region_order_labels: torch.Tensor = None,
+        relation_labels: torch.Tensor = None,
+        # Construct inputs
+        parent_labels: torch.Tensor = None,
+        sibling_labels: torch.Tensor = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Complete forward pass through Detect → Order → Construct
+
+        Args:
+            line_features: [batch, num_lines, input_size] from LayoutXLM
+            line_bboxes: [batch, num_lines, 4] line bounding boxes
+            line_mask: [batch, num_lines] valid line mask
+            successor_labels: [batch, num_lines] Detect successor labels
+            role_labels: [batch, num_lines] Detect role labels
+            graphical_bboxes: [batch, num_graphical, 4] graphical object boxes
+            graphical_mask: [batch, num_graphical] graphical object mask
+            region_order_labels: [batch, num_objects, num_objects] Order labels
+            relation_labels: [batch, num_objects, num_objects] Relation labels
+            parent_labels: [batch, num_objects] Construct parent labels
+            sibling_labels: [batch, num_objects] Construct sibling labels
+
+        Returns:
+            Dict containing all outputs and losses:
+                - detect_loss: Detect stage loss
+                - order_loss: Order stage loss
+                - construct_loss: Construct stage loss (if use_construct)
+                - total_loss: Weighted sum of all losses
+                - [all intermediate outputs]
+        """
+        # ===== Stage 1: Detect + Order =====
+        doc_outputs = self.doc_pipeline(
+            line_features=line_features,
+            line_bboxes=line_bboxes,
+            line_mask=line_mask,
+            successor_labels=successor_labels,
+            role_labels=role_labels,
+            graphical_bboxes=graphical_bboxes,
+            graphical_mask=graphical_mask,
+            region_order_labels=region_order_labels,
+            relation_labels=relation_labels,
+            lambda_detect=self.lambda_detect,
+            lambda_order=self.lambda_order,
+        )
+
+        outputs = doc_outputs.copy()
+
+        # ===== Stage 2: Construct =====
+        if self.use_construct and parent_labels is not None:
+            # Use Order's enhanced features
+            construct_outputs = self.construct(
+                object_features=doc_outputs['order_enhanced_features'],
+                object_bboxes=doc_outputs.get('all_bboxes'),
+                object_mask=doc_outputs.get('object_mask'),
+                parent_labels=parent_labels,
+                sibling_labels=sibling_labels,
+            )
+
+            outputs.update({
+                'parent_logits': construct_outputs['parent_logits'],
+                'sibling_logits': construct_outputs['sibling_logits'],
+                'construct_enhanced_features': construct_outputs.get('enhanced_features'),
+                'construct_loss': construct_outputs.get('loss', torch.tensor(0.0)),
+            })
+
+            # Update total loss
+            if 'total_loss' in outputs:
+                outputs['total_loss'] = outputs['total_loss'] + \
+                    self.lambda_construct * construct_outputs.get('loss', torch.tensor(0.0))
+
+        return outputs
+
+    def freeze_detect(self):
+        """Freeze DetectModule for fine-tuning only Order/Construct"""
+        for param in self.doc_pipeline.detect.parameters():
+            param.requires_grad = False
+
+    def unfreeze_detect(self):
+        """Unfreeze DetectModule"""
+        for param in self.doc_pipeline.detect.parameters():
+            param.requires_grad = True
+
+    def freeze_order(self):
+        """Freeze OrderModule"""
+        for param in self.doc_pipeline.order.parameters():
+            param.requires_grad = False
+
+    def unfreeze_order(self):
+        """Unfreeze OrderModule"""
+        for param in self.doc_pipeline.order.parameters():
+            param.requires_grad = True
+
+    def freeze_construct(self):
+        """Freeze ConstructModule"""
+        if self.use_construct:
+            for param in self.construct.parameters():
+                param.requires_grad = False
+
+    def unfreeze_construct(self):
+        """Unfreeze ConstructModule"""
+        if self.use_construct:
+            for param in self.construct.parameters():
+                param.requires_grad = True
+
+
+def build_full_doc_pipeline(
+    hidden_size: int = 768,
+    num_roles: int = 10,
+    num_relations: int = 3,
+    detect_num_heads: int = 12,
+    detect_num_layers: int = 1,
+    order_num_heads: int = 12,
+    order_num_layers: int = 3,
+    construct_num_heads: int = 12,
+    construct_num_layers: int = 3,
+    lambda_detect: float = 1.0,
+    lambda_order: float = 1.0,
+    lambda_construct: float = 1.0,
+    dropout: float = 0.1,
+    use_spatial: bool = True,
+    use_construct: bool = True,
+    detect_checkpoint: str = None,
+    order_checkpoint: str = None,
+    construct_checkpoint: str = None,
+    device: str = None,
+) -> FullDOCPipeline:
+    """Build complete DOC pipeline with optional pretrained weights
+
+    Args:
+        hidden_size: Model dimension
+        num_roles: Number of logical role categories
+        num_relations: Number of relation types
+        detect_num_heads: Attention heads for Detect
+        detect_num_layers: Transformer layers for Detect
+        order_num_heads: Attention heads for Order
+        order_num_layers: Transformer layers for Order
+        construct_num_heads: Attention heads for Construct
+        construct_num_layers: Transformer layers for Construct
+        lambda_detect: Weight for Detect loss
+        lambda_order: Weight for Order loss
+        lambda_construct: Weight for Construct loss
+        dropout: Dropout rate
+        use_spatial: Use spatial features
+        use_construct: Enable Construct module
+        detect_checkpoint: Path to pretrained DetectModule (.pt)
+        order_checkpoint: Path to pretrained OrderModule (.pt)
+        construct_checkpoint: Path to pretrained ConstructModule (.pt)
+        device: Device to load model on
+
+    Returns:
+        FullDOCPipeline model
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    model = FullDOCPipeline(
+        hidden_size=hidden_size,
+        detect_num_heads=detect_num_heads,
+        detect_num_layers=detect_num_layers,
+        num_roles=num_roles,
+        order_num_heads=order_num_heads,
+        order_num_layers=order_num_layers,
+        num_relations=num_relations,
+        construct_num_heads=construct_num_heads,
+        construct_num_layers=construct_num_layers,
+        lambda_detect=lambda_detect,
+        lambda_order=lambda_order,
+        lambda_construct=lambda_construct,
+        dropout=dropout,
+        use_spatial=use_spatial,
+        use_construct=use_construct,
+    )
+
+    # Load pretrained weights if provided
+    if detect_checkpoint and os.path.exists(detect_checkpoint):
+        try:
+            detect_state = torch.load(detect_checkpoint, map_location='cpu')
+            model.doc_pipeline.detect.load_state_dict(detect_state)
+            logger.info(f"Loaded DetectModule from {detect_checkpoint}")
+        except Exception as e:
+            logger.warning(f"Failed to load DetectModule: {e}")
+
+    if order_checkpoint and os.path.exists(order_checkpoint):
+        try:
+            order_state = torch.load(order_checkpoint, map_location='cpu')
+            model.doc_pipeline.order.load_state_dict(order_state)
+            logger.info(f"Loaded OrderModule from {order_checkpoint}")
+        except Exception as e:
+            logger.warning(f"Failed to load OrderModule: {e}")
+
+    if construct_checkpoint and os.path.exists(construct_checkpoint) and use_construct:
+        try:
+            construct_state = torch.load(construct_checkpoint, map_location='cpu')
+            model.construct.load_state_dict(construct_state)
+            logger.info(f"Loaded ConstructModule from {construct_checkpoint}")
+        except Exception as e:
+            logger.warning(f"Failed to load ConstructModule: {e}")
+
+    if device:
+        model = model.to(device)
+
+    return model
+
+
+def save_full_doc_pipeline(
+    model: FullDOCPipeline,
+    save_path: str,
+    save_separately: bool = True,
+):
+    """Save complete DOC pipeline
+
+    Args:
+        model: FullDOCPipeline model
+        save_path: Directory to save checkpoints
+        save_separately: If True, save each module separately
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    os.makedirs(save_path, exist_ok=True)
+
+    if save_separately:
+        # Save each module separately for flexible loading
+        detect_path = os.path.join(save_path, "detect_module.pt")
+        torch.save(model.doc_pipeline.detect.state_dict(), detect_path)
+        logger.info(f"Saved DetectModule to {detect_path}")
+
+        order_path = os.path.join(save_path, "order_module.pt")
+        torch.save(model.doc_pipeline.order.state_dict(), order_path)
+        logger.info(f"Saved OrderModule to {order_path}")
+
+        if model.use_construct:
+            construct_path = os.path.join(save_path, "construct_module.pt")
+            torch.save(model.construct.state_dict(), construct_path)
+            logger.info(f"Saved ConstructModule to {construct_path}")
+
+    # Also save complete model
+    full_path = os.path.join(save_path, "full_doc_pipeline.pt")
+    torch.save(model.state_dict(), full_path)
+    logger.info(f"Saved full pipeline to {full_path}")

@@ -70,6 +70,11 @@ from examples.comp_hrdoc.models import (
     build_order_only_model,
     save_order_only_model,
 )
+from examples.comp_hrdoc.models.order import (
+    FullDOCPipeline,
+    build_full_doc_pipeline,
+    save_full_doc_pipeline,
+)
 from examples.comp_hrdoc.utils.experiment_manager import (
     ExperimentManager,
     get_artifact_path,
@@ -113,6 +118,32 @@ def parse_args():
                         help="Weight for order loss")
     parser.add_argument("--construct-weight", type=float, default=1.0,
                         help="Weight for construct loss")
+
+    # Detect Stage (4.2) - NEW
+    parser.add_argument("--use-detect", action="store_true", default=False,
+                        help="Enable Detect stage (4.2) for full DOC pipeline")
+    parser.add_argument("--detect-checkpoint", type=str, default=None,
+                        help="Path to pretrained DetectModule checkpoint")
+    parser.add_argument("--freeze-detect", action="store_true", default=False,
+                        help="Freeze DetectModule during training")
+    parser.add_argument("--num-roles", type=int, default=10,
+                        help="Number of logical role categories")
+    parser.add_argument("--detect-weight", type=float, default=1.0,
+                        help="Weight for Detect stage loss")
+    parser.add_argument("--detect-num-layers", type=int, default=1,
+                        help="Number of Transformer layers in Detect module (paper: 1)")
+
+    # Order Stage (4.3) - Checkpoint support
+    parser.add_argument("--order-checkpoint", type=str, default=None,
+                        help="Path to pretrained OrderModule checkpoint")
+    parser.add_argument("--freeze-order", action="store_true", default=False,
+                        help="Freeze OrderModule during training")
+
+    # Construct Stage (4.4) - Checkpoint support
+    parser.add_argument("--construct-checkpoint", type=str, default=None,
+                        help="Path to pretrained ConstructModule checkpoint")
+    parser.add_argument("--freeze-construct", action="store_true", default=False,
+                        help="Freeze ConstructModule during training")
 
     # Data
     parser.add_argument("--max-regions", type=int, default=1024,
@@ -1365,6 +1396,49 @@ def main():
         # save_fn for ConstructFromFeatures (不用于 train_stage1，因为已在上面定义)
         if not args.train_stage1:
             save_fn = lambda m, p: save_construct_model(m, p, save_order=False)
+    elif args.use_detect:
+        # NEW: Use FullDOCPipeline with Detect stage
+        model_desc = "Full DOC Pipeline"
+        if args.use_construct:
+            model_desc = "Full DOC Pipeline (4.2 Detect + 4.3 Order + 4.4 Construct)"
+        else:
+            model_desc = "DOC Pipeline (4.2 Detect + 4.3 Order)"
+        logger.info(f"Building {model_desc}...")
+
+        model = build_full_doc_pipeline(
+            hidden_size=args.hidden_size,
+            num_roles=args.num_roles,
+            num_relations=3,
+            detect_num_heads=args.num_heads,
+            detect_num_layers=args.detect_num_layers,
+            order_num_heads=args.num_heads,
+            order_num_layers=args.order_num_layers,
+            construct_num_heads=args.num_heads,
+            construct_num_layers=args.construct_num_layers,
+            lambda_detect=args.detect_weight,
+            lambda_order=args.order_weight,
+            lambda_construct=args.construct_weight,
+            dropout=args.dropout,
+            use_spatial=args.use_spatial,
+            use_construct=args.use_construct,
+            detect_checkpoint=args.detect_checkpoint,
+            order_checkpoint=args.order_checkpoint,
+            construct_checkpoint=args.construct_checkpoint,
+            device=None,  # Will move to device later
+        )
+
+        # Apply freeze options
+        if args.freeze_detect:
+            model.freeze_detect()
+            logger.info("DetectModule frozen")
+        if args.freeze_order:
+            model.freeze_order()
+            logger.info("OrderModule frozen")
+        if args.freeze_construct:
+            model.freeze_construct()
+            logger.info("ConstructModule frozen")
+
+        save_fn = save_full_doc_pipeline
     elif args.model_type == "order-only":
         logger.info("Building Order-only model...")
         model = build_order_only_model(
