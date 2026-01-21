@@ -47,17 +47,17 @@ class StageFeatureExtractor:
         checkpoint_path: str,
         device: str = None,
         config: Any = None,
-        max_lines: int = 128,
+        max_regions: int = 4096,
     ):
         """
         Args:
             checkpoint_path: Stage1 checkpoint 路径
             device: 计算设备 ("cuda" / "cpu")
             config: 配置对象（可选）
-            max_lines: 固定的最大行数（用于 padding）
+            max_regions: 最大区域数（用于 padding，后续会合并 line 为 region）
         """
         self.checkpoint_path = checkpoint_path
-        self.max_lines = max_lines
+        self.max_regions = max_regions
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
@@ -84,7 +84,7 @@ class StageFeatureExtractor:
             checkpoint_path=checkpoint_path,
             device=str(self.device),
             use_line_enhancer=True,
-            use_cls_head=False,
+            use_cls_head=True,
         )
 
         return model, tokenizer
@@ -291,16 +291,16 @@ class StageFeatureExtractor:
         masks_list: list,
         device: torch.device,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """将不同长度的特征填充到固定长度 (self.max_lines)"""
+        """将不同长度的特征填充到固定长度 (self.max_regions)"""
         num_docs = len(features_list)
-        max_lines = self.max_lines  # 使用固定长度
+        max_regions = self.max_regions  # 使用固定长度
         hidden_dim = features_list[0].shape[1]
 
-        line_features = torch.zeros(num_docs, max_lines, hidden_dim, device=device)
-        line_mask = torch.zeros(num_docs, max_lines, dtype=torch.bool, device=device)
+        line_features = torch.zeros(num_docs, max_regions, hidden_dim, device=device)
+        line_mask = torch.zeros(num_docs, max_regions, dtype=torch.bool, device=device)
 
         for b, (features, mask) in enumerate(zip(features_list, masks_list)):
-            num_lines = min(features.shape[0], max_lines)  # 截断超长的
+            num_lines = min(features.shape[0], max_regions)  # 截断超长的
             line_features[b, :num_lines] = features[:num_lines]
             line_mask[b, :num_lines] = mask[:num_lines]
 

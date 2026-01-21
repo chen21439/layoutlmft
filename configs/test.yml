@@ -136,8 +136,7 @@ quick_test:
   relation_max_steps: 50
 
 # 推理配置 (FastAPI 服务使用)
+# 使用 comp_hrdoc 统一 checkpoint（包含 stage1 + line_enhancer + cls_head + construct）
 inference:
-  checkpoint_path: "/data/LLM_group/layoutlmft/artifact/tender/stage34_tender1/best/"
+  checkpoint_path: "/data/LLM_group/layoutlmft/artifact_comp_hrdoc/stage1_construct1/best_model"
   data_dir_base: "/data/LLM_group/ontology/static/upload"
-  # Construct 模型路径 (可选，用于 TOC 生成)
-  construct_checkpoint: "/data/LLM_group/layoutlmft/artifact_comp_hrdoc/tender/best_model"

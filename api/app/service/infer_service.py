@@ -3,7 +3,7 @@
 """
 Inference Service - Core inference logic
 
-Reuses existing inference code from examples/stage/.
+使用 comp_hrdoc 的组件进行推理，与训练/评估代码保持一致。
 
 Directory structure:
     data_dir_base/
@@ -32,19 +32,19 @@ sys.path.insert(0, EXAMPLES_ROOT)
 STAGE_ROOT = os.path.join(EXAMPLES_ROOT, "stage")
 sys.path.insert(0, STAGE_ROOT)
 
+# 数据加载仍使用 stage 目录的模块（训练也使用这些）
 from data.inference_data_loader import load_single_document
 from data.hrdoc_data_loader import tokenize_page_with_line_boundary, get_label2id, get_id2label
-from data.batch import wrap_batch
 from joint_data_collator import HRDocDocumentLevelCollator
 from layoutlmft.data.labels import ID2LABEL
 from comp_hrdoc.utils.tree_utils import (
     build_tree_from_parents,
     format_toc_tree,
-    format_tree_from_parents,  # 训练时的打印格式
-    flatten_full_tree_to_format_a,  # 完整树转扁平格式A
-    visualize_toc,  # 可视化 TOC 树（和训练一致）
-    tree_insertion_decode,  # 论文 Algorithm 1: 联合解码
-    resolve_ref_parents_and_relations,  # 格式 B → A 转换
+    format_tree_from_parents,
+    flatten_full_tree_to_format_a,
+    visualize_toc,
+    tree_insertion_decode,
+    resolve_ref_parents_and_relations,
 )
 from comp_hrdoc.metrics.classification import normalize_class
 
@@ -147,14 +147,27 @@ class InferenceService:
         )
         batch = collator([processed])
 
-        # Run inference
-        batch_wrapped = wrap_batch(batch)
-        batch_wrapped = batch_wrapped.to(loader.device)
+        # Run inference using comp_hrdoc components
+        # 提取 line-level 特征（与训练代码一致）
+        line_features, line_mask = loader.feature_extractor.extract_from_batch(batch)
 
-        with torch.no_grad():
-            for sample in batch_wrapped:
-                pred = loader.predictor.predict(sample)
-                break  # Only one document
+        # 分类预测（与 train_doc.py 评估逻辑一致）
+        num_lines = int(line_mask[0].sum().item())  # 只有一个文档
+        valid_features = line_features[0, :num_lines]  # [num_lines, H]
+        cls_logits = loader.feature_extractor.model.cls_head(valid_features)
+        cls_preds = cls_logits.argmax(dim=-1)  # [num_lines]
+
+        # line_id 就是索引（与训练数据格式一致）
+        line_ids_list = list(range(num_lines))
+
+        # 构建 pred 对象（模拟原有格式）
+        class PredResult:
+            pass
+        pred = PredResult()
+        pred.num_lines = num_lines
+        pred.line_classes = {i: cls_preds[i].item() for i in range(num_lines)}
+        pred.line_parents = [-1] * num_lines  # 单独分类没有父节点预测
+        pred.line_relations = [0] * num_lines  # 默认 relation
 
         inference_time = (time.time() - start_time) * 1000  # ms
 
@@ -368,15 +381,27 @@ class InferenceService:
         )
         batch = collator([processed])
 
-        # Wrap and move to device
-        batch_wrapped = wrap_batch(batch)
-        batch_wrapped = batch_wrapped.to(loader.device)
+        # Stage 1: Extract features using comp_hrdoc components（与训练代码一致）
+        line_features, line_mask = loader.feature_extractor.extract_from_batch(batch)
 
-        # Stage 1: Extract features only
-        with torch.no_grad():
-            for sample in batch_wrapped:
-                features = loader.predictor.extract_features(sample)
-                break
+        # 分类预测（与 train_doc.py 评估逻辑一致）
+        num_lines = int(line_mask[0].sum().item())  # 只有一个文档
+        valid_features = line_features[0, :num_lines]  # [num_lines, H]
+        cls_logits = loader.feature_extractor.model.cls_head(valid_features)
+        cls_preds = cls_logits.argmax(dim=-1)  # [num_lines]
+
+        # line_id 就是索引（与训练数据格式一致）
+        line_ids_list = list(range(num_lines))
+
+        # 构建 features 字典（与后续 construct 推理兼容）
+        # 注意：去掉 batch 维度，因为推理时只有一个文档
+        features = {
+            "line_features": line_features[0],  # [max_lines, H]
+            "line_mask": line_mask[0],  # [max_lines]
+            "line_classes": {i: cls_preds[i].item() for i in range(num_lines)},
+            "num_lines": num_lines,
+            "line_ids": line_ids_list,
+        }
 
         # Save features.pt
         features_path = os.path.join(task_dir, "features.pt")
