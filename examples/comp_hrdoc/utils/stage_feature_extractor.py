@@ -54,7 +54,6 @@ class StageFeatureExtractor:
         device: str = None,
         config: Any = None,
         max_lines: int = 128,
-        gradient_checkpointing: bool = False,
     ):
         """
         Args:
@@ -62,7 +61,6 @@ class StageFeatureExtractor:
             device: 计算设备 ("cuda" / "cpu")
             config: 配置对象（可选，用于 tokenizer fallback）
             max_lines: 固定的最大行数（用于 padding）
-            gradient_checkpointing: 是否启用梯度检查点（节省显存）
         """
         self.checkpoint_path = checkpoint_path
         self.max_lines = max_lines
@@ -73,14 +71,6 @@ class StageFeatureExtractor:
         # 加载模型
         self.model, self.tokenizer = self._load_model(checkpoint_path, config)
         self.model.eval()
-
-        # 启用梯度检查点（如果支持）
-        if gradient_checkpointing:
-            if hasattr(self.model, 'backbone') and hasattr(self.model.backbone, 'gradient_checkpointing_enable'):
-                self.model.backbone.gradient_checkpointing_enable()
-                logger.info("  gradient_checkpointing: enabled")
-            else:
-                logger.warning("  gradient_checkpointing: not supported by this model")
 
         logger.info(f"StageFeatureExtractor initialized")
         logger.info(f"  checkpoint: {checkpoint_path}")
@@ -166,6 +156,7 @@ class StageFeatureExtractor:
             stage3_model=dummy_stage3,
             stage4_model=dummy_stage4,
             use_gru=False,
+            use_line_enhancer=True,  # 启用行间特征增强（论文 4.2.2）
         )
 
         # 加载 cls_head 权重（如果存在）
@@ -179,7 +170,7 @@ class StageFeatureExtractor:
             logger.warning(f"cls_head weights not found: {cls_head_path}")
             logger.warning("  cls_head will use random initialization")
 
-        # 加载 line_enhancer 权重（论文 4.2.2 行间特征增强，如果存在）
+        # 加载 line_enhancer 权重（如果存在）
         line_enhancer_path = os.path.join(checkpoint_path, "line_enhancer.pt")
         if os.path.exists(line_enhancer_path):
             if hasattr(model, 'line_enhancer') and model.line_enhancer is not None:
@@ -188,8 +179,7 @@ class StageFeatureExtractor:
                 model.line_enhancer.load_state_dict(line_enhancer_state)
                 logger.info("  line_enhancer loaded successfully")
             else:
-                logger.warning(f"line_enhancer.pt exists but model.line_enhancer is None")
-                logger.warning("  Model was created without use_line_enhancer=True")
+                logger.warning(f"line_enhancer weights found but model doesn't have line_enhancer")
         else:
             if hasattr(model, 'line_enhancer') and model.line_enhancer is not None:
                 logger.warning(f"line_enhancer weights not found: {line_enhancer_path}")
@@ -207,7 +197,7 @@ class StageFeatureExtractor:
 
         return model, tokenizer
 
-    def extract_features(
+    def _extract_features_impl(
         self,
         input_ids: torch.Tensor,
         bbox: torch.Tensor,
@@ -216,13 +206,10 @@ class StageFeatureExtractor:
         image: Optional[torch.Tensor] = None,
         num_docs: Optional[int] = None,
         chunks_per_doc: Optional[list] = None,
+        no_grad: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        提取 line-level 特征（统一接口）
-
-        梯度行为由模型状态自动控制：
-        - 训练时：model.train() → 自动有梯度
-        - 推理时：model.eval() + with torch.no_grad() → 无梯度
+        提取 line-level 特征的内部实现
 
         Args:
             input_ids: [total_chunks, seq_len] tokenized input
@@ -232,6 +219,7 @@ class StageFeatureExtractor:
             image: [total_chunks, C, H, W] 可选图像输入
             num_docs: 文档数量（文档级别模式）
             chunks_per_doc: 每个文档的 chunk 数量列表
+            no_grad: 是否禁用梯度（True=推理模式，False=训练模式）
 
         Returns:
             line_features: [num_docs, max_lines, hidden_size]
@@ -247,12 +235,12 @@ class StageFeatureExtractor:
             image = image.to(self.device)
 
         # Step 1: 获取 backbone hidden states
-        # 梯度由模型状态（train/eval）自动控制
         hidden_states = self.model.encode_with_micro_batch(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
+            no_grad=no_grad,  # 关键：控制梯度
         )
 
         # 截取文本部分（排除视觉 tokens）
@@ -265,20 +253,69 @@ class StageFeatureExtractor:
 
         if is_page_level:
             # 页面级别：每个 chunk 是一个样本
-            line_features, line_mask = self._aggregate_page_level(text_hidden, line_ids)
+            return self._aggregate_page_level(text_hidden, line_ids)
         else:
             # 文档级别：多个 chunks 聚合为一个文档
-            line_features, line_mask = self._aggregate_document_level(
+            return self._aggregate_document_level(
                 text_hidden, line_ids, num_docs, chunks_per_doc
             )
 
-        # Step 3: Line Feature Enhancement (行间特征增强)
-        # 参考论文 4.2.2 Multi-modal Feature Enhancement Module
-        # 如果 JointModel 包含 line_enhancer，应用它以增强行间上下文交互
-        if hasattr(self.model, 'line_enhancer') and self.model.line_enhancer is not None:
-            line_features = self.model.line_enhancer(line_features, line_mask)
+    @torch.no_grad()
+    def extract_features(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        line_ids: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        提取 line-level 特征（无梯度，推理/评估用）
 
-        return line_features, line_mask
+        Args:
+            input_ids: [total_chunks, seq_len] tokenized input
+            bbox: [total_chunks, seq_len, 4] bounding boxes
+            attention_mask: [total_chunks, seq_len]
+            line_ids: [total_chunks, seq_len] 每个 token 的 line_id
+            image: [total_chunks, C, H, W] 可选图像输入
+            num_docs: 文档数量（文档级别模式）
+            chunks_per_doc: 每个文档的 chunk 数量列表
+
+        Returns:
+            line_features: [num_docs, max_lines, hidden_size]
+            line_mask: [num_docs, max_lines] bool mask
+        """
+        return self._extract_features_impl(
+            input_ids, bbox, attention_mask, line_ids,
+            image, num_docs, chunks_per_doc, no_grad=True
+        )
+
+    def extract_features_with_grad(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        line_ids: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        提取 line-level 特征（允许梯度回传，用于 train_stage1 模式）
+
+        与 extract_features() 参数相同，但梯度从 line_features 回传到 backbone。
+        使用前需要调用 set_train_mode() 设置 backbone 为训练模式。
+
+        Returns:
+            line_features: [num_docs, max_lines, hidden_size]，梯度流向 backbone
+            line_mask: [num_docs, max_lines] bool mask
+        """
+        return self._extract_features_impl(
+            input_ids, bbox, attention_mask, line_ids,
+            image, num_docs, chunks_per_doc, no_grad=False
+        )
 
     def set_train_mode(self, freeze_visual: bool = True):
         """
@@ -380,6 +417,11 @@ class StageFeatureExtractor:
             num_lines = min(features.shape[0], max_lines)  # 截断超长的
             line_features[b, :num_lines] = features[:num_lines]
             line_mask[b, :num_lines] = mask[:num_lines]
+
+        # Step 3: 行间特征增强（论文 4.2.2）
+        # 在 line_pooling 之后应用 Transformer 增强
+        if hasattr(self.model, 'line_enhancer') and self.model.line_enhancer is not None:
+            line_features = self.model.line_enhancer(line_features, line_mask)
 
         return line_features, line_mask
 

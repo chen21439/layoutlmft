@@ -5,8 +5,8 @@ LOG=/data/LLM_group/layoutlmft/examples/comp_hrdoc/logs/train_doc_$(date +%Y%m%d
 
 cmd=(python examples/comp_hrdoc/scripts/train_doc.py
   --env test
-  --use-stage-features
-  --stage-checkpoint  /data/LLM_group/layoutlmft/artifact/joint_train/stage1_hrds/checkpoint-1300
+  --train-stage1
+  --layoutxlm-path /data/LLM_group/layoutlmft/artifact/joint_train/stage1_hrds/checkpoint-1300
   --dataset hrds
   --max-regions 128
   --batch-size 1
@@ -33,8 +33,8 @@ tail -f "$LOG"
 #   --document-level              # 文档级别训练 (多页)
 #   --toc-only                    # 仅 TOC 模式 (过滤 section)
 #   --section-label-id 4          # section 标签 ID
-#   --use-stage-features          # 使用 Stage 特征
-#   --stage-checkpoint <path>     # Stage 模型检查点
+#   --train-stage1                # Stage1 + Construct 联合训练
+#   --layoutxlm-path <path>       # Stage1 模型检查点 (用于 train-stage1)
 #   --no-construct                # 禁用 Construct 模块 (仅 Order)
 #   --use-semantic                # 启用语义分类头
 #   --cls-weight 1.0              # 分类损失权重

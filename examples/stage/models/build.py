@@ -185,14 +185,6 @@ def load_joint_model(
         hidden_size=stage4_hidden_size, num_relations=3, use_geometry=False, dropout=0.0,
     )
 
-    # ==================== 检测是否有 line_enhancer ====================
-    # 从 pytorch_model.bin 检查是否包含 line_enhancer 权重
-    logger.info(f"Loading weights from: {root_model_file}")
-    state_dict = torch.load(root_model_file, map_location="cpu")
-    use_line_enhancer = any("line_enhancer" in k for k in state_dict.keys())
-    if use_line_enhancer:
-        logger.info("Detected line_enhancer in checkpoint, enabling it in model")
-
     # ==================== 组装 JointModel ====================
     model = JointModel(
         stage1_model=stage1_model,
@@ -200,11 +192,12 @@ def load_joint_model(
         stage4_model=stage4_model,
         feature_extractor=feature_extractor,
         use_gru=use_gru,
-        use_line_enhancer=use_line_enhancer,  # 根据 checkpoint 自动启用
     )
 
     # ==================== 加载权重（复用训练代码逻辑） ====================
     # 直接对整个 model 调用 load_state_dict，与 train_joint.py 一致
+    logger.info(f"Loading weights from: {root_model_file}")
+    state_dict = torch.load(root_model_file, map_location="cpu")
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
     if missing_keys:
         logger.warning(f"Missing keys: {missing_keys}")

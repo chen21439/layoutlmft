@@ -146,13 +146,13 @@ class Predictor:
             }
 
         # Stage 1: Backbone encoding
-        # 梯度由 model.eval() 和 torch.no_grad() 上下文自动控制
         hidden_states = self.model.encode_with_micro_batch(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
             micro_batch_size=self.micro_batch_size,
+            no_grad=True,
         )
 
         seq_len = input_ids.shape[1]
@@ -227,13 +227,14 @@ class Predictor:
 
         # ==================== Stage 1: Classification ====================
         # 使用 encode_with_micro_batch 复用 micro-batching 逻辑（与训练一致）
-        # 梯度由 model.eval() 和 torch.no_grad() 上下文自动控制
+        # 推理时强制 no_grad=True 节省显存
         hidden_states = self.model.encode_with_micro_batch(
             input_ids=input_ids,
             bbox=bbox,
             attention_mask=attention_mask,
             image=image,
             micro_batch_size=self.micro_batch_size,
+            no_grad=True,
         )
 
         # 截取文本部分的 hidden states（排除视觉 tokens）
@@ -255,11 +256,6 @@ class Predictor:
         # line_pooling 内部自动处理多 chunk 聚合
         line_features, line_mask = self.model.line_pooling(text_hidden, line_ids)
         # line_features: [num_lines, H], line_mask: [num_lines]
-
-        # TODO: 添加 line_enhancer 支持（论文 4.2.2）
-        # 如果 JointModel 包含 line_enhancer，应该在这里调用以增强行间上下文
-        # if hasattr(self.model, 'line_enhancer') and self.model.line_enhancer is not None:
-        #     line_features = self.model.line_enhancer(line_features, line_mask)
 
         actual_num_lines = int(line_mask.sum().item())
 
