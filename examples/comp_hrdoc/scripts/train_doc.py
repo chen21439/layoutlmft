@@ -1528,7 +1528,7 @@ def main():
         )
         logger.info("=" * 60)
 
-    # 用于检测 backbone 参数变化
+    # 用于检测参数变化
     def get_backbone_param_norm(fe):
         """计算 backbone 参数的 L2 norm（用于检测参数是否更新）"""
         total = 0.0
@@ -1537,13 +1537,25 @@ def main():
                 total += p.data.norm().item() ** 2
         return total ** 0.5
 
+    def get_line_enhancer_param_norm(fe):
+        """计算 line_enhancer 参数的 L2 norm（用于检测参数是否更新）"""
+        if fe.model.line_enhancer is None:
+            return 0.0
+        total = 0.0
+        for p in fe.model.line_enhancer.parameters():
+            if p.requires_grad:
+                total += p.data.norm().item() ** 2
+        return total ** 0.5
+
     for epoch in range(start_epoch, args.num_epochs):
         logger.info(f"\n===== Epoch {epoch + 1}/{args.num_epochs} =====")
 
-        # 记录训练前的 backbone 参数 norm（仅 train_stage1 模式）
+        # 记录训练前的参数 norm（仅 train_stage1 模式）
         backbone_norm_before = None
+        enhancer_norm_before = None
         if args.train_stage1:
             backbone_norm_before = get_backbone_param_norm(stage_feature_extractor)
+            enhancer_norm_before = get_line_enhancer_param_norm(stage_feature_extractor)
 
         # Train
         if args.train_stage1:
@@ -1566,6 +1578,15 @@ def main():
             )
             if 'cls_loss' in train_metrics:
                 train_log += f", Cls: {train_metrics['cls_loss']:.4f}"
+            # 记录参数变化（检测是否真的在训练）
+            backbone_norm_after = get_backbone_param_norm(stage_feature_extractor)
+            enhancer_norm_after = get_line_enhancer_param_norm(stage_feature_extractor)
+            if backbone_norm_before is not None:
+                backbone_delta = abs(backbone_norm_after - backbone_norm_before)
+                logger.info(f"  Backbone param norm: {backbone_norm_before:.4f} → {backbone_norm_after:.4f} (Δ={backbone_delta:.6f})")
+            if enhancer_norm_before is not None and enhancer_norm_before > 0:
+                enhancer_delta = abs(enhancer_norm_after - enhancer_norm_before)
+                logger.info(f"  LineEnhancer param norm: {enhancer_norm_before:.4f} → {enhancer_norm_after:.4f} (Δ={enhancer_delta:.6f})")
         else:
             train_metrics = train_epoch(
                 model=model,
