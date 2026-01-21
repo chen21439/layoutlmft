@@ -18,29 +18,21 @@
            ↓
 Total Loss = λ1*L_cls + λ2*L_construct
 
-复用模块:
-- examples/stage/models/modules/line_pooling.py: LinePooling
-- examples/stage/models/heads/classification_head.py: LineClassificationHead
-- examples/comp_hrdoc/models/construct.py: ConstructModule
+复用模块（全部在 comp_hrdoc 内部）:
+- models/modules/line_pooling.py: LinePooling
+- models/heads/classification_head.py: LineClassificationHead
+- models/construct.py: ConstructModule
 """
 
 import os
-import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple, List
 
-# 添加 stage 目录到 path
-_STAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "stage"))
-if _STAGE_ROOT not in sys.path:
-    sys.path.insert(0, _STAGE_ROOT)
-
-# 复用 stage 的共享模块
-from models.modules import LinePooling
-from models.heads import LineClassificationHead
-
-# 复用 comp_hrdoc 的 Construct 模块
+# 复用 comp_hrdoc 内部的模块
+from .modules.line_pooling import LinePooling
+from .heads.classification_head import LineClassificationHead
 from .construct import ConstructModule, ConstructLoss
 
 

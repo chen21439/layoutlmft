@@ -1,44 +1,38 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Stage 模型特征提取器
+Stage1 特征提取器
 
-使用 stage 目录训练好的 JointModel 提取 line-level 特征，
-供 comp_hrdoc 的 Construct 模块使用。
+使用 Stage1Backbone 提取 line-level 特征，供 comp_hrdoc 的 Construct 模块使用。
 
 功能：
-1. 加载训练好的 stage JointModel
-2. 使用 backbone + line_pooling 提取 line-level 特征
+1. 加载 Stage1 checkpoint（backbone + line_pooling + line_enhancer）
+2. 提取 line-level 特征
 3. 返回 line_features [num_docs, max_lines, hidden_size]
 
 使用方式：
     from examples.comp_hrdoc.utils.stage_feature_extractor import StageFeatureExtractor
 
-    extractor = StageFeatureExtractor(checkpoint_path="/path/to/joint/checkpoint")
+    extractor = StageFeatureExtractor(checkpoint_path="/path/to/checkpoint")
     line_features, line_mask = extractor.extract_features(batch)
+
+注意：此模块不依赖 stage 目录，使用 comp_hrdoc 内部的 Stage1Backbone。
 """
 
 import os
-import sys
 import logging
 from typing import Dict, Tuple, Optional, Any
 
 import torch
-import torch.nn as nn
 
 logger = logging.getLogger(__name__)
-
-# 添加 stage 目录到 path
-_STAGE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "stage"))
-if _STAGE_ROOT not in sys.path:
-    sys.path.insert(0, _STAGE_ROOT)
 
 
 class StageFeatureExtractor:
     """
-    使用 stage 训练好的模型提取 line-level 特征
+    使用 Stage1Backbone 提取 line-level 特征
 
-    只使用 JointModel 的 backbone + line_pooling，不需要 stage3/4。
+    封装 backbone + line_pooling + line_enhancer，不依赖 stage 目录。
     输出特征可直接用于 comp_hrdoc 的 Construct 模块。
 
     Example:
@@ -57,9 +51,9 @@ class StageFeatureExtractor:
     ):
         """
         Args:
-            checkpoint_path: stage JointModel checkpoint 路径
+            checkpoint_path: Stage1 checkpoint 路径
             device: 计算设备 ("cuda" / "cpu")
-            config: 配置对象（可选，用于 tokenizer fallback）
+            config: 配置对象（可选）
             max_lines: 固定的最大行数（用于 padding）
         """
         self.checkpoint_path = checkpoint_path
@@ -68,7 +62,7 @@ class StageFeatureExtractor:
             "cuda" if torch.cuda.is_available() else "cpu"
         )
 
-        # 加载模型
+        # 加载模型（使用 comp_hrdoc 内部的 Stage1Backbone）
         self.model, self.tokenizer = self._load_model(checkpoint_path, config)
         self.model.eval()
 
@@ -78,122 +72,20 @@ class StageFeatureExtractor:
         logger.info(f"  hidden_size: 768")
 
     def _load_model(self, checkpoint_path: str, config: Any = None):
-        """加载 stage JointModel
+        """加载 Stage1Backbone
 
         支持两种路径格式：
-        1. 标准 JointModel checkpoint（包含 stage3.pt, stage4.pt 等）
-           - 使用 load_joint_model() 加载完整的 JointModel
-        2. 联合训练保存的路径（包含 stage1/ 子目录，但没有 stage3.pt）
-           - 只加载 backbone + line_pooling
+        1. 联合训练 checkpoint（包含 stage1/ 子目录）
+        2. 标准 LayoutXLM checkpoint
         """
-        # 检查是否是联合训练保存的格式
-        stage1_subdir = os.path.join(checkpoint_path, "stage1")
-        stage3_file = os.path.join(checkpoint_path, "stage3.pt")
-        is_joint_training_format = os.path.isdir(stage1_subdir) and not os.path.exists(stage3_file)
+        from examples.comp_hrdoc.models.detect import build_stage1_backbone
 
-        if is_joint_training_format:
-            # 联合训练格式：只加载 backbone + line_pooling
-            logger.info(f"Detected joint training checkpoint format")
-            return self._load_from_joint_training_checkpoint(checkpoint_path)
-        else:
-            # 标准 JointModel 格式
-            from models.build import load_joint_model
-            model, tokenizer = load_joint_model(
-                model_path=checkpoint_path,
-                device=self.device,
-                config=config,
-            )
-            return model, tokenizer
-
-    def _load_from_joint_training_checkpoint(self, checkpoint_path: str):
-        """从联合训练 checkpoint 加载 backbone + line_pooling
-
-        联合训练 checkpoint 结构：
-        - stage1/: backbone 权重 (HuggingFace 格式)
-        - pytorch_model.bin: Construct 权重 (不需要加载)
-        - tokenizer files
-
-        复用 JointModel 以获得完整的 encode_with_micro_batch 实现
-        """
-        from layoutlmft.models.layoutxlm import (
-            LayoutXLMForTokenClassification,
-            LayoutXLMConfig,
-            LayoutXLMTokenizerFast,
+        model, tokenizer = build_stage1_backbone(
+            checkpoint_path=checkpoint_path,
+            device=str(self.device),
+            use_line_enhancer=True,
+            use_cls_head=False,
         )
-        from layoutlmft.data.labels import NUM_LABELS, get_id2label, get_label2id
-        from models.joint_model import JointModel
-
-        # 延迟导入 stage3/stage4 相关模块
-        import sys
-        STAGE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        stage_dir = os.path.join(STAGE_ROOT, "stage")
-        if stage_dir not in sys.path:
-            sys.path.insert(0, stage_dir)
-        from train_parent_finder import SimpleParentFinder
-        from layoutlmft.models.relation_classifier import MultiClassRelationClassifier
-
-        stage1_path = os.path.join(checkpoint_path, "stage1")
-        logger.info(f"Loading backbone from: {stage1_path}")
-
-        # 加载 backbone
-        stage1_config = LayoutXLMConfig.from_pretrained(stage1_path)
-        stage1_config.num_labels = NUM_LABELS
-        stage1_config.id2label = get_id2label()
-        stage1_config.label2id = get_label2id()
-
-        backbone = LayoutXLMForTokenClassification.from_pretrained(
-            stage1_path,
-            config=stage1_config,
-        )
-
-        # 创建 dummy stage3/stage4（只为了能创建 JointModel，不会被使用）
-        dummy_stage3 = SimpleParentFinder(hidden_size=768, dropout=0.0)
-        dummy_stage4 = MultiClassRelationClassifier(hidden_size=768, num_relations=3, dropout=0.0)
-
-        # 创建完整的 JointModel，复用其 encode_with_micro_batch
-        model = JointModel(
-            stage1_model=backbone,
-            stage3_model=dummy_stage3,
-            stage4_model=dummy_stage4,
-            use_gru=False,
-            use_line_enhancer=True,  # 启用行间特征增强（论文 4.2.2）
-        )
-
-        # 加载 cls_head 权重（如果存在）
-        cls_head_path = os.path.join(checkpoint_path, "cls_head.pt")
-        if os.path.exists(cls_head_path):
-            logger.info(f"Loading cls_head from: {cls_head_path}")
-            cls_head_state = torch.load(cls_head_path, map_location="cpu")
-            model.cls_head.load_state_dict(cls_head_state)
-            logger.info("  cls_head loaded successfully")
-        else:
-            logger.warning(f"cls_head weights not found: {cls_head_path}")
-            logger.warning("  cls_head will use random initialization")
-
-        # 加载 line_enhancer 权重（如果存在）
-        line_enhancer_path = os.path.join(checkpoint_path, "line_enhancer.pt")
-        if os.path.exists(line_enhancer_path):
-            if hasattr(model, 'line_enhancer') and model.line_enhancer is not None:
-                logger.info(f"Loading line_enhancer from: {line_enhancer_path}")
-                line_enhancer_state = torch.load(line_enhancer_path, map_location="cpu")
-                model.line_enhancer.load_state_dict(line_enhancer_state)
-                logger.info("  line_enhancer loaded successfully")
-            else:
-                logger.warning(f"line_enhancer weights found but model doesn't have line_enhancer")
-        else:
-            if hasattr(model, 'line_enhancer') and model.line_enhancer is not None:
-                logger.warning(f"line_enhancer weights not found: {line_enhancer_path}")
-                logger.warning("  line_enhancer will use random initialization")
-
-        model = model.to(self.device)
-
-        # 加载 tokenizer
-        try:
-            tokenizer = LayoutXLMTokenizerFast.from_pretrained(checkpoint_path)
-            logger.info(f"Loaded tokenizer from: {checkpoint_path}")
-        except Exception:
-            tokenizer = LayoutXLMTokenizerFast.from_pretrained(stage1_path)
-            logger.info(f"Loaded tokenizer from: {stage1_path}")
 
         return model, tokenizer
 
@@ -319,23 +211,17 @@ class StageFeatureExtractor:
 
     def set_train_mode(self, freeze_visual: bool = True):
         """
-        设置 backbone 为训练模式（用于 train_stage1）
+        设置为训练模式（用于 train_stage1）
 
         Args:
             freeze_visual: 是否冻结视觉编码器
         """
         self.model.train()
         if freeze_visual:
-            backbone = self.model.backbone
-            if hasattr(backbone, 'layoutlmv2'):
-                visual = backbone.layoutlmv2.visual
-                for param in visual.parameters():
-                    param.requires_grad = False
-                visual.eval()  # 保持 BatchNorm 等层为 eval 模式
-                logger.info("Froze visual encoder, set to eval mode")
+            self.model.freeze_visual()
 
     def set_eval_mode(self):
-        """设置 backbone 为评估模式"""
+        """设置为评估模式"""
         self.model.eval()
 
     def get_trainable_params(self) -> list:
@@ -420,7 +306,7 @@ class StageFeatureExtractor:
 
         # Step 3: 行间特征增强（论文 4.2.2）
         # 在 line_pooling 之后应用 Transformer 增强
-        if hasattr(self.model, 'line_enhancer') and self.model.line_enhancer is not None:
+        if self.model.line_enhancer is not None:
             line_features = self.model.line_enhancer(line_features, line_mask)
 
         return line_features, line_mask
