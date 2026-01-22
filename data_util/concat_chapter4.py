@@ -11,6 +11,7 @@
   python concat_chapter4.py batch1 --json          # 只拼接json
   python concat_chapter4.py batch1 --docx --json   # 两者都做
   python concat_chapter4.py batch1 --remount       # 仅重新挂载，不拼接
+  python concat_chapter4.py --dir /path/to/dir --json  # 直接指定目录
 
 目录结构:
   concat/batch1/
@@ -411,6 +412,34 @@ def concat_json(truncated_json: list, doc_a_json_path: Path) -> list:
 
 
 # ============================================================================
+# 路径转换
+# ============================================================================
+
+def convert_windows_path_to_wsl(path_str: str) -> str:
+    """
+    将 Windows 路径转换为 WSL 路径
+    E:\\models\\data -> /mnt/e/models/data
+    E:modelsdata (bash吃掉反斜杠后) -> /mnt/e/models/data
+    """
+    if not path_str:
+        return path_str
+
+    # 检查是否是 Windows 路径格式 (盘符:)
+    if len(path_str) >= 2 and path_str[1] == ':':
+        drive_letter = path_str[0].lower()
+        # 移除盘符和冒号
+        rest_path = path_str[2:]
+        # 转换反斜杠为正斜杠
+        rest_path = rest_path.replace('\\', '/')
+        # 移除开头的斜杠（如果有）
+        rest_path = rest_path.lstrip('/')
+        # 构建 WSL 路径
+        return f"/mnt/{drive_letter}/{rest_path}"
+
+    return path_str
+
+
+# ============================================================================
 # 主函数
 # ============================================================================
 
@@ -515,7 +544,8 @@ def process_json_concat(batch_dir: Path, output_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="拼接裁切后的docx和文档A的第四章后内容")
-    parser.add_argument("batch", help="批次名称，如 batch1")
+    parser.add_argument("batch", nargs="?", help="批次名称，如 batch1 (当不使用 --dir 时必需)")
+    parser.add_argument("--dir", type=str, help="直接指定工作目录路径（如果指定，将忽略 batch 参数）")
     parser.add_argument("--docx", action="store_true", help="拼接docx文件")
     parser.add_argument("--json", action="store_true", help="只拼接第四章后的json（不修改前面的）")
     parser.add_argument("--remount", action="store_true", help="仅重新挂载非section节点（不拼接）")
@@ -529,13 +559,42 @@ def main():
         return
 
     # 目录配置
-    batch_dir = Path(f"/mnt/e/models/data/Section/tender_document/docx/concat/{args.batch}")
+    if args.dir:
+        # 使用 --dir 直接指定目录，自动转换 Windows 路径
+        converted_path = convert_windows_path_to_wsl(args.dir)
+        batch_dir = Path(converted_path)
+    elif args.batch:
+        # 检查 batch 参数是否看起来像 Windows 路径（包含盘符:）
+        if len(args.batch) >= 2 and args.batch[1] == ':':
+            # 看起来是 Windows 路径，直接转换
+            converted_path = convert_windows_path_to_wsl(args.batch)
+            batch_dir = Path(converted_path)
+            print(f"\n[提示] 检测到 Windows 路径，已自动转换")
+            print(f"  原始: {args.batch}")
+            print(f"  转换: {converted_path}")
+            print(f"  建议: 在 bash 中使用 Windows 路径时请加引号，如: --dir \"E:\\path\\to\\dir\"\n")
+        else:
+            # 使用 batch 参数构建目录
+            batch_dir = Path(f"/mnt/e/models/data/Section/tender_document/docx/concat/{args.batch}")
+    else:
+        parser.print_help()
+        print("\n[错误] 请指定 batch 参数或使用 --dir 指定目录")
+        return
+
     output_dir = batch_dir / "fulltext"
 
     print("=" * 80)
-    print("拼接裁切docx和文档A的'第四章...'后的内容")
+    # 根据操作类型显示不同标题
+    if args.remount:
+        print("重新挂载非section节点")
+    elif args.docx and args.json:
+        print("拼接docx和json文件")
+    elif args.docx:
+        print("拼接docx文件")
+    elif args.json:
+        print("拼接json文件")
     print("=" * 80)
-    print(f"Batch目录: {batch_dir}")
+    print(f"工作目录: {batch_dir}")
     print(f"输出目录: {output_dir}")
 
     if not batch_dir.exists():

@@ -110,13 +110,15 @@ class TreeNode:
         self.text = text
         self.suffix = suffix
         self.relation = relation
-        self.parent_id = parent_id
+        self.parent_id = parent_id  # 原始的parent_id（253的）
+        self.parent: Optional[TreeNode] = None  # 树中的父节点引用
         self.children: List[TreeNode] = []
         self.matched_target_id: Optional[int] = None
 
     def add_child(self, child: 'TreeNode'):
         """添加子节点"""
         self.children.append(child)
+        child.parent = self  # 设置父节点引用
 
     def __repr__(self):
         return f"TreeNode(id={self.line_id}, text='{self.text[:20]}...', children={len(self.children)})"
@@ -195,7 +197,7 @@ def build_target_index(target_lines: List[dict]) -> Tuple[Dict, Dict, Dict]:
     return text_index, suffix_index, line_by_id
 
 
-def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
+def match_trees(ref_root: TreeNode, target_lines: List[dict], ref_nodes: Dict[int, TreeNode]) -> Tuple[Dict[int, int], List[Dict], Optional[TreeNode]]:
     """
     深度优先匹配两棵树，边遍历253树边构建259树
 
@@ -211,7 +213,9 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
         target_lines: 目标文件（259）的所有行
 
     Returns:
-        映射字典 {ref_line_id: target_line_id}
+        mapping: 映射字典 {ref_line_id: target_line_id}
+        unmatched_nodes: 未匹配的节点列表
+        target_root: 259的根节点（已构建好的树）
     """
     # 建立目标文件索引
     text_index, suffix_index, line_by_id = build_target_index(target_lines)
@@ -221,6 +225,12 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
 
     # 映射结果
     mapping = {}
+
+    # 未匹配的节点
+    unmatched_nodes = []
+
+    # 259的根节点（边遍历边构建）
+    target_root = None
 
     def find_candidates_in_range(ref_node: TreeNode,
                                   search_start: int = 0,
@@ -281,7 +291,8 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
 
     def match_node_recursive(ref_node: TreeNode,
                             parent_target_node: Optional[TreeNode] = None,
-                            prev_sibling_target_id: Optional[int] = None):
+                            prev_sibling_target_id: Optional[int] = None,
+                            nearest_ancestor_target_node: Optional[TreeNode] = None):
         """
         递归匹配节点，边遍历边构建目标树
 
@@ -289,6 +300,7 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
             ref_node: 当前要匹配的参考节点（253）
             parent_target_node: 父节点在目标树中的对应节点（259）
             prev_sibling_target_id: 前一个兄弟节点在目标中的line_id
+            nearest_ancestor_target_node: 最近的已匹配祖先节点（用于父节点未匹配时）
         """
         # 确定搜索范围（利用树的位置约束）
         if parent_target_node:
@@ -332,26 +344,53 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
             used_target_ids.add(best_target_id)
             ref_node.matched_target_id = best_target_id
 
-            # 创建259的树节点（用于后续子节点的搜索起始位置）
+            # 创建259的树节点（边匹配边构建259树）
             target_line = line_by_id[best_target_id]
             target_node = TreeNode(
                 line_id=best_target_id,
                 text=target_line.get('text', ''),
                 suffix=remove_prefix(target_line.get('text', '')),
-                relation=target_line.get('relation', 'equality'),
-                parent_id=target_line.get('parent_id', -1)
+                relation=ref_node.relation,  # 使用253的relation
+                parent_id=ref_node.parent_id  # 暂时存储253的parent_id（后面会转换）
             )
+
+            # 挂载到259树上
+            nonlocal target_root
+            if parent_target_node is not None:
+                # 父节点存在，挂载到父节点
+                parent_target_node.add_child(target_node)
+            elif nearest_ancestor_target_node is not None:
+                # 父节点未匹配，但有祖先节点，挂载到祖先节点
+                nearest_ancestor_target_node.add_child(target_node)
+            else:
+                # 真正的根节点
+                if target_root is None:
+                    target_root = target_node
         else:
             # 未找到匹配
             print(f"  警告: 未找到匹配 ref_id={ref_node.line_id}, text='{ref_node.text[:40]}'")
             target_node = None
 
+            # 记录未匹配的节点
+            ref_info = ref_nodes.get(ref_node.line_id)
+            if ref_info:
+                unmatched_nodes.append({
+                    'line_id': ref_node.line_id,
+                    'text': ref_node.text,
+                    'parent_id': ref_node.parent_id,
+                    'relation': ref_node.relation,
+                })
+
         # 递归处理子节点
         prev_child_target_id = None
         for child in ref_node.children:
+            # 确定nearest_ancestor：如果当前节点匹配上了，就是它；否则继承
+            next_nearest_ancestor = target_node if target_node is not None else nearest_ancestor_target_node
+
             match_node_recursive(child,
                                parent_target_node=target_node,
-                               prev_sibling_target_id=prev_child_target_id)
+                               prev_sibling_target_id=prev_child_target_id,
+                               nearest_ancestor_target_node=next_nearest_ancestor)
 
             # 更新前一个兄弟节点的ID
             if child.matched_target_id is not None:
@@ -360,7 +399,7 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
     # 从根节点开始递归匹配
     match_node_recursive(ref_root)
 
-    return mapping
+    return mapping, unmatched_nodes, target_root
 
 
 def collect_all_nodes(root: TreeNode) -> Dict[int, TreeNode]:
@@ -376,56 +415,126 @@ def collect_all_nodes(root: TreeNode) -> Dict[int, TreeNode]:
     return nodes
 
 
-def fix_target_file(target_lines: List[dict], mapping: Dict[int, int], ref_nodes: Dict[int, TreeNode]):
+def print_tree(root: TreeNode, max_nodes: int = 50, max_text_len: int = 50):
+    """打印树结构"""
+    lines = []
+    count = [0]  # 使用列表来在闭包中修改
+
+    def format_node(node: TreeNode, indent: int = 0):
+        if count[0] >= max_nodes:
+            if count[0] == max_nodes:
+                lines.append("  " * indent + "... (省略更多节点)")
+                count[0] += 1
+            return
+
+        text = node.text
+        if len(text) > max_text_len:
+            text = text[:max_text_len - 3] + "..."
+
+        lines.append("  " * indent + f"├── [line_id={node.line_id}] {text}")
+        count[0] += 1
+
+        for child in node.children:
+            format_node(child, indent + 1)
+
+    format_node(root)
+    print("\n".join(lines))
+
+
+def build_target_tree_from_mapping(mapping: Dict[int, int], ref_nodes: Dict[int, TreeNode], target_lines: List[dict]) -> Optional[TreeNode]:
+    """从映射关系构建目标树（259）
+
+    注意：这里使用修复**后**的parent_id来构建树，
+    因为fix_target_file已经修改了target_lines中的parent_id
     """
-    修复目标文件，只修改 class、parent_id、relation 三个字段
+    # 建立target_line_id索引（已修复）
+    target_by_id = {line.get('line_id'): line for line in target_lines if line.get('class') == 'section'}
+
+    # 创建目标树节点（只包含匹配上的section）
+    target_nodes = {}
+    for ref_id, target_id in mapping.items():
+        if target_id not in target_by_id:
+            continue
+
+        target_line = target_by_id[target_id]
+
+        # 创建节点（使用修复后的值）
+        node = TreeNode(
+            line_id=target_id,
+            text=target_line.get('text', ''),
+            suffix=remove_prefix(target_line.get('text', '')),
+            relation=target_line.get('relation', 'contain'),  # 修复后的relation
+            parent_id=target_line.get('parent_id', -1),  # 修复后的parent_id
+        )
+        target_nodes[target_id] = node
+
+    # 建立父子关系（使用修复后的parent_id）
+    root = None
+    for target_id, node in target_nodes.items():
+        if node.parent_id == -1:
+            # 根节点
+            root = node
+        else:
+            # 找到父节点
+            if node.parent_id in target_nodes:
+                target_nodes[node.parent_id].add_child(node)
+
+    return root
+
+
+def fix_target_file(target_lines: List[dict], target_root: Optional[TreeNode], mapping: Dict[int, int]):
+    """
+    从259的树提取格式A数据（parent_id + relation），写回target_lines
+    只修改 class、parent_id、relation 三个字段
     """
     target_by_id = {line.get('line_id'): line for line in target_lines}
 
     print(f"\n开始修复...")
     print(f"  需要修复的section数量: {len(mapping)}")
 
+    # 从259的树中提取所有节点
+    target_nodes_dict = {}
+    def collect_target_nodes(node: TreeNode):
+        target_nodes_dict[node.line_id] = node
+        for child in node.children:
+            collect_target_nodes(child)
+
+    if target_root:
+        collect_target_nodes(target_root)
+
     class_changed = 0
     parent_changed = 0
     relation_changed = 0
 
     # 修改三个字段
-    for ref_id, target_id in mapping.items():
+    for target_id, target_node in target_nodes_dict.items():
         if target_id not in target_by_id:
             continue
 
         target_line = target_by_id[target_id]
-        ref_node = ref_nodes.get(ref_id)
-
-        if not ref_node:
-            continue
 
         # 1. 修改 class
         if target_line.get('class') != 'section':
             target_line['class'] = 'section'
             class_changed += 1
 
-        # 2. 修改 relation
-        if target_line.get('relation') != ref_node.relation:
-            target_line['relation'] = ref_node.relation
+        # 2. 修改 relation（从259树节点获取，即253的relation）
+        if target_line.get('relation') != target_node.relation:
+            target_line['relation'] = target_node.relation
             relation_changed += 1
 
-        # 3. 修改 parent_id
-        ref_parent_id = ref_node.parent_id
-
-        if ref_parent_id == -1:
-            if target_line.get('parent_id') != -1:
-                target_line['parent_id'] = -1
-                parent_changed += 1
+        # 3. 修改 parent_id（从259树结构提取）
+        # 根据树的parent关系转换为格式A的parent_id
+        if target_node.parent is None:
+            # 根节点
+            new_parent_id = -1
         else:
-            # 找到parent在目标文件中的对应line_id
-            if ref_parent_id in mapping:
-                target_parent_id = mapping[ref_parent_id]
-                if target_line.get('parent_id') != target_parent_id:
-                    target_line['parent_id'] = target_parent_id
-                    parent_changed += 1
-            else:
-                print(f"  警告: line_id={target_id} 的parent在映射中未找到 (ref_parent_id={ref_parent_id})")
+            # 父节点的line_id
+            new_parent_id = target_node.parent.line_id
+
+        if target_line.get('parent_id') != new_parent_id:
+            target_line['parent_id'] = new_parent_id
+            parent_changed += 1
 
     print(f"  修改class: {class_changed} 个")
     print(f"  修改relation: {relation_changed} 个")
@@ -495,12 +604,38 @@ def main():
 
     # 深度优先匹配，边遍历边构建目标树
     print("深度优先匹配参考树到目标文件...")
-    mapping = match_trees(ref_root, target_lines)
+    mapping, unmatched_nodes, target_root = match_trees(ref_root, target_lines, ref_nodes)
     print(f"  成功映射: {len(mapping)} / {len(ref_nodes)} 个")
     print()
 
-    # 修复目标文件
-    fixed_lines = fix_target_file(target_lines, mapping, ref_nodes)
+    # 打印未匹配的元素详情
+    if unmatched_nodes:
+        print(f"未匹配的section节点详情 (共{len(unmatched_nodes)}个):")
+        print("=" * 80)
+        for node_info in unmatched_nodes:
+            print(f"  line_id={node_info['line_id']}")
+            print(f"    text: {node_info['text']}")
+            print(f"    parent_id: {node_info['parent_id']}")
+            print(f"    relation: {node_info['relation']}")
+            print()
+
+    # 打印253树结构
+    print("253参考树结构:")
+    print("=" * 80)
+    print_tree(ref_root, max_nodes=50)
+    print()
+
+    # 打印259匹配后的树结构
+    print("259匹配后的树结构:")
+    print("=" * 80)
+    if target_root:
+        print_tree(target_root, max_nodes=50)
+    else:
+        print("  (无法构建259树)")
+    print()
+
+    # 修复目标文件（从259树提取格式A数据）
+    fixed_lines = fix_target_file(target_lines, target_root, mapping)
 
     # 保存（保持原格式）
     if isinstance(target_data, dict):
