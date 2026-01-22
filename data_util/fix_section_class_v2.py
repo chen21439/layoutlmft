@@ -55,18 +55,34 @@ def extract_lines(data):
 
 
 def remove_prefix(text):
-    """去掉编号前缀"""
+    """
+    去掉编号前缀
+
+    处理各种编号格式：
+    - 中文：第一章、一、（一）、(一)
+    - 阿拉伯数字：1、1.、1.2.3、1.2.3.4.5
+    - 括号：(1)、（1）、1)、1）
+    """
     patterns = [
-        r'^第[一二三四五六七八九十百千]+[章节册]\s*',
+        # 中文章节
+        r'^第[一二三四五六七八九十百千]+[章节册条]\s*',
         r'^[一二三四五六七八九十百千]+、\s*',
         r'^（[一二三四五六七八九十百千]+）\s*',
         r'^\([一二三四五六七八九十百千]+\)\s*',
+        # 多级数字编号（最多5级）
+        r'^\d+\.\d+\.\d+\.\d+\.\d+\s+',
+        r'^\d+\.\d+\.\d+\.\d+\s+',
+        r'^\d+\.\d+\.\d+\s+',
+        r'^\d+\.\d+\s+',
+        # 简单数字编号
         r'^\d+、\s*',
-        r'^\d+\.\s*',
+        r'^\d+\.\s+',
+        r'^\d+．\s+',  # 全角点
+        # 括号编号
         r'^\(\d+\)\s*',
-        r'^\d+\.\d+\s*',
-        r'^\d+\.\d+\.\d+\s*',
-        r'^\d+\.\d+\.\d+\.\d+\s*',
+        r'^\（\d+\）\s*',  # 全角括号
+        r'^\d+\)\s*',
+        r'^\d+）\s*',  # 全角括号
     ]
     result = text
     for pattern in patterns:
@@ -189,7 +205,7 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
                         candidates.append((target_id, 'suffix'))
 
         # 3. 如果还没找到，尝试子串包含匹配
-        if not candidates and len(ref_node.suffix) > 10:  # 只对足够长的文本做子串匹配
+        if not candidates and len(ref_node.suffix) > 2:  # 降低阈值，短文本也可以匹配
             for line in target_lines:
                 if line.get('class') == 'table':
                     continue
@@ -200,10 +216,16 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict]) -> Dict[int, int]:
                 target_text = line.get('text', '')
                 target_suffix = remove_prefix(target_text)
 
-                # 子串包含（双向）
-                if (len(ref_node.suffix) > 15 and len(target_suffix) > 15 and
-                    (ref_node.suffix in target_suffix or target_suffix in ref_node.suffix)):
-                    candidates.append((target_id, 'substring'))
+                # 子串包含（双向），但要求长度差异不能太大
+                if ref_node.suffix and target_suffix:
+                    len_ref = len(ref_node.suffix)
+                    len_tgt = len(target_suffix)
+
+                    # 如果是包含关系
+                    if ref_node.suffix in target_suffix or target_suffix in ref_node.suffix:
+                        # 长度差异不超过30个字符，避免误匹配
+                        if abs(len_ref - len_tgt) < 30:
+                            candidates.append((target_id, 'substring'))
 
         # 4. 如果有候选，选择最佳匹配
         if candidates:
