@@ -2,15 +2,22 @@
 批量上传docx文件并自动下载结果并修复
 
 主要功能：
-  指定一个目录，自动找到所有docx文件并上传，默认间隔15秒
-  上传完成1分钟后，自动下载JSON结果到 dir/json 目录
-  下载完成后，自动使用253_construct.json作为参考修复所有JSON
+  1. 完整流程：上传docx -> 下载JSON -> 自动修复
+  2. 仅修复：修复已存在的JSON文件
 
 用法：
+  # 完整流程（上传+下载+修复）
   python batch_upload_docx.py <folder_path> <reference_json>
 
+  # 仅修复已有JSON
+  python batch_upload_docx.py --fix-only <json_dir> <reference_json>
+
 示例：
+  # 完整流程
   python batch_upload_docx.py "E:\\models\\data\\Section\\tender_document\\docx\\Section\\批注" "E:\\models\\data\\Section\\tender_document\\docx\\Section\\fulltext\\253_construct.json"
+
+  # 仅修复
+  python batch_upload_docx.py --fix-only "E:\\models\\data\\Section\\tender_document\\docx\\Section\\批注\\json" "E:\\models\\data\\Section\\tender_document\\docx\\Section\\fulltext\\253_construct.json"
 """
 
 import os
@@ -122,18 +129,31 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
     return downloaded_files
 
 
-def fix_json_files(downloaded_files: list, reference_file: str):
-    """使用参考文件修复下载的JSON文件
+def fix_json_files(json_files, reference_file: str):
+    """使用参考文件修复JSON文件
 
     Args:
-        downloaded_files: 下载的JSON文件列表
+        json_files: JSON文件列表（Path对象）或目录路径
         reference_file: 参考文件路径（253_construct.json）
     """
-    if not downloaded_files:
+    # 如果传入的是目录路径，则获取所有JSON文件
+    if isinstance(json_files, (str, Path)):
+        json_dir = Path(json_files)
+        if json_dir.is_dir():
+            json_files = list(json_dir.glob("*.json"))
+            # 过滤掉带_backup的文件
+            json_files = [f for f in json_files if '_backup' not in f.name]
+        else:
+            print(f"[错误] {json_dir} 不是一个目录")
+            return
+
+    if not json_files:
+        print("[提示] 没有找到需要修复的JSON文件")
         return
 
     print(f"\n修复JSON文件")
     print(f"参考文件: {reference_file}")
+    print(f"文件数量: {len(json_files)}")
     print("=" * 80)
 
     fix_script = Path(__file__).parent / "fix_section_class_v2.py"
@@ -144,8 +164,8 @@ def fix_json_files(downloaded_files: list, reference_file: str):
     success_count = 0
     failed_count = 0
 
-    for i, json_file in enumerate(downloaded_files, 1):
-        print(f"\n[{i}/{len(downloaded_files)}] 修复: {json_file.name}")
+    for i, json_file in enumerate(json_files, 1):
+        print(f"\n[{i}/{len(json_files)}] 修复: {json_file.name}")
 
         # 输出文件：覆盖原文件
         output_file = json_file
@@ -175,7 +195,7 @@ def fix_json_files(downloaded_files: list, reference_file: str):
     print(f"修复完成:")
     print(f"  成功: {success_count}")
     print(f"  失败: {failed_count}")
-    print(f"  总计: {len(downloaded_files)}")
+    print(f"  总计: {len(json_files)}")
 
 
 def batch_upload_and_download(folder_path: str,
@@ -263,12 +283,48 @@ def batch_upload_and_download(folder_path: str,
 
 
 def main():
+    # 检查是否是仅修复模式
+    if len(sys.argv) >= 2 and sys.argv[1] == '--fix-only':
+        if len(sys.argv) < 4:
+            print(__doc__)
+            print("\n[错误] --fix-only 需要JSON目录和参考文件")
+            print("\n示例:")
+            print('  python batch_upload_docx.py --fix-only \\')
+            print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注\\\\json" \\')
+            print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
+            sys.exit(1)
+
+        json_dir = convert_windows_path_to_wsl(sys.argv[2])
+        reference_path = convert_windows_path_to_wsl(sys.argv[3])
+
+        json_path = Path(json_dir)
+        ref_file = Path(reference_path)
+
+        if not json_path.exists():
+            print(f"[错误] JSON目录不存在: {json_path}")
+            sys.exit(1)
+
+        if not ref_file.exists():
+            print(f"[错误] 参考文件不存在: {ref_file}")
+            sys.exit(1)
+
+        # 仅执行修复
+        fix_json_files(json_path, str(ref_file))
+        return
+
+    # 完整流程模式
     if len(sys.argv) < 3:
         print(__doc__)
         print("\n[错误] 请提供文件夹路径和参考JSON文件")
         print("\n示例:")
+        print('  # 完整流程')
         print('  python batch_upload_docx.py \\')
         print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注" \\')
+        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
+        print()
+        print('  # 仅修复')
+        print('  python batch_upload_docx.py --fix-only \\')
+        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注\\\\json" \\')
         print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
         sys.exit(1)
 
