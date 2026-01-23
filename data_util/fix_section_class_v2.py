@@ -31,6 +31,28 @@ import re
 from typing import List, Dict, Optional, Tuple
 
 
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """计算两个字符串的编辑距离（Levenshtein distance）"""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # 插入、删除、替换的成本
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
 def convert_windows_path_to_wsl(path_str: str) -> str:
     """将 Windows 路径转换为 WSL 路径"""
     if not path_str:
@@ -71,31 +93,43 @@ def remove_prefix(text):
     """
     去掉编号前缀
 
-    处理各种编号格式：
-    - 中文：第一章、一、（一）、(一)
-    - 阿拉伯数字：1、1.、1.2.3、1.2.3.4.5
+    处理各种编号格式（基于实际数据统计）：
+    - 带圈数字：①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳
+    - 中文数字：第一章、一、（一）、(一)、一）
+    - 阿拉伯数字：1、1.、1．、1.2.3
     - 括号：(1)、（1）、1)、1）
+    - 字母：a. b. a、b、
     """
     patterns = [
-        # 中文章节
-        r'^第[一二三四五六七八九十百千]+[章节册条]\s*',
+        # 带圈数字（优先匹配，避免被其他规则截断）
+        r'^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*',
+        # 第X章/节/条/册
+        r'^第[一二三四五六七八九十百千0-9]+[章节册条]\s*',
+        # 中文数字+顿号
         r'^[一二三四五六七八九十百千]+、\s*',
-        r'^（[一二三四五六七八九十百千]+）\s*',
-        r'^\([一二三四五六七八九十百千]+\)\s*',
-        # 多级数字编号（最多5级）
-        r'^\d+\.\d+\.\d+\.\d+\.\d+\s+',
-        r'^\d+\.\d+\.\d+\.\d+\s+',
-        r'^\d+\.\d+\.\d+\s+',
-        r'^\d+\.\d+\s+',
-        # 简单数字编号
+        # 中文数字+括号（全角、半角）
+        r'^[（(][一二三四五六七八九十百千]+[）)]\s*',
+        r'^[一二三四五六七八九十百千]+[）)]\s*',
+        # 多级数字编号（最多5级，半角点）
+        r'^\d+\.\d+\.\d+\.\d+\.\d+\s*',
+        r'^\d+\.\d+\.\d+\.\d+\s*',
+        r'^\d+\.\d+\.\d+\s*',
+        r'^\d+\.\d+\s*',
+        # 多级数字编号（全角点）
+        r'^\d+[．。]\d+[．。]\d+[．。]\d+\s*',
+        r'^\d+[．。]\d+[．。]\d+\s*',
+        r'^\d+[．。]\d+\s*',
+        # 简单数字编号（半角点、全角点、顿号）
+        r'^\d+[．。]\s*',
+        r'^\d+\.\s*',
         r'^\d+、\s*',
-        r'^\d+\.\s+',
-        r'^\d+．\s+',  # 全角点
-        # 括号编号
-        r'^\(\d+\)\s*',
-        r'^\（\d+\）\s*',  # 全角括号
-        r'^\d+\)\s*',
-        r'^\d+）\s*',  # 全角括号
+        # 数字+括号（全角、半角）
+        r'^[（(]\d+[）)]\s*',
+        r'^\d+[）)]\s*',
+        # 字母编号（a. b. 或 a、b、）
+        r'^[a-zA-Z]+[．。.、]\s*',
+        # 罗马数字编号
+        r'^[IVXivx]+[．。.、]\s*',
     ]
     result = text
     for pattern in patterns:
@@ -302,41 +336,76 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict], ref_nodes: Dict[in
             prev_sibling_target_id: 前一个兄弟节点在目标中的line_id
             nearest_ancestor_target_node: 最近的已匹配祖先节点（用于父节点未匹配时）
         """
-        # 确定搜索范围（利用树的位置约束）
-        if parent_target_node:
-            # 子节点必须在父节点之后
-            search_start = parent_target_node.line_id
-            search_end = 999999
+        # DEBUG: 追踪特定的 ref_id
+        debug_ids = []  # 关闭调试
+        is_debug = ref_node.line_id in debug_ids
 
-            # 如果有前一个兄弟，从兄弟之后开始搜索（兄弟约束更强）
-            if prev_sibling_target_id is not None:
-                search_start = prev_sibling_target_id + 1
-        else:
-            # 根节点
-            search_start = 0
-            search_end = 999999
+        # 搜索范围：不限制，依赖排序逻辑选择最佳候选
+        # 因为如果父节点匹配错了，用父节点位置限制会导致正确候选被排除
+        search_start = 0
+        search_end = 999999
 
-            # 如果有前一个根兄弟（理论上根只有一个）
-            if prev_sibling_target_id is not None:
-                search_start = prev_sibling_target_id + 1
+        if is_debug:
+            print(f"\n[DEBUG] 匹配 ref_id={ref_node.line_id}, text='{ref_node.text[:40]}'")
+            print(f"  parent_target_node: {parent_target_node.line_id if parent_target_node else None}")
+            print(f"  prev_sibling_target_id: {prev_sibling_target_id}")
+            print(f"  已使用的 target_ids 数量: {len(used_target_ids)}")
 
         # 在范围内查找候选
         candidates = find_candidates_in_range(ref_node, search_start, search_end)
 
-        # 选择最佳候选
-        best_target_id = None
-        if candidates:
-            # 优先级：exact > suffix > substring
-            exact_matches = [c for c in candidates if c[1] == 'exact']
-            suffix_matches = [c for c in candidates if c[1] == 'suffix']
-            substring_matches = [c for c in candidates if c[1] == 'substring']
+        if is_debug:
+            print(f"  找到候选数量: {len(candidates)}")
+            for cand_id, match_type in candidates[:5]:  # 只打印前5个
+                cand_line = line_by_id.get(cand_id, {})
+                cand_class = cand_line.get('class', '')
+                distance = abs(ref_node.line_id - cand_id)
+                is_used = "已使用" if cand_id in used_target_ids else "可用"
+                edit_dist = levenshtein_distance(ref_node.text, cand_line.get('text', ''))
+                print(f"    - target_id={cand_id}, class={cand_class:10s}, abs_dist={distance:4d}, edit_dist={edit_dist}, type={match_type}, {is_used}, text='{cand_line.get('text', '')[:30]}'")
 
-            if exact_matches:
-                best_target_id = exact_matches[0][0]
-            elif suffix_matches:
-                best_target_id = suffix_matches[0][0]
-            elif substring_matches:
-                best_target_id = substring_matches[0][0]
+        # 选择最佳候选
+        # 优先级：编辑距离（整数）+ line_id绝对差值（整数）
+        best_target_id = None
+        match_type_used = None
+        if candidates:
+            # 排序：编辑距离 + line_id差值（都是整数）
+            def sort_key(cand):
+                cand_id, match_type = cand
+                line = line_by_id.get(cand_id, {})
+
+                # 编辑距离（整数，越小越好）
+                ref_text = ref_node.text
+                cand_text = line.get('text', '')
+                edit_dist = levenshtein_distance(ref_text, cand_text)
+
+                # line_id绝对差值（整数）
+                line_id_dist = abs(ref_node.line_id - cand_id)
+
+                # 综合分数：编辑距离 + line_id距离（都是整数，越小越好）
+                combined_score = edit_dist + line_id_dist
+
+                return (combined_score, cand_id)
+
+            sorted_candidates = sorted(candidates, key=sort_key)
+            best_target_id = sorted_candidates[0][0]
+            match_type_used = sorted_candidates[0][1]
+
+            if is_debug:
+                print(f"  排序后的候选（前3个）：")
+                for i, cand in enumerate(sorted_candidates[:3]):
+                    cand_id, match_type = cand
+                    line = line_by_id.get(cand_id, {})
+                    edit_dist = levenshtein_distance(ref_node.text, line.get('text', ''))
+                    line_id_dist = abs(ref_node.line_id - cand_id)
+                    combined = edit_dist + line_id_dist
+                    print(f"    {i+1}. target_id={cand_id}, class={line.get('class'):10s}, edit_dist={edit_dist}, line_id_dist={line_id_dist}, combined={combined}")
+
+        if is_debug:
+            if best_target_id is not None:
+                print(f"  => 选择 target_id={best_target_id}, match_type={match_type_used}")
+            else:
+                print(f"  => 未找到匹配")
 
         if best_target_id is not None:
             # 记录映射
@@ -398,6 +467,53 @@ def match_trees(ref_root: TreeNode, target_lines: List[dict], ref_nodes: Dict[in
 
     # 从根节点开始递归匹配
     match_node_recursive(ref_root)
+
+    # 打印所有映射关系，分析距离
+    print("\n映射关系分析（ref_id -> target_id, 距离）:")
+    print("=" * 80)
+
+    distance_groups = {
+        'same': [],      # 距离=0
+        'near': [],      # 距离1-10
+        'medium': [],    # 距离11-50
+        'far': [],       # 距离51-100
+        'very_far': []   # 距离>100
+    }
+
+    for ref_id, target_id in sorted(mapping.items()):
+        distance = abs(ref_id - target_id)
+        if distance == 0:
+            distance_groups['same'].append((ref_id, target_id, distance))
+        elif distance <= 10:
+            distance_groups['near'].append((ref_id, target_id, distance))
+        elif distance <= 50:
+            distance_groups['medium'].append((ref_id, target_id, distance))
+        elif distance <= 100:
+            distance_groups['far'].append((ref_id, target_id, distance))
+        else:
+            distance_groups['very_far'].append((ref_id, target_id, distance))
+
+    print(f"距离=0:     {len(distance_groups['same'])} 个")
+    print(f"距离1-10:   {len(distance_groups['near'])} 个")
+    print(f"距离11-50:  {len(distance_groups['medium'])} 个")
+    print(f"距离51-100: {len(distance_groups['far'])} 个")
+    print(f"距离>100:   {len(distance_groups['very_far'])} 个")
+
+    # 打印距离>100的详细信息
+    if distance_groups['very_far']:
+        print("\n距离>100的匹配（可能是目录和正文的错误匹配）:")
+        print("-" * 80)
+        for ref_id, target_id, distance in distance_groups['very_far']:
+            ref_node = ref_nodes.get(ref_id)
+            target_line = line_by_id.get(target_id)
+            if ref_node and target_line:
+                ref_text = ref_node.text[:50]
+                target_text = target_line.get('text', '')[:50]
+                target_class = target_line.get('class', '')
+                print(f"253[{ref_id:4d}] -> 260[{target_id:4d}], 距离={distance:4d}, target_class={target_class}")
+                print(f"  253: \"{ref_text}\"")
+                print(f"  260: \"{target_text}\"")
+                print()
 
     return mapping, unmatched_nodes, target_root
 
