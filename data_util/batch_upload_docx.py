@@ -1,11 +1,12 @@
 """
 批量上传docx文件并自动下载结果并修复
 
-支持4个独立步骤：
+支持5个独立步骤：
   1. 上传docx
   2. 下载JSON
   3. 修复section节点（使用253作为参考）
   4. 重新挂载非section节点
+  5. 删除任务
 
 用法：
   # 1. 仅上传
@@ -20,6 +21,9 @@
   # 4. 仅重新挂载
   python batch_upload_docx.py --remount <json_dir>
 
+  # 5. 删除任务
+  python batch_upload_docx.py --delete <start_id-end_id>
+
   # 完整流程（上传+下载+修复+重新挂载）
   python batch_upload_docx.py --all <folder_path> <reference_json>
 
@@ -32,6 +36,9 @@
   python batch_upload_docx.py --download 271-298 "E:\\批注\\json"
   python batch_upload_docx.py --fix "E:\\批注\\json" "E:\\fulltext\\253_construct.json"
   python batch_upload_docx.py --remount "E:\\批注\\json"
+
+  # 删除任务
+  python batch_upload_docx.py --delete 271-298
 """
 
 import os
@@ -268,6 +275,50 @@ def remount_json_files(json_dir: str):
         print(f"✗ 重新挂载失败: {str(e)}")
 
 
+def delete_tasks(task_ids: list, api_base_url: str = "http://localhost:9801"):
+    """删除任务
+
+    Args:
+        task_ids: 任务ID列表
+        api_base_url: API基础URL
+    """
+    print(f"\n删除任务")
+    print(f"API: {api_base_url}")
+    print(f"任务数量: {len(task_ids)}")
+    print("=" * 80)
+
+    success_count = 0
+    failed_count = 0
+    failed_tasks = []
+
+    for task_id in task_ids:
+        delete_url = f"{api_base_url}/python/api/pdf/task/{task_id}"
+
+        try:
+            response = requests.delete(delete_url, timeout=10)
+
+            if response.status_code in [200, 204]:
+                print(f"  ✓ taskId {task_id}: 已删除")
+                success_count += 1
+            else:
+                print(f"  ✗ taskId {task_id}: 失败 (HTTP {response.status_code})")
+                failed_count += 1
+                failed_tasks.append(task_id)
+        except Exception as e:
+            print(f"  ✗ taskId {task_id}: 失败 ({str(e)})")
+            failed_count += 1
+            failed_tasks.append(task_id)
+
+    print("\n" + "=" * 80)
+    print(f"删除完成:")
+    print(f"  成功: {success_count}")
+    print(f"  失败: {failed_count}")
+    print(f"  总计: {len(task_ids)}")
+
+    if failed_tasks:
+        print(f"\n失败的任务ID: {', '.join(map(str, failed_tasks))}")
+
+
 def batch_upload_and_download(folder_path: str,
                                reference_file: str,
                                api_url: str = "http://localhost:9801/python/api/pdf/upload_pdf",
@@ -473,7 +524,26 @@ def main():
 
         remount_json_files(str(json_path))
 
-    # 5. 完整流程
+    # 5. 删除任务
+    elif mode == '--delete':
+        if len(sys.argv) < 3:
+            print("[错误] --delete 需要 taskId范围")
+            print("示例: --delete 271-298")
+            sys.exit(1)
+
+        task_range = sys.argv[2]
+        api_base_url = sys.argv[3] if len(sys.argv) > 3 else "http://localhost:9801"
+
+        try:
+            start_id, end_id = map(int, task_range.split('-'))
+        except ValueError:
+            print(f"[错误] taskId范围格式错误: {task_range}")
+            sys.exit(1)
+
+        task_ids = list(range(start_id, end_id + 1))
+        delete_tasks(task_ids, api_base_url)
+
+    # 6. 完整流程
     elif mode == '--all':
         if len(sys.argv) < 4:
             print("[错误] --all 需要 文件夹路径 和 参考文件")

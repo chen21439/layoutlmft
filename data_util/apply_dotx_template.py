@@ -7,25 +7,27 @@
 3. 安全注入标题编号系统，不覆盖目标文档原有列表
 4. 可选复制主题和字体表
 5. 自动查找同目录下所有 .dotx 模板文件
-6. 输出文件名格式：模板名_原文件名.docx
+6. 自动识别并转换 outlineLvl 大纲级别为标题样式
+7. 输出目录：原文件名去掉"标题无编号_"前缀
+8. 输出文件名：模板名.docx
 
 用法：
   python apply_dotx_template.py <main_docx_path>
 
 示例：
-  python apply_dotx_template.py "E:\\docs\\main.docx"
+  python apply_dotx_template.py "E:\\docs\\标题无编号_批注.docx"
   python apply_dotx_template.py main.docx --no-numbering
 
 目录结构示例：
   docs/
-  ├── main.docx                ← 主文件
+  ├── 标题无编号_批注.docx     ← 主文件
   ├── 标书模板.dotx            ← 自动查找
   └── 招投标模板.dotx          ← 自动查找
 
   输出：
-  docs/style/
-  ├── 标书模板_main.docx       ← 新文件名格式
-  └── 招投标模板_main.docx     ← 新文件名格式
+  docs/批注/                   ← 去掉"标题无编号_"前缀
+  ├── 标书模板.docx
+  └── 招投标模板.docx
 """
 
 import copy
@@ -621,8 +623,8 @@ def batch_apply_templates(
     print()
 
     for template_file in template_files:
-        # 输出文件名：dotx文件名_原文件名.docx
-        out_path = out_dir / f"{template_file.stem}_{target_docx.stem}{target_docx.suffix}"
+        # 输出文件名：只用模板名.docx
+        out_path = out_dir / f"{template_file.stem}{target_docx.suffix}"
 
         print(f"  [{template_file.stem}] ", end="", flush=True)
 
@@ -680,18 +682,14 @@ def main():
   - 自动在同目录查找所有 .dotx 文件作为模板
   - 只替换 Heading1-9 / 标题1-9，不影响正文和其他样式
   - 安全注入编号系统，不会覆盖目标文档原有列表
-  - 输出文件名：模板名_原文件名.docx
+  - 自动识别并转换 outlineLvl 大纲级别为标题样式
+  - 输出目录：原文件名去掉"标题无编号_"前缀
+  - 输出文件名：模板名.docx
         """
     )
     parser.add_argument(
         "main_file",
         help="主 docx 文件路径"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="style",
-        help="输出子目录名称（默认: style）"
     )
     parser.add_argument(
         "--no-numbering",
@@ -761,8 +759,13 @@ def main():
     for tf in template_files:
         print(f"    - {tf.name}")
 
-    # 输出目录
-    out_dir = directory / args.output
+    # 输出目录：使用原文件名去掉"标题无编号_"前缀作为目录名
+    output_dir_name = main_file.stem
+    # 去掉"标题无编号_"前缀
+    if output_dir_name.startswith("标题无编号_"):
+        output_dir_name = output_dir_name[len("标题无编号_"):]
+
+    out_dir = directory / output_dir_name
     print(f"\n[2/3] 输出目录: {out_dir}")
 
     # 批量应用
