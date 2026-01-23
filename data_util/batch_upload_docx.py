@@ -1,23 +1,37 @@
 """
 批量上传docx文件并自动下载结果并修复
 
-主要功能：
-  1. 完整流程：上传docx -> 下载JSON -> 自动修复
-  2. 仅修复：修复已存在的JSON文件
+支持4个独立步骤：
+  1. 上传docx
+  2. 下载JSON
+  3. 修复section节点（使用253作为参考）
+  4. 重新挂载非section节点
 
 用法：
-  # 完整流程（上传+下载+修复）
-  python batch_upload_docx.py <folder_path> <reference_json>
+  # 1. 仅上传
+  python batch_upload_docx.py --upload <folder_path>
 
-  # 仅修复已有JSON
-  python batch_upload_docx.py --fix-only <json_dir> <reference_json>
+  # 2. 仅下载（需要提供taskId范围）
+  python batch_upload_docx.py --download <start_id-end_id> <output_dir>
+
+  # 3. 仅修复section
+  python batch_upload_docx.py --fix <json_dir> <reference_json>
+
+  # 4. 仅重新挂载
+  python batch_upload_docx.py --remount <json_dir>
+
+  # 完整流程（上传+下载+修复+重新挂载）
+  python batch_upload_docx.py --all <folder_path> <reference_json>
 
 示例：
   # 完整流程
-  python batch_upload_docx.py "E:\\models\\data\\Section\\tender_document\\docx\\Section\\批注" "E:\\models\\data\\Section\\tender_document\\docx\\Section\\fulltext\\253_construct.json"
+  python batch_upload_docx.py --all "E:\\批注" "E:\\fulltext\\253_construct.json"
 
-  # 仅修复
-  python batch_upload_docx.py --fix-only "E:\\models\\data\\Section\\tender_document\\docx\\Section\\批注\\json" "E:\\models\\data\\Section\\tender_document\\docx\\Section\\fulltext\\253_construct.json"
+  # 分步执行
+  python batch_upload_docx.py --upload "E:\\批注"
+  python batch_upload_docx.py --download 271-298 "E:\\批注\\json"
+  python batch_upload_docx.py --fix "E:\\批注\\json" "E:\\fulltext\\253_construct.json"
+  python batch_upload_docx.py --remount "E:\\批注\\json"
 """
 
 import os
@@ -143,7 +157,7 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
 
 
 def fix_json_files(json_files, reference_file: str):
-    """使用参考文件修复JSON文件
+    """使用参考文件修复JSON文件（仅修复section节点）
 
     Args:
         json_files: JSON文件列表（Path对象）或目录路径
@@ -164,7 +178,7 @@ def fix_json_files(json_files, reference_file: str):
         print("[提示] 没有找到需要修复的JSON文件")
         return
 
-    print(f"\n修复JSON文件")
+    print(f"\n修复JSON文件（section节点）")
     print(f"参考文件: {reference_file}")
     print(f"文件数量: {len(json_files)}")
     print("=" * 80)
@@ -209,6 +223,49 @@ def fix_json_files(json_files, reference_file: str):
     print(f"  成功: {success_count}")
     print(f"  失败: {failed_count}")
     print(f"  总计: {len(json_files)}")
+
+
+def remount_json_files(json_dir: str):
+    """重新挂载非section节点
+
+    Args:
+        json_dir: JSON目录路径
+    """
+    json_path = Path(json_dir)
+    if not json_path.is_dir():
+        print(f"[错误] {json_path} 不是一个目录")
+        return
+
+    print(f"\n重新挂载非section节点")
+    print(f"JSON目录: {json_path}")
+    print("=" * 80)
+
+    concat_script = Path(__file__).parent / "concat_chapter4.py"
+    if not concat_script.exists():
+        print(f"[错误] concat_chapter4.py 不存在: {concat_script}")
+        return
+
+    try:
+        # 调用concat_chapter4.py --dir <json_dir> --remount
+        result = subprocess.run(
+            [sys.executable, str(concat_script), "--dir", str(json_path), "--remount"],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+
+        if result.returncode == 0:
+            print(f"✓ 重新挂载成功")
+            if result.stdout:
+                print(result.stdout)
+        else:
+            print(f"✗ 重新挂载失败")
+            if result.stderr:
+                print(f"错误: {result.stderr}")
+            if result.stdout:
+                print(result.stdout)
+    except Exception as e:
+        print(f"✗ 重新挂载失败: {str(e)}")
 
 
 def batch_upload_and_download(folder_path: str,
@@ -291,20 +348,94 @@ def batch_upload_and_download(folder_path: str,
         # 自动修复下载的JSON文件
         if downloaded_files:
             fix_json_files(downloaded_files, reference_file)
+            # 自动重新挂载
+            remount_json_files(str(json_dir))
     else:
         print("\n[提示] 没有成功上传的任务，跳过下载")
 
 
 def main():
-    # 检查是否是仅修复模式
-    if len(sys.argv) >= 2 and sys.argv[1] == '--fix-only':
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    mode = sys.argv[1]
+
+    # 1. 仅上传
+    if mode == '--upload':
+        if len(sys.argv) < 3:
+            print("[错误] --upload 需要指定文件夹路径")
+            sys.exit(1)
+
+        folder_path = convert_windows_path_to_wsl(sys.argv[2])
+        folder = Path(folder_path)
+
+        if not folder.exists() or not folder.is_dir():
+            print(f"[错误] 文件夹不存在: {folder}")
+            sys.exit(1)
+
+        # 查找所有docx文件
+        docx_files = list(folder.glob("*.docx"))
+        docx_files = [f for f in docx_files if not f.name.startswith('~$')]
+
+        if not docx_files:
+            print(f"[提示] 文件夹中没有找到docx文件: {folder}")
+            return
+
+        print(f"找到 {len(docx_files)} 个docx文件")
+        print("=" * 80)
+
+        api_url = "http://localhost:9801/python/api/pdf/upload_pdf"
+        task_ids = []
+
+        for i, file_path in enumerate(docx_files, 1):
+            print(f"\n[{i}/{len(docx_files)}] 上传: {file_path.name}")
+            success, task_id, result = upload_docx_file(file_path, api_url)
+
+            if success:
+                print(f"  ✓ 成功 (taskId: {task_id})")
+                if task_id:
+                    task_ids.append(task_id)
+            else:
+                print(f"  ✗ 失败: {result}")
+
+            if i < len(docx_files):
+                print(f"  等待 15 秒...")
+                time.sleep(15)
+
+        if task_ids:
+            print(f"\n上传完成，taskId 范围: {min(task_ids)}-{max(task_ids)}")
+            print(f"\n下一步执行:")
+            print(f'  python batch_upload_docx.py --download {min(task_ids)}-{max(task_ids)} "{folder}/json"')
+
+    # 2. 仅下载
+    elif mode == '--download':
         if len(sys.argv) < 4:
-            print(__doc__)
-            print("\n[错误] --fix-only 需要JSON目录和参考文件")
-            print("\n示例:")
-            print('  python batch_upload_docx.py --fix-only \\')
-            print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注\\\\json" \\')
-            print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
+            print("[错误] --download 需要 taskId范围 和 输出目录")
+            print("示例: --download 271-298 \"E:\\\\批注\\\\json\"")
+            sys.exit(1)
+
+        task_range = sys.argv[2]
+        output_dir = convert_windows_path_to_wsl(sys.argv[3])
+
+        try:
+            start_id, end_id = map(int, task_range.split('-'))
+        except ValueError:
+            print(f"[错误] taskId范围格式错误: {task_range}")
+            sys.exit(1)
+
+        task_ids = list(range(start_id, end_id + 1))
+        downloaded_files = download_task_results(task_ids, output_dir)
+
+        if downloaded_files:
+            print(f"\n下一步执行:")
+            print(f'  python batch_upload_docx.py --fix "{output_dir}" "E:\\\\fulltext\\\\253_construct.json"')
+
+    # 3. 仅修复
+    elif mode == '--fix':
+        if len(sys.argv) < 4:
+            print("[错误] --fix 需要 JSON目录 和 参考文件")
+            print("示例: --fix \"E:\\\\批注\\\\json\" \"E:\\\\fulltext\\\\253_construct.json\"")
             sys.exit(1)
 
         json_dir = convert_windows_path_to_wsl(sys.argv[2])
@@ -321,57 +452,62 @@ def main():
             print(f"[错误] 参考文件不存在: {ref_file}")
             sys.exit(1)
 
-        # 仅执行修复
         fix_json_files(json_path, str(ref_file))
-        return
 
-    # 完整流程模式
-    if len(sys.argv) < 3:
+        print(f"\n下一步执行:")
+        print(f'  python batch_upload_docx.py --remount "{json_dir}"')
+
+    # 4. 仅重新挂载
+    elif mode == '--remount':
+        if len(sys.argv) < 3:
+            print("[错误] --remount 需要 JSON目录")
+            print("示例: --remount \"E:\\\\批注\\\\json\"")
+            sys.exit(1)
+
+        json_dir = convert_windows_path_to_wsl(sys.argv[2])
+        json_path = Path(json_dir)
+
+        if not json_path.exists():
+            print(f"[错误] JSON目录不存在: {json_path}")
+            sys.exit(1)
+
+        remount_json_files(str(json_path))
+
+    # 5. 完整流程
+    elif mode == '--all':
+        if len(sys.argv) < 4:
+            print("[错误] --all 需要 文件夹路径 和 参考文件")
+            print("示例: --all \"E:\\\\批注\" \"E:\\\\fulltext\\\\253_construct.json\"")
+            sys.exit(1)
+
+        folder_path = convert_windows_path_to_wsl(sys.argv[2])
+        reference_path = convert_windows_path_to_wsl(sys.argv[3])
+
+        path = Path(folder_path)
+        ref_file = Path(reference_path)
+
+        if not path.exists() or not path.is_dir():
+            print(f"[错误] 文件夹不存在: {path}")
+            sys.exit(1)
+
+        if not ref_file.exists():
+            print(f"[错误] 参考文件不存在: {ref_file}")
+            sys.exit(1)
+
+        # 执行完整流程
+        batch_upload_and_download(
+            folder_path=str(path),
+            reference_file=str(ref_file),
+            api_url="http://localhost:9801/python/api/pdf/upload_pdf",
+            api_base_url="http://localhost:9801",
+            delay=15,
+            wait_before_download=60
+        )
+
+    else:
+        print(f"[错误] 未知模式: {mode}")
         print(__doc__)
-        print("\n[错误] 请提供文件夹路径和参考JSON文件")
-        print("\n示例:")
-        print('  # 完整流程')
-        print('  python batch_upload_docx.py \\')
-        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注" \\')
-        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
-        print()
-        print('  # 仅修复')
-        print('  python batch_upload_docx.py --fix-only \\')
-        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注\\\\json" \\')
-        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
         sys.exit(1)
-
-    input_path = sys.argv[1]
-    reference_path = sys.argv[2]
-
-    # 转换Windows路径到WSL路径
-    input_path = convert_windows_path_to_wsl(input_path)
-    reference_path = convert_windows_path_to_wsl(reference_path)
-
-    path = Path(input_path)
-    ref_file = Path(reference_path)
-
-    if not path.exists():
-        print(f"[错误] 文件夹不存在: {path}")
-        sys.exit(1)
-
-    if not path.is_dir():
-        print(f"[错误] 请提供文件夹路径，不是文件路径")
-        sys.exit(1)
-
-    if not ref_file.exists():
-        print(f"[错误] 参考文件不存在: {ref_file}")
-        sys.exit(1)
-
-    # 执行批量上传、下载和修复
-    batch_upload_and_download(
-        folder_path=str(path),
-        reference_file=str(ref_file),
-        api_url="http://localhost:9801/python/api/pdf/upload_pdf",
-        api_base_url="http://localhost:9801",
-        delay=15,
-        wait_before_download=60
-    )
 
 
 if __name__ == "__main__":
