@@ -1,21 +1,23 @@
 """
-批量上传docx文件并自动下载结果
+批量上传docx文件并自动下载结果并修复
 
 主要功能：
   指定一个目录，自动找到所有docx文件并上传，默认间隔15秒
   上传完成1分钟后，自动下载JSON结果到 dir/json 目录
+  下载完成后，自动使用253_construct.json作为参考修复所有JSON
 
 用法：
-  python batch_upload_docx.py <folder_path>
+  python batch_upload_docx.py <folder_path> <reference_json>
 
 示例：
-  python batch_upload_docx.py "E:\\models\\data\\Section\\tender_document\\docx\\Section\\批注"
+  python batch_upload_docx.py "E:\\models\\data\\Section\\tender_document\\docx\\Section\\批注" "E:\\models\\data\\Section\\tender_document\\docx\\Section\\fulltext\\253_construct.json"
 """
 
 import os
 import sys
 import time
 import json
+import subprocess
 import requests
 from pathlib import Path
 
@@ -63,6 +65,9 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
         task_ids: 任务ID列表
         output_dir: 输出目录
         api_base_url: API基础URL
+
+    Returns:
+        list: 成功下载的文件路径列表
     """
     output_path = Path(output_dir)
 
@@ -79,6 +84,7 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
     success_count = 0
     failed_count = 0
     failed_tasks = []
+    downloaded_files = []
 
     for task_id in task_ids:
         result_url = f"{api_base_url}/python/api/pdf/task/{task_id}/result?result_type=construct"
@@ -94,6 +100,7 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
 
                 print(f"  ✓ taskId {task_id}: 已下载 -> {output_file.name}")
                 success_count += 1
+                downloaded_files.append(output_file)
             else:
                 print(f"  ✗ taskId {task_id}: 失败 (HTTP {response.status_code})")
                 failed_count += 1
@@ -112,16 +119,76 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
     if failed_tasks:
         print(f"\n失败的任务ID: {', '.join(map(str, failed_tasks))}")
 
+    return downloaded_files
+
+
+def fix_json_files(downloaded_files: list, reference_file: str):
+    """使用参考文件修复下载的JSON文件
+
+    Args:
+        downloaded_files: 下载的JSON文件列表
+        reference_file: 参考文件路径（253_construct.json）
+    """
+    if not downloaded_files:
+        return
+
+    print(f"\n修复JSON文件")
+    print(f"参考文件: {reference_file}")
+    print("=" * 80)
+
+    fix_script = Path(__file__).parent / "fix_section_class_v2.py"
+    if not fix_script.exists():
+        print(f"[错误] 修复脚本不存在: {fix_script}")
+        return
+
+    success_count = 0
+    failed_count = 0
+
+    for i, json_file in enumerate(downloaded_files, 1):
+        print(f"\n[{i}/{len(downloaded_files)}] 修复: {json_file.name}")
+
+        # 输出文件：覆盖原文件
+        output_file = json_file
+
+        try:
+            # 调用fix_section_class_v2.py
+            result = subprocess.run(
+                [sys.executable, str(fix_script), reference_file, str(json_file), str(output_file)],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if result.returncode == 0:
+                print(f"  ✓ 修复成功")
+                success_count += 1
+            else:
+                print(f"  ✗ 修复失败")
+                if result.stderr:
+                    print(f"    错误: {result.stderr[:200]}")
+                failed_count += 1
+        except Exception as e:
+            print(f"  ✗ 修复失败: {str(e)}")
+            failed_count += 1
+
+    print("\n" + "=" * 80)
+    print(f"修复完成:")
+    print(f"  成功: {success_count}")
+    print(f"  失败: {failed_count}")
+    print(f"  总计: {len(downloaded_files)}")
+
 
 def batch_upload_and_download(folder_path: str,
+                               reference_file: str,
                                api_url: str = "http://localhost:9801/python/api/pdf/upload_pdf",
                                api_base_url: str = "http://localhost:9801",
                                delay: int = 15,
                                wait_before_download: int = 60):
-    """批量上传文件夹中的所有docx文件，并自动下载结果
+    """批量上传文件夹中的所有docx文件，并自动下载和修复结果
 
     Args:
         folder_path: 文件夹路径
+        reference_file: 参考文件路径（253_construct.json）
         api_url: 上传API地址
         api_base_url: API基础URL
         delay: 每个文件之间的延迟秒数（默认15秒）
@@ -186,36 +253,51 @@ def batch_upload_and_download(folder_path: str,
 
         # 自动下载到 folder/json 目录
         json_dir = folder / "json"
-        download_task_results(task_ids, str(json_dir), api_base_url)
+        downloaded_files = download_task_results(task_ids, str(json_dir), api_base_url)
+
+        # 自动修复下载的JSON文件
+        if downloaded_files:
+            fix_json_files(downloaded_files, reference_file)
     else:
         print("\n[提示] 没有成功上传的任务，跳过下载")
 
 
 def main():
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 3:
         print(__doc__)
-        print("\n[错误] 请提供文件夹路径")
+        print("\n[错误] 请提供文件夹路径和参考JSON文件")
         print("\n示例:")
-        print('  python batch_upload_docx.py "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注"')
+        print('  python batch_upload_docx.py \\')
+        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\批注" \\')
+        print('    "E:\\\\models\\\\data\\\\Section\\\\tender_document\\\\docx\\\\Section\\\\fulltext\\\\253_construct.json"')
         sys.exit(1)
 
     input_path = sys.argv[1]
+    reference_path = sys.argv[2]
 
     # 转换Windows路径到WSL路径
     input_path = convert_windows_path_to_wsl(input_path)
+    reference_path = convert_windows_path_to_wsl(reference_path)
+
     path = Path(input_path)
+    ref_file = Path(reference_path)
 
     if not path.exists():
-        print(f"[错误] 路径不存在: {path}")
+        print(f"[错误] 文件夹不存在: {path}")
         sys.exit(1)
 
     if not path.is_dir():
         print(f"[错误] 请提供文件夹路径，不是文件路径")
         sys.exit(1)
 
-    # 执行批量上传和下载
+    if not ref_file.exists():
+        print(f"[错误] 参考文件不存在: {ref_file}")
+        sys.exit(1)
+
+    # 执行批量上传、下载和修复
     batch_upload_and_download(
         folder_path=str(path),
+        reference_file=str(ref_file),
         api_url="http://localhost:9801/python/api/pdf/upload_pdf",
         api_base_url="http://localhost:9801",
         delay=15,
