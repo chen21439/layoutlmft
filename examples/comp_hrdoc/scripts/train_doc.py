@@ -1175,7 +1175,7 @@ def main():
         stage_feature_extractor = StageFeatureExtractor(
             checkpoint_path=backbone_path,
             device=str(device),
-            max_lines=args.max_regions,
+            max_regions=args.max_regions,
         )
         logger.info(f"Loaded StageFeatureExtractor from: {backbone_path}")
 
