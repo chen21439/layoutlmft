@@ -101,11 +101,24 @@ def download_task_results(task_ids: list, output_dir: str, api_base_url: str = "
             response = requests.get(result_url, timeout=10)
 
             if response.status_code == 200:
-                # 保存JSON文件
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    json.dump(response.json(), f, ensure_ascii=False, indent=2)
+                # 解析响应并提取dataList数组
+                result = response.json()
 
-                print(f"  ✓ taskId {task_id}: 已下载 -> {output_file.name}")
+                # 提取dataList数组
+                data_to_save = []
+                if isinstance(result, dict):
+                    if 'data' in result and isinstance(result['data'], dict):
+                        data_to_save = result['data'].get('dataList', [])
+                    elif 'dataList' in result:
+                        data_to_save = result.get('dataList', [])
+                elif isinstance(result, list):
+                    data_to_save = result
+
+                # 保存dataList数组
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+
+                print(f"  ✓ taskId {task_id}: 已下载 -> {output_file.name} ({len(data_to_save)} 行)")
                 success_count += 1
                 downloaded_files.append(output_file)
             else:
