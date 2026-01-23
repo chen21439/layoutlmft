@@ -165,6 +165,103 @@ def _ensure_numbering_root(target_z: zipfile.ZipFile) -> ET.Element:
     return root
 
 
+def _convert_outline_level_to_heading_style(
+    document_root: ET.Element,
+    styles_root: ET.Element,
+    verbose: bool = False
+) -> Tuple[ET.Element, int]:
+    """
+    将带有 outlineLvl 但没有 pStyle 的段落转换为标题样式
+
+    outlineLvl 映射：
+      0 → Heading 1
+      1 → Heading 2
+      2 → Heading 3
+      3 → Heading 4
+      ...
+      8 → Heading 9
+
+    Returns:
+        (修改后的 document_root, 转换数量)
+    """
+    # 建立样式名称到styleId的映射
+    style_name_to_id = {}
+    for style in styles_root.findall("w:style", NS):
+        style_id = style.attrib.get(f"{{{W_NS}}}styleId")
+        name_el = style.find("w:name", NS)
+        if name_el is not None and style_id:
+            name = name_el.attrib.get(f"{{{W_NS}}}val", "")
+            style_name_to_id[name.lower()] = style_id
+
+    # 大纲级别到标题名称的映射
+    outline_to_heading = {
+        "0": "heading 1",
+        "1": "heading 2",
+        "2": "heading 3",
+        "3": "heading 4",
+        "4": "heading 5",
+        "5": "heading 6",
+        "6": "heading 7",
+        "7": "heading 8",
+        "8": "heading 9",
+    }
+
+    converted_count = 0
+
+    for para in document_root.findall(".//w:p", NS):
+        pPr = para.find("w:pPr", NS)
+        if pPr is None:
+            continue
+
+        # 检查是否有 outlineLvl
+        outline_el = pPr.find("w:outlineLvl", NS)
+        if outline_el is None:
+            continue
+
+        outline_val = outline_el.attrib.get(f"{{{W_NS}}}val")
+        if outline_val not in outline_to_heading:
+            continue
+
+        # 检查是否已经有 pStyle
+        pStyle_el = pPr.find("w:pStyle", NS)
+        if pStyle_el is not None:
+            # 已经有样式引用，跳过
+            continue
+
+        # 找到对应的标题样式ID
+        heading_name = outline_to_heading[outline_val]
+        style_id = style_name_to_id.get(heading_name)
+
+        if not style_id:
+            if verbose:
+                # 获取段落文本用于调试
+                text_parts = []
+                for t in para.findall(".//w:t", NS):
+                    if t.text:
+                        text_parts.append(t.text)
+                text = ''.join(text_parts)[:50]
+                print(f"    [警告] 找不到 {heading_name} 样式，跳过段落: {text}")
+            continue
+
+        # 创建 pStyle 元素并插入到 pPr 的开头
+        new_pStyle = ET.Element(f"{{{W_NS}}}pStyle")
+        new_pStyle.attrib[f"{{{W_NS}}}val"] = style_id
+        pPr.insert(0, new_pStyle)
+
+        converted_count += 1
+
+        if verbose:
+            # 获取段落文本用于调试
+            text_parts = []
+            for t in para.findall(".//w:t", NS):
+                if t.text:
+                    text_parts.append(t.text)
+            text = ''.join(text_parts)[:50]
+            print(f"    转换: outlineLvl={outline_val} → {heading_name} ({style_id}): {text}")
+
+    return document_root, converted_count
+
+
 def _inject_heading_numbering(
     target_numbering: ET.Element,
     template_numbering: ET.Element,
@@ -401,11 +498,24 @@ def apply_dotx_template(
             if replaced_count == 0:
                 return False, "未找到可替换的标题样式", details
 
+            # 读取 document.xml 并转换 outlineLvl 为标题样式
+            tgt_doc_data = _read_zip_part(ztgt, 'word/document.xml')
+            tgt_doc_root = None
+            outline_converted_count = 0
+
+            if tgt_doc_data:
+                tgt_doc_root = _parse_xml(tgt_doc_data)
+                # 转换 outlineLvl → pStyle
+                tgt_doc_root, outline_converted_count = _convert_outline_level_to_heading_style(
+                    tgt_doc_root,
+                    tgt_styles,
+                    verbose=verbose
+                )
+
             # 如果启用了清除段落级编号覆盖
             removed_numpr_count = 0
-            tgt_doc_root = None
 
-            if enable_all_numbering:
+            if enable_all_numbering and tgt_doc_root is not None:
                 # 获取标题样式的 styleId
                 heading_style_ids = set()
                 for style in tgt_styles.findall('w:style', NS):
@@ -418,27 +528,22 @@ def apply_dotx_template(
                             if style_id:
                                 heading_style_ids.add(style_id)
 
-                # 读取 document.xml
-                tgt_doc_data = _read_zip_part(ztgt, 'word/document.xml')
-                if tgt_doc_data:
-                    tgt_doc_root = _parse_xml(tgt_doc_data)
+                # 清除标题段落的段落级 numPr
+                for para in tgt_doc_root.findall('.//w:p', NS):
+                    pPr = para.find('w:pPr', NS)
+                    if pPr is None:
+                        continue
 
-                    # 清除标题段落的段落级 numPr
-                    for para in tgt_doc_root.findall('.//w:p', NS):
-                        pPr = para.find('w:pPr', NS)
-                        if pPr is None:
-                            continue
+                    pStyle_el = pPr.find('w:pStyle', NS)
+                    if pStyle_el is None:
+                        continue
 
-                        pStyle_el = pPr.find('w:pStyle', NS)
-                        if pStyle_el is None:
-                            continue
-
-                        style_id = pStyle_el.attrib.get(f"{{{W_NS}}}val")
-                        if style_id in heading_style_ids:
-                            numPr_el = pPr.find('w:numPr', NS)
-                            if numPr_el is not None:
-                                pPr.remove(numPr_el)
-                                removed_numpr_count += 1
+                    style_id = pStyle_el.attrib.get(f"{{{W_NS}}}val")
+                    if style_id in heading_style_ids:
+                        numPr_el = pPr.find('w:numPr', NS)
+                        if numPr_el is not None:
+                            pPr.remove(numPr_el)
+                            removed_numpr_count += 1
 
             # 重建输出 docx
             with zipfile.ZipFile(output_docx, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -450,8 +555,10 @@ def apply_dotx_template(
                         data = _xml_bytes(tgt_styles)
                     elif apply_heading_numbering and info.filename == "word/numbering.xml" and tgt_numbering is not None:
                         data = _xml_bytes(tgt_numbering)
-                    elif enable_all_numbering and removed_numpr_count > 0 and info.filename == "word/document.xml":
-                        data = _xml_bytes(tgt_doc_root)
+                    elif info.filename == "word/document.xml" and tgt_doc_root is not None:
+                        # 如果转换了 outlineLvl 或清除了 numPr，保存修改后的 document.xml
+                        if outline_converted_count > 0 or removed_numpr_count > 0:
+                            data = _xml_bytes(tgt_doc_root)
                     elif copy_theme_and_fonts and info.filename in STYLE_PARTS_ALWAYS_COPY:
                         tpl_part = _read_zip_part(ztpl, info.filename)
                         if tpl_part:
@@ -472,6 +579,8 @@ def apply_dotx_template(
                                 zout.writestr(part, tpl_part)
 
             msg = f"成功替换 {replaced_count} 个标题样式"
+            if outline_converted_count > 0:
+                msg += f"，转换 {outline_converted_count} 个大纲级别段落"
             if numid_map:
                 msg += f"，注入 {len(numid_map)} 套编号"
             if removed_numpr_count > 0:
