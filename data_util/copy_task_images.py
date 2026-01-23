@@ -11,12 +11,14 @@
 用法:
   python copy_task_images.py taskId1,taskId2,taskId3
   python copy_task_images.py taskId1
+  python copy_task_images.py taskId1 --step 1,5    # 只执行步骤1和5
+  python copy_task_images.py taskId1 --step 4      # 只执行步骤4
 """
 
+import argparse
 import json
 import re
 import shutil
-import sys
 from pathlib import Path
 
 
@@ -113,13 +115,19 @@ def append_chapter4_images(target_dir: Path, max_num: int) -> int:
     return copied
 
 
-def process_task(task_id: str) -> dict:
+def process_task(task_id: str, steps: set = None) -> dict:
     """
     处理单个 taskId：复制原图片 + 追加第四章图片
+
+    Args:
+        task_id: 任务ID
+        steps: 要执行的步骤集合，None 表示执行所有步骤
 
     返回:
         dict: 包含处理结果信息
     """
+    if steps is None:
+        steps = {1, 2, 3, 4, 5}
     result = {
         "task_id": task_id,
         "success": False,
@@ -159,51 +167,56 @@ def process_task(task_id: str) -> dict:
 
     try:
         # ========== Step 1: 复制到 layoutlmft ==========
-        TARGET_DIR.mkdir(parents=True, exist_ok=True)
+        if 1 in steps:
+            TARGET_DIR.mkdir(parents=True, exist_ok=True)
 
-        if layoutlmft_target.exists():
-            shutil.rmtree(layoutlmft_target)
+            if layoutlmft_target.exists():
+                shutil.rmtree(layoutlmft_target)
 
-        shutil.copytree(filename_dir, layoutlmft_target)
-        result["step1_count"] = sum(1 for f in layoutlmft_target.rglob("*") if f.is_file())
+            shutil.copytree(filename_dir, layoutlmft_target)
+            result["step1_count"] = sum(1 for f in layoutlmft_target.rglob("*") if f.is_file())
 
         # ========== Step 2: 追加第四章图片到 static ==========
-        max_num_static = get_max_image_number(static_target)
-        if max_num_static >= 0:
-            result["step2_count"] = append_chapter4_images(static_target, max_num_static)
+        if 2 in steps:
+            max_num_static = get_max_image_number(static_target)
+            if max_num_static >= 0:
+                result["step2_count"] = append_chapter4_images(static_target, max_num_static)
 
         # ========== Step 3: 追加第四章图片到 layoutlmft ==========
-        max_num_layoutlmft = get_max_image_number(layoutlmft_target)
-        if max_num_layoutlmft >= 0:
-            result["step3_count"] = append_chapter4_images(layoutlmft_target, max_num_layoutlmft)
+        if 3 in steps:
+            max_num_layoutlmft = get_max_image_number(layoutlmft_target)
+            if max_num_layoutlmft >= 0:
+                result["step3_count"] = append_chapter4_images(layoutlmft_target, max_num_layoutlmft)
 
         # ========== Step 4: 提取 {filename}_construct.json 的 prediction 字段到 train 目录 ==========
-        construct_src = SOURCE_BASE / task_id / f"{filename}_construct.json"
-        if construct_src.exists():
-            TRAIN_DIR.mkdir(parents=True, exist_ok=True)
-            with open(construct_src, "r", encoding="utf-8") as f:
-                construct_data = json.load(f)
-            predictions = construct_data.get("predictions", [])
-            # 转换 location 格式为 page + box 格式
-            converted = [convert_location_to_box(item) for item in predictions]
-            construct_dst = TRAIN_DIR / f"{filename}.json"
-            with open(construct_dst, "w", encoding="utf-8") as f:
-                json.dump(converted, f, ensure_ascii=False, indent=2)
-            result["step4_copied"] = True
+        if 4 in steps:
+            construct_src = SOURCE_BASE / task_id / f"{filename}_construct.json"
+            if construct_src.exists():
+                TRAIN_DIR.mkdir(parents=True, exist_ok=True)
+                with open(construct_src, "r", encoding="utf-8") as f:
+                    construct_data = json.load(f)
+                predictions = construct_data.get("predictions", [])
+                # 转换 location 格式为 page + box 格式
+                converted = [convert_location_to_box(item) for item in predictions]
+                construct_dst = TRAIN_DIR / f"{filename}.json"
+                with open(construct_dst, "w", encoding="utf-8") as f:
+                    json.dump(converted, f, ensure_ascii=False, indent=2)
+                result["step4_copied"] = True
 
         # ========== Step 5: 添加 filename 到 train_doc_ids.json ==========
-        for json_file in TRAIN_DOC_IDS_FILES:
-            if json_file.exists():
-                with open(json_file, "r", encoding="utf-8") as f:
-                    doc_ids = json.load(f)
-            else:
-                doc_ids = []
+        if 5 in steps:
+            for json_file in TRAIN_DOC_IDS_FILES:
+                if json_file.exists():
+                    with open(json_file, "r", encoding="utf-8") as f:
+                        doc_ids = json.load(f)
+                else:
+                    doc_ids = []
 
-            if filename not in doc_ids:
-                doc_ids.append(filename)
-                with open(json_file, "w", encoding="utf-8") as f:
-                    json.dump(doc_ids, f, ensure_ascii=False, indent=2)
-                result["step5_added"].append(json_file.name)
+                if filename not in doc_ids:
+                    doc_ids.append(filename)
+                    with open(json_file, "w", encoding="utf-8") as f:
+                        json.dump(doc_ids, f, ensure_ascii=False, indent=2)
+                    result["step5_added"].append(json_file.name)
 
         result["success"] = True
 
@@ -213,18 +226,50 @@ def process_task(task_id: str) -> dict:
     return result
 
 
+def parse_steps(steps_str: str) -> set:
+    """解析步骤字符串，返回步骤编号集合"""
+    steps = set()
+    for part in steps_str.split(","):
+        part = part.strip()
+        if part.isdigit():
+            step_num = int(part)
+            if 1 <= step_num <= 5:
+                steps.add(step_num)
+    return steps
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("用法: python copy_task_images.py taskId1,taskId2,taskId3")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="复制 taskId 对应的图片文件夹，并追加第四章图片"
+    )
+    parser.add_argument(
+        "task_ids",
+        type=str,
+        help="taskId 列表，多个用逗号分隔，如: taskId1,taskId2,taskId3"
+    )
+    parser.add_argument(
+        "--step",
+        type=str,
+        default=None,
+        help="要执行的步骤，多个用逗号分隔，如: 1,5 或 4。不传递则执行所有步骤(1-5)"
+    )
+
+    args = parser.parse_args()
 
     # 解析 taskId 列表
-    task_ids_arg = sys.argv[1]
-    task_ids = [tid.strip() for tid in task_ids_arg.split(",") if tid.strip()]
+    task_ids = [tid.strip() for tid in args.task_ids.split(",") if tid.strip()]
 
     if not task_ids:
         print("错误: 未提供有效的 taskId")
-        sys.exit(1)
+        return []
+
+    # 解析步骤
+    steps = None
+    if args.step:
+        steps = parse_steps(args.step)
+        if not steps:
+            print("错误: 未提供有效的步骤编号(1-5)")
+            return []
 
     print("=" * 80)
     print("复制图片文件夹 + 追加第四章图片 + 复制_construct.json")
@@ -234,6 +279,7 @@ def main():
     print(f"第四章图片: {CHAPTER4_SRC_DIR}")
     print(f"第四章范围: {CHAPTER4_START}.png ~ {CHAPTER4_END}.png")
     print(f"taskId 数量: {len(task_ids)}")
+    print(f"执行步骤: {sorted(steps) if steps else '全部(1-5)'}")
     print("=" * 80)
     print()
 
@@ -242,20 +288,25 @@ def main():
 
     for task_id in task_ids:
         print(f"[处理] {task_id}")
-        result = process_task(task_id)
+        result = process_task(task_id, steps)
         results.append(result)
 
         if result["success"]:
             success_count += 1
             print(f"  ✓ {result['filename']}")
-            print(f"    Step1 复制到layoutlmft: {result['step1_count']} 个文件")
-            print(f"    Step2 追加到static: {result['step2_count']} 个文件")
-            print(f"    Step3 追加到layoutlmft: {result['step3_count']} 个文件")
-            print(f"    Step4 复制_construct.json: {'✓' if result['step4_copied'] else '✗ 文件不存在'}")
-            if result["step5_added"]:
-                print(f"    Step5 添加到train_doc_ids: {', '.join(result['step5_added'])}")
-            else:
-                print(f"    Step5 添加到train_doc_ids: 已存在，跳过")
+            if steps is None or 1 in steps:
+                print(f"    Step1 复制到layoutlmft: {result['step1_count']} 个文件")
+            if steps is None or 2 in steps:
+                print(f"    Step2 追加到static: {result['step2_count']} 个文件")
+            if steps is None or 3 in steps:
+                print(f"    Step3 追加到layoutlmft: {result['step3_count']} 个文件")
+            if steps is None or 4 in steps:
+                print(f"    Step4 复制_construct.json: {'✓' if result['step4_copied'] else '✗ 文件不存在'}")
+            if steps is None or 5 in steps:
+                if result["step5_added"]:
+                    print(f"    Step5 添加到train_doc_ids: {', '.join(result['step5_added'])}")
+                else:
+                    print(f"    Step5 添加到train_doc_ids: 已存在，跳过")
         else:
             print(f"  ✗ 失败: {result.get('error', '未知错误')}")
         print()
