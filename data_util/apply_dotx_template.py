@@ -623,8 +623,8 @@ def batch_apply_templates(
     print()
 
     for template_file in template_files:
-        # 输出文件名：只用模板名.docx
-        out_path = out_dir / f"{template_file.stem}{target_docx.suffix}"
+        # 输出文件名：模板名_原文件名.docx
+        out_path = out_dir / f"{template_file.stem}_{target_docx.stem}{target_docx.suffix}"
 
         print(f"  [{template_file.stem}] ", end="", flush=True)
 
