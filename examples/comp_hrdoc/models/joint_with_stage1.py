@@ -32,6 +32,7 @@ from typing import Dict, Optional, Tuple, List
 
 # 复用 comp_hrdoc 内部的模块
 from .modules.line_pooling import LinePooling
+from .modules.attention_pooling import AttentionPooling, extract_section_tokens
 from .heads.classification_head import LineClassificationHead
 from .construct import ConstructModule, ConstructLoss
 
@@ -61,6 +62,8 @@ class JointModelWithStage1(nn.Module):
         section_label_id: int = 4,  # section 类的 label id
         freeze_backbone: bool = False,
         cls_dropout: float = 0.1,
+        use_token_level_construct: bool = False,  # 是否使用 token-level 特征
+        max_tokens_per_section: int = 64,  # 每个 section 保留的最大 token 数
     ):
         """
         Args:
@@ -75,6 +78,10 @@ class JointModelWithStage1(nn.Module):
             section_label_id: Section 类的 label ID（用于过滤送入 Construct 的行）
             freeze_backbone: 是否冻结 backbone
             cls_dropout: 分类头 dropout
+            use_token_level_construct: 是否使用 token-level 特征构建 TOC
+                - False: 使用 line-level 特征（默认，与原有逻辑一致）
+                - True: 使用 section 行对应的 token-level 特征 + AttentionPooling
+            max_tokens_per_section: 每个 section 保留的最大 token 数（仅 token-level 模式有效）
         """
         super().__init__()
 
@@ -89,6 +96,17 @@ class JointModelWithStage1(nn.Module):
             num_classes=num_classes,
             dropout=cls_dropout,
         )
+
+        # ========== Token-level Construct 配置 ==========
+        self.use_token_level_construct = use_token_level_construct
+        self.max_tokens_per_section = max_tokens_per_section
+
+        # 如果使用 token-level，添加 AttentionPooling 模块
+        if use_token_level_construct:
+            self.section_token_pooling = AttentionPooling(
+                hidden_size=hidden_size,
+                dropout=dropout,
+            )
 
         # ========== Construct Module ==========
         self.construct = ConstructModule(
@@ -393,11 +411,15 @@ class JointModelWithStage1(nn.Module):
         all_section_masks = []
         max_sections = 0
 
+        # 记录每个文档的 section line indices（用于 token-level 模式）
+        doc_section_line_indices = []
+
         for doc_idx in range(num_docs):
             mask = section_mask[doc_idx] & batch_line_masks[doc_idx]
             indices = mask.nonzero(as_tuple=True)[0]
             num_sections = len(indices)
             max_sections = max(max_sections, num_sections)
+            doc_section_line_indices.append(indices)
 
             if num_sections > 0:
                 section_feats = batch_line_features[doc_idx, indices]
@@ -430,6 +452,56 @@ class JointModelWithStage1(nn.Module):
 
         batch_section_features = torch.stack(padded_section_features, dim=0)  # [num_docs, max_S, H]
         batch_section_masks = torch.stack(padded_section_masks, dim=0)  # [num_docs, max_S]
+
+        # ========== Step 4.5: Token-level Section Features (可选) ==========
+        if self.use_token_level_construct:
+            # 从 token-level hidden_states 提取 section 行对应的 tokens
+            # 然后使用 AttentionPooling 聚合
+
+            all_token_pooled_features = []
+
+            chunk_idx = 0
+            for doc_idx in range(num_docs):
+                num_chunks_in_doc = chunks_per_doc[doc_idx]
+
+                # 该文档的 hidden_states 和 line_ids
+                doc_hidden = hidden_states[chunk_idx:chunk_idx + num_chunks_in_doc]
+                doc_line_ids = line_ids[chunk_idx:chunk_idx + num_chunks_in_doc]
+
+                # 该文档的 section line indices
+                section_indices = doc_section_line_indices[doc_idx]
+
+                if len(section_indices) > 0:
+                    # 提取 section tokens
+                    section_tokens, section_token_mask = extract_section_tokens(
+                        hidden_states=doc_hidden,
+                        line_ids=doc_line_ids,
+                        section_line_indices=section_indices,
+                        max_tokens_per_section=self.max_tokens_per_section,
+                    )
+                    # AttentionPooling 聚合
+                    pooled_features = self.section_token_pooling(section_tokens, section_token_mask)
+                else:
+                    # 无 section，使用零向量
+                    pooled_features = torch.zeros(1, self.hidden_size, device=device)
+
+                all_token_pooled_features.append(pooled_features)
+                chunk_idx += num_chunks_in_doc
+
+            # Padding token-pooled features
+            padded_token_features = []
+            for doc_idx, pooled_feats in enumerate(all_token_pooled_features):
+                num_sections = pooled_feats.shape[0]
+                if num_sections < max_sections:
+                    pad_size = max_sections - num_sections
+                    pooled_feats = torch.cat([
+                        pooled_feats,
+                        torch.zeros(pad_size, self.hidden_size, device=device)
+                    ], dim=0)
+                padded_token_features.append(pooled_feats)
+
+            # 使用 token-level pooled features 替换 line-level features
+            batch_section_features = torch.stack(padded_token_features, dim=0)  # [num_docs, max_S, H]
 
         # ========== Step 5: Construct Module ==========
         # Reading order（如果没有提供，使用顺序索引）
@@ -487,12 +559,16 @@ def build_joint_model_with_stage1(
     lambda_construct: float = 1.0,
     section_label_id: int = 4,
     freeze_backbone: bool = False,
+    use_token_level_construct: bool = False,
+    max_tokens_per_section: int = 64,
     device: str = "cuda",
 ) -> Tuple[JointModelWithStage1, any]:
     """构建 Stage1 + Construct 联合模型
 
     Args:
         layoutxlm_path: LayoutXLM 模型路径（HuggingFace 或本地）
+        use_token_level_construct: 是否使用 token-level 特征构建 TOC
+        max_tokens_per_section: 每个 section 保留的最大 token 数
         其他参数同 JointModelWithStage1
 
     Returns:
@@ -527,6 +603,8 @@ def build_joint_model_with_stage1(
         lambda_construct=lambda_construct,
         section_label_id=section_label_id,
         freeze_backbone=freeze_backbone,
+        use_token_level_construct=use_token_level_construct,
+        max_tokens_per_section=max_tokens_per_section,
     )
 
     model = model.to(device)
