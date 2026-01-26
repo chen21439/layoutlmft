@@ -444,16 +444,20 @@ class StageFeatureExtractor:
     def extract_from_batch(
         self,
         batch: Dict[str, Any],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_token_hidden: bool = False,
+    ):
         """
         从 batch dict 提取特征（便捷方法）
 
         Args:
             batch: 包含 input_ids, bbox, attention_mask, line_ids 等的字典
+            return_token_hidden: 是否返回 token-level hidden_states
 
         Returns:
             line_features: [num_docs, max_lines, hidden_size]
             line_mask: [num_docs, max_lines]
+            token_hidden_states: (仅当 return_token_hidden=True) [total_chunks, seq_len, H]
+            token_line_ids: (仅当 return_token_hidden=True) [total_chunks, seq_len]
         """
         return self.extract_features(
             input_ids=batch["input_ids"],
@@ -463,6 +467,7 @@ class StageFeatureExtractor:
             image=batch.get("image"),
             num_docs=batch.get("num_docs"),
             chunks_per_doc=batch.get("chunks_per_doc"),
+            return_token_hidden=return_token_hidden,
         )
 
     @property

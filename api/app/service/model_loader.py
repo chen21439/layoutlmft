@@ -58,6 +58,7 @@ class ModelLoader:
         self._construct_predictor = None  # ConstructPredictor
         self._device = None
         self._checkpoint_path = None
+        self._attention_pool_construct = False  # 是否使用 AttentionPooling
         self._initialized = True
 
     def load(
@@ -128,13 +129,18 @@ class ModelLoader:
 
         # Build model
         from comp_hrdoc.models.construct_only import build_construct_from_features
+        attention_pool = config.get('attention_pool_construct', False)
+        if attention_pool:
+            logger.info("  AttentionPooling: ENABLED (from config)")
         model = build_construct_from_features(
             hidden_size=config.get('hidden_size', 768),
             num_categories=config.get('num_categories', 14),
             num_heads=config.get('num_heads', 12),
             num_layers=config.get('num_layers', 3),
             dropout=config.get('dropout', 0.1),
+            attention_pool_construct=attention_pool,
         )
+        self._attention_pool_construct = attention_pool
 
         # Load weights
         weights_path = os.path.join(construct_checkpoint, "pytorch_model.bin")
@@ -202,6 +208,11 @@ class ModelLoader:
     def is_joint_training_model(self) -> bool:
         """是否是联合训练模型（现在全部使用 comp_hrdoc，总是返回 True）"""
         return True
+
+    @property
+    def attention_pool_construct(self) -> bool:
+        """是否使用 AttentionPooling 替代 mean pooling"""
+        return self._attention_pool_construct
 
 
 # Global singleton instance

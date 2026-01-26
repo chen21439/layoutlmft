@@ -382,7 +382,13 @@ class InferenceService:
         batch = collator([processed])
 
         # Stage 1: Extract features using comp_hrdoc components（与训练代码一致）
-        line_features, line_mask = loader.feature_extractor.extract_from_batch(batch)
+        # 如果启用 attention_pool_construct，需要返回 token-level hidden states
+        use_attention_pool = loader.attention_pool_construct
+        if use_attention_pool:
+            line_features, line_mask, token_hidden_states, token_line_ids = \
+                loader.feature_extractor.extract_from_batch(batch, return_token_hidden=True)
+        else:
+            line_features, line_mask = loader.feature_extractor.extract_from_batch(batch)
 
         # 分类预测（与 train_doc.py 评估逻辑一致）
         num_lines = int(line_mask[0].sum().item())  # 只有一个文档
@@ -417,8 +423,16 @@ class InferenceService:
         # Construct inference (if model available)
         construct_result = None
         if loader.has_construct_model:
+            # 传入 token 数据（用于 attention pool）
+            token_data = None
+            if use_attention_pool:
+                token_data = {
+                    "token_hidden_states": token_hidden_states,
+                    "token_line_ids": token_line_ids,
+                }
             construct_result = self._run_construct_inference(
-                features, loader.construct_model, loader.device
+                features, loader.construct_model, loader.device,
+                token_data=token_data,
             )
 
             # 读取原始 JSON 获取 text
@@ -586,10 +600,20 @@ class InferenceService:
         construct_model,
         device,
         section_label_id: int = 4,  # section 类的 label id
+        token_data: Dict = None,  # token-level 数据（用于 attention pool）
     ) -> Dict[str, Any]:
         """Run Construct model inference.
 
         只对 section 类的行进行 TOC 构建，与训练保持一致。
+
+        Args:
+            features: 包含 line_features, line_mask 等
+            construct_model: Construct 模型
+            device: 设备
+            section_label_id: section 类的 label id
+            token_data: token-level 数据（当 attention_pool_construct=True 时使用）
+                - token_hidden_states: [total_chunks, seq_len, H]
+                - token_line_ids: [total_chunks, seq_len]
         """
         line_features = features["line_features"].to(device)
         line_mask = features["line_mask"].to(device)
@@ -617,6 +641,34 @@ class InferenceService:
             }
 
         # 提取 section 的特征
+        # 如果有 token_data，使用 attention pooling；否则使用 mean-pooled line_features
+        section_tokens = None
+        section_token_mask = None
+
+        if token_data is not None:
+            # 使用 token-level 特征 + AttentionPooling（与训练一致）
+            from comp_hrdoc.models.modules.attention_pooling import extract_section_tokens
+
+            token_hidden_states = token_data["token_hidden_states"].to(device)
+            token_line_ids = token_data["token_line_ids"].to(device)
+
+            section_line_indices = torch.tensor(section_line_ids, device=device)
+            section_tokens, section_token_mask = extract_section_tokens(
+                hidden_states=token_hidden_states,
+                line_ids=token_line_ids,
+                section_line_indices=section_line_indices,
+                max_tokens_per_section=64,
+            )
+            # section_tokens: [num_sections, max_tokens, H]
+            # section_token_mask: [num_sections, max_tokens]
+
+            # 添加 batch 维度
+            section_tokens = section_tokens.unsqueeze(0)  # [1, S, T, H]
+            section_token_mask = section_token_mask.unsqueeze(0)  # [1, S, T]
+
+            logger.info(f"[Construct] Using AttentionPooling: section_tokens shape={section_tokens.shape}")
+
+        # Mean-pooled section features（用于非 attention pool 或作为 fallback）
         section_features = line_features[section_indices]  # [S, H]
         section_features = section_features.unsqueeze(0)  # [1, S, H]
         section_mask = torch.ones(1, num_sections, dtype=torch.bool, device=device)
@@ -629,12 +681,24 @@ class InferenceService:
 
         # Run Construct model
         with torch.no_grad():
-            outputs = construct_model(
-                region_features=section_features,
-                categories=categories,
-                region_mask=section_mask,
-                reading_orders=reading_orders,
-            )
+            if section_tokens is not None:
+                # 使用 AttentionPooling
+                outputs = construct_model(
+                    region_features=section_features,  # 作为 fallback
+                    categories=categories,
+                    region_mask=section_mask,
+                    reading_orders=reading_orders,
+                    section_tokens=section_tokens,
+                    section_token_mask=section_token_mask,
+                )
+            else:
+                # 使用 mean-pooled features
+                outputs = construct_model(
+                    region_features=section_features,
+                    categories=categories,
+                    region_mask=section_mask,
+                    reading_orders=reading_orders,
+                )
 
         # Decode predictions (格式B: 自指向方案)
         # 使用论文 Algorithm 1: Tree Insertion Algorithm 进行联合解码
