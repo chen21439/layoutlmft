@@ -32,6 +32,7 @@ from pathlib import Path
 
 from layoutlmft.data.utils import load_image
 
+from .labels import trans_class, LABEL2ID, NUM_LABELS
 from ..utils.tree_utils import (
     resolve_hierarchical_parents_and_siblings,
     build_sibling_matrix,
@@ -385,17 +386,6 @@ class HRDocDataset(Dataset):
 class HRDocCollator:
     """Collator for HRDoc batches"""
 
-    # Semantic class to index mapping
-    CLASS_TO_IDX = {
-        'title': 0, 'author': 1, 'affili': 2, 'mail': 3,
-        'sec1': 4, 'sec2': 5, 'sec3': 6,
-        'fstline': 7, 'para': 8, 'opara': 9,
-        'fig': 10, 'figcap': 11, 'tab': 12, 'tabcap': 13,
-        'equ': 14, 'alg': 15, 'fnote': 16, 'foot': 17,
-        'unknown': 18,
-    }
-    NUM_CLASSES = 19
-
     def __init__(self, max_lines: int = 256):
         self.max_lines = max_lines
 
@@ -432,10 +422,11 @@ class HRDocCollator:
                 else:
                     successor_labels[i, j] = -1
 
-            # Class labels
+            # Class labels: trans_class 转换原始标签，LABEL2ID 映射为 ID
             for j in range(n_lines):
                 cls = sample['class_labels'][j]
-                class_labels[i, j] = self.CLASS_TO_IDX.get(cls, self.CLASS_TO_IDX['unknown'])
+                std_cls = trans_class(cls)  # sec1/sec2/sec3 → section
+                class_labels[i, j] = LABEL2ID.get(std_cls, 0)
 
             # Mask
             line_mask[i, :n_lines] = True
@@ -499,9 +490,6 @@ class HRDocLayoutXLMCollator:
     复用 stage 的 tokenize_with_line_boundary 函数，保证 line_ids 正确对齐。
     """
 
-    CLASS_TO_IDX = HRDocCollator.CLASS_TO_IDX
-    NUM_CLASSES = HRDocCollator.NUM_CLASSES
-
     def __init__(
         self,
         tokenizer,
@@ -559,10 +547,11 @@ class HRDocLayoutXLMCollator:
                     max(0, min(1000, int(bbox[3]))),
                 ])
 
-            # class_labels 转换为整数
+            # class_labels 转换为整数: trans_class → LABEL2ID
             class_labels_int = []
             for cls in sample['class_labels'][:n_lines]:
-                class_labels_int.append(self.CLASS_TO_IDX.get(cls, self.CLASS_TO_IDX['unknown']))
+                std_cls = trans_class(cls)  # sec1/sec2/sec3 → section
+                class_labels_int.append(LABEL2ID.get(std_cls, 0))
 
             # Tokenize + Chunk
             chunks = tokenize_page_with_line_boundary(
@@ -618,7 +607,8 @@ class HRDocLayoutXLMCollator:
                 successor_labels[i, line_id] = succ if succ in tokenized_lines else -1
 
                 cls = sample['class_labels'][line_id] if line_id < len(sample['class_labels']) else 'unknown'
-                class_labels[i, line_id] = self.CLASS_TO_IDX.get(cls, self.CLASS_TO_IDX['unknown'])
+                std_cls = trans_class(cls)  # sec1/sec2/sec3 → section
+                class_labels[i, line_id] = LABEL2ID.get(std_cls, 0)
 
                 line_mask[i, line_id] = True
 

@@ -21,6 +21,16 @@ from .line_collator_v2 import (
     create_dataloaders_v2,
 )
 
+# 统一标签映射 (数据加载 + 推理显示)
+from .labels import (
+    LABEL_LIST,
+    NUM_LABELS,
+    trans_class,
+    LABEL2ID,
+    ID2LABEL,
+    SECTION_LABEL_ID,
+)
+
 # 统一的 HRDoc 加载器 (支持 HRDS/HRDH)
 from .hrdoc_loader import (
     HRDocDataset,
