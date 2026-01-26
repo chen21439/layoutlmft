@@ -203,6 +203,10 @@ def parse_args():
                         help="Micro-batch size for backbone forward (reduces memory)")
     parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
                         help="Enable gradient checkpointing in backbone (saves memory)")
+    parser.add_argument("--use-token-level-construct", action="store_true", default=False,
+                        help="Use token-level features for TOC construction (AttentionPooling)")
+    parser.add_argument("--max-tokens-per-section", type=int, default=64,
+                        help="Max tokens per section (only for token-level construct)")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
@@ -600,8 +604,12 @@ def train_epoch_with_stage_features(
     for step, batch in enumerate(progress_bar):
         # Extract line features using stage model
         # train_backbone=True 时梯度流向 backbone，否则无梯度
+        use_token_level = getattr(args, 'use_token_level_construct', False)
+        token_hidden_states = None
+        token_line_ids = None
+
         if train_backbone:
-            line_features, line_mask = feature_extractor.extract_features_with_grad(
+            line_features, line_mask, token_hidden_states, token_line_ids = feature_extractor.extract_features_with_grad(
                 input_ids=batch["input_ids"],
                 bbox=batch["bbox"],
                 attention_mask=batch["attention_mask"],
@@ -609,12 +617,15 @@ def train_epoch_with_stage_features(
                 image=batch.get("image"),
                 num_docs=batch.get("num_docs"),
                 chunks_per_doc=batch.get("chunks_per_doc"),
+                return_token_hidden=use_token_level,
             )
             # 第一个 step 检查梯度是否连接到 backbone
             if step == 0:
                 has_grad = line_features.requires_grad and line_features.grad_fn is not None
                 logger.info(f"[Stage1] line_features.requires_grad={line_features.requires_grad}, "
                            f"grad_fn={line_features.grad_fn is not None} → backbone gradient: {'ON' if has_grad else 'OFF'}")
+                if use_token_level:
+                    logger.info(f"[Stage1] Token-level construct enabled, token_hidden_states: {token_hidden_states.shape if token_hidden_states is not None else 'None'}")
         else:
             with torch.no_grad():
                 line_features, line_mask = feature_extractor.extract_features(
@@ -666,6 +677,78 @@ def train_epoch_with_stage_features(
             # Skip batch if no sections
             if line_mask.sum() == 0:
                 continue
+
+            # Token-level: 提取 section tokens
+            section_tokens = None
+            section_token_mask = None
+            if use_token_level and token_hidden_states is not None and token_line_ids is not None:
+                from examples.comp_hrdoc.models.modules.attention_pooling import extract_section_tokens
+                original_indices = compressed["original_indices"]  # [B, max_sections]
+                max_tokens_per_section = getattr(args, 'max_tokens_per_section', 64)
+
+                # 批量提取 section tokens
+                batch_size, max_sections = original_indices.shape
+                hidden_size = token_hidden_states.shape[-1]
+                section_tokens_list = []
+                section_token_mask_list = []
+
+                chunks_per_doc = batch.get("chunks_per_doc")
+                chunk_offset = 0
+
+                for b in range(batch_size):
+                    # 获取该文档的 token 数据
+                    if chunks_per_doc is not None:
+                        num_chunks = chunks_per_doc[b]
+                        doc_hidden = token_hidden_states[chunk_offset:chunk_offset + num_chunks]
+                        doc_line_ids = token_line_ids[chunk_offset:chunk_offset + num_chunks]
+                        chunk_offset += num_chunks
+                    else:
+                        # 单页模式
+                        doc_hidden = token_hidden_states[b:b+1]
+                        doc_line_ids = token_line_ids[b:b+1]
+
+                    # 该样本有效的 section 数量
+                    num_sections_b = int(line_mask[b].sum().item())
+                    if num_sections_b == 0:
+                        # 无 section，创建空张量
+                        section_tokens_list.append(torch.zeros(max_sections, max_tokens_per_section, hidden_size, device=device))
+                        section_token_mask_list.append(torch.zeros(max_sections, max_tokens_per_section, dtype=torch.bool, device=device))
+                        continue
+
+                    # 获取该样本的 section line indices
+                    section_line_indices = original_indices[b, :num_sections_b]
+
+                    # 提取 section tokens
+                    sec_tokens, sec_mask = extract_section_tokens(
+                        hidden_states=doc_hidden,
+                        line_ids=doc_line_ids,
+                        section_line_indices=section_line_indices,
+                        max_tokens_per_section=max_tokens_per_section,
+                    )
+                    # sec_tokens: [num_sections_b, actual_max_tokens, H]
+                    # sec_mask: [num_sections_b, actual_max_tokens]
+
+                    # Padding 到 max_sections
+                    actual_max_tokens = sec_tokens.shape[1]
+                    padded_tokens = torch.zeros(max_sections, actual_max_tokens, hidden_size, device=device)
+                    padded_mask = torch.zeros(max_sections, actual_max_tokens, dtype=torch.bool, device=device)
+                    padded_tokens[:num_sections_b] = sec_tokens
+                    padded_mask[:num_sections_b] = sec_mask
+
+                    section_tokens_list.append(padded_tokens)
+                    section_token_mask_list.append(padded_mask)
+
+                # 找出所有样本中最大的 token 数并统一 padding
+                max_token_len = max(t.shape[1] for t in section_tokens_list)
+                final_section_tokens = torch.zeros(batch_size, max_sections, max_token_len, hidden_size, device=device)
+                final_section_token_mask = torch.zeros(batch_size, max_sections, max_token_len, dtype=torch.bool, device=device)
+                for b, (t, m) in enumerate(zip(section_tokens_list, section_token_mask_list)):
+                    t_len = t.shape[1]
+                    final_section_tokens[b, :, :t_len] = t
+                    final_section_token_mask[b, :, :t_len] = m
+
+                section_tokens = final_section_tokens
+                section_token_mask = final_section_token_mask
         else:
             # Original logic: all lines
             # Get reading order (use line index as reading order for now)
@@ -674,6 +757,10 @@ def train_epoch_with_stage_features(
 
             # 使用已转换的 sibling_labels_matrix
             sibling_labels = sibling_labels_matrix
+
+            # 非 TOC 模式不使用 token-level
+            section_tokens = None
+            section_token_mask = None
 
         # Stage1 分类 loss（在 TOC 压缩前使用原始 line_features 和 line_labels）
         # 注意：TOC 压缩后 line_features 只包含 section，所以需要用压缩前的数据
@@ -708,6 +795,8 @@ def train_epoch_with_stage_features(
                     reading_orders=reading_orders,
                     parent_labels=line_parent_ids,
                     sibling_labels=sibling_labels,
+                    section_tokens=section_tokens,
+                    section_token_mask=section_token_mask,
                 )
                 # Total loss = Construct loss + Stage1 cls loss
                 loss = (outputs["loss"] + cls_loss) / args.gradient_accumulation_steps
@@ -719,6 +808,8 @@ def train_epoch_with_stage_features(
                 reading_orders=reading_orders,
                 parent_labels=line_parent_ids,
                 sibling_labels=sibling_labels,
+                section_tokens=section_tokens,
+                section_token_mask=section_token_mask,
             )
             # Total loss = Construct loss + Stage1 cls loss
             loss = (outputs["loss"] + cls_loss) / args.gradient_accumulation_steps
@@ -820,17 +911,35 @@ def evaluate_with_stage_features(
     toc_only = args.toc_only if args else False
     section_label_id = args.section_label_id if args else 1
 
+    # Token-level construct 支持
+    use_token_level = getattr(args, 'use_token_level_construct', False) if args else False
+    max_tokens_per_section = getattr(args, 'max_tokens_per_section', 64) if args else 64
+
     for batch in tqdm(dataloader, desc="Evaluating (stage features)"):
-        # Extract line features
-        line_features, line_mask = feature_extractor.extract_features(
-            input_ids=batch["input_ids"],
-            bbox=batch["bbox"],
-            attention_mask=batch["attention_mask"],
-            line_ids=batch.get("line_ids"),
-            image=batch.get("image"),
-            num_docs=batch.get("num_docs"),
-            chunks_per_doc=batch.get("chunks_per_doc"),
-        )
+        # Extract line features (optionally with token hidden states)
+        if use_token_level:
+            line_features, line_mask, token_hidden_states, token_line_ids = feature_extractor.extract_features(
+                input_ids=batch["input_ids"],
+                bbox=batch["bbox"],
+                attention_mask=batch["attention_mask"],
+                line_ids=batch.get("line_ids"),
+                image=batch.get("image"),
+                num_docs=batch.get("num_docs"),
+                chunks_per_doc=batch.get("chunks_per_doc"),
+                return_token_hidden=True,
+            )
+        else:
+            line_features, line_mask = feature_extractor.extract_features(
+                input_ids=batch["input_ids"],
+                bbox=batch["bbox"],
+                attention_mask=batch["attention_mask"],
+                line_ids=batch.get("line_ids"),
+                image=batch.get("image"),
+                num_docs=batch.get("num_docs"),
+                chunks_per_doc=batch.get("chunks_per_doc"),
+            )
+            token_hidden_states = None
+            token_line_ids = None
 
         # 从 stage collator 输出转换为 Construct 标签
         _, max_lines_from_features = line_mask.shape
@@ -883,6 +992,73 @@ def evaluate_with_stage_features(
             # Skip batch if no sections
             if line_mask.sum() == 0:
                 continue
+
+            # Token-level: 提取 section tokens
+            section_tokens = None
+            section_token_mask = None
+            if use_token_level and token_hidden_states is not None and token_line_ids is not None:
+                from examples.comp_hrdoc.models.modules.attention_pooling import extract_section_tokens
+
+                # 批量提取 section tokens
+                batch_size, max_sections = original_indices.shape
+                hidden_size = token_hidden_states.shape[-1]
+                section_tokens_list = []
+                section_token_mask_list = []
+
+                chunks_per_doc = batch.get("chunks_per_doc")
+                chunk_offset = 0
+
+                for b in range(batch_size):
+                    # 获取该文档的 token 数据
+                    if chunks_per_doc is not None:
+                        num_chunks = chunks_per_doc[b]
+                        doc_hidden = token_hidden_states[chunk_offset:chunk_offset + num_chunks]
+                        doc_line_ids = token_line_ids[chunk_offset:chunk_offset + num_chunks]
+                        chunk_offset += num_chunks
+                    else:
+                        # 单页模式
+                        doc_hidden = token_hidden_states[b:b+1]
+                        doc_line_ids = token_line_ids[b:b+1]
+
+                    # 该样本有效的 section 数量
+                    num_sections_b = int(line_mask[b].sum().item())
+                    if num_sections_b == 0:
+                        section_tokens_list.append(torch.zeros(max_sections, max_tokens_per_section, hidden_size, device=device))
+                        section_token_mask_list.append(torch.zeros(max_sections, max_tokens_per_section, dtype=torch.bool, device=device))
+                        continue
+
+                    # 获取该样本的 section line indices
+                    section_line_indices = original_indices[b, :num_sections_b]
+
+                    # 提取 section tokens
+                    sec_tokens, sec_mask = extract_section_tokens(
+                        hidden_states=doc_hidden,
+                        line_ids=doc_line_ids,
+                        section_line_indices=section_line_indices,
+                        max_tokens_per_section=max_tokens_per_section,
+                    )
+
+                    # Padding 到 max_sections
+                    actual_max_tokens = sec_tokens.shape[1]
+                    padded_tokens = torch.zeros(max_sections, actual_max_tokens, hidden_size, device=device)
+                    padded_mask = torch.zeros(max_sections, actual_max_tokens, dtype=torch.bool, device=device)
+                    padded_tokens[:num_sections_b] = sec_tokens
+                    padded_mask[:num_sections_b] = sec_mask
+
+                    section_tokens_list.append(padded_tokens)
+                    section_token_mask_list.append(padded_mask)
+
+                # 统一 padding
+                max_token_len = max(t.shape[1] for t in section_tokens_list)
+                final_section_tokens = torch.zeros(batch_size, max_sections, max_token_len, hidden_size, device=device)
+                final_section_token_mask = torch.zeros(batch_size, max_sections, max_token_len, dtype=torch.bool, device=device)
+                for b, (t, m) in enumerate(zip(section_tokens_list, section_token_mask_list)):
+                    t_len = t.shape[1]
+                    final_section_tokens[b, :, :t_len] = t
+                    final_section_token_mask[b, :, :t_len] = m
+
+                section_tokens = final_section_tokens
+                section_token_mask = final_section_token_mask
         else:
             batch_size, max_lines = line_mask.shape
             reading_orders = torch.arange(max_lines, device=device).unsqueeze(0).expand(batch_size, -1)
@@ -891,6 +1067,10 @@ def evaluate_with_stage_features(
             # 使用已转换的 sibling_labels_matrix
             sibling_labels = sibling_labels_matrix
 
+            # 非 TOC 模式不使用 token-level
+            section_tokens = None
+            section_token_mask = None
+
         outputs = model(
             region_features=line_features,
             categories=line_labels if line_labels is not None else torch.zeros_like(line_mask, dtype=torch.long),
@@ -898,6 +1078,8 @@ def evaluate_with_stage_features(
             reading_orders=reading_orders,
             parent_labels=line_parent_ids,
             sibling_labels=sibling_labels,
+            section_tokens=section_tokens,
+            section_token_mask=section_token_mask,
         )
 
         # Accumulate losses
@@ -1386,12 +1568,16 @@ def main():
             save_construct_model,
         )
         logger.info("Building ConstructFromFeatures model (using stage features)...")
+        if args.use_token_level_construct:
+            logger.info("  Token-level construct: ENABLED (AttentionPooling)")
+            logger.info(f"  Max tokens per section: {args.max_tokens_per_section}")
         model = build_construct_from_features(
             hidden_size=args.hidden_size,
             num_categories=14,  # HRDoc has 14 classes
             num_heads=args.num_heads,
             num_layers=args.construct_num_layers,
             dropout=args.dropout,
+            use_token_level_construct=args.use_token_level_construct,
         )
         # save_fn for ConstructFromFeatures (不用于 train_stage1，因为已在上面定义)
         if not args.train_stage1:

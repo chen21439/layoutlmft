@@ -162,7 +162,8 @@ class StageFeatureExtractor:
         image: Optional[torch.Tensor] = None,
         num_docs: Optional[int] = None,
         chunks_per_doc: Optional[list] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_token_hidden: bool = False,
+    ):
         """
         提取 line-level 特征（无梯度，推理/评估用）
 
@@ -174,15 +175,25 @@ class StageFeatureExtractor:
             image: [total_chunks, C, H, W] 可选图像输入
             num_docs: 文档数量（文档级别模式）
             chunks_per_doc: 每个文档的 chunk 数量列表
+            return_token_hidden: 是否返回 token-level hidden_states
 
         Returns:
             line_features: [num_docs, max_lines, hidden_size]
             line_mask: [num_docs, max_lines] bool mask
+            token_hidden_states: (仅当 return_token_hidden=True)
+            token_line_ids: (仅当 return_token_hidden=True)
         """
-        return self._extract_features_impl(
-            input_ids, bbox, attention_mask, line_ids,
-            image, num_docs, chunks_per_doc, no_grad=True
-        )
+        if not return_token_hidden:
+            return self._extract_features_impl(
+                input_ids, bbox, attention_mask, line_ids,
+                image, num_docs, chunks_per_doc, no_grad=True
+            )
+        else:
+            # 需要返回 token hidden states，调用带 token 返回的实现
+            return self._extract_features_with_tokens_impl_no_grad(
+                input_ids, bbox, attention_mask, line_ids,
+                image, num_docs, chunks_per_doc
+            )
 
     def extract_features_with_grad(
         self,
@@ -193,21 +204,140 @@ class StageFeatureExtractor:
         image: Optional[torch.Tensor] = None,
         num_docs: Optional[int] = None,
         chunks_per_doc: Optional[list] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return_token_hidden: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         提取 line-level 特征（允许梯度回传，用于 train_stage1 模式）
 
         与 extract_features() 参数相同，但梯度从 line_features 回传到 backbone。
         使用前需要调用 set_train_mode() 设置 backbone 为训练模式。
 
+        Args:
+            return_token_hidden: 是否返回 token-level hidden_states（用于 token-level construct）
+
         Returns:
             line_features: [num_docs, max_lines, hidden_size]，梯度流向 backbone
             line_mask: [num_docs, max_lines] bool mask
+            token_hidden_states: [total_chunks, seq_len, hidden_size] (仅当 return_token_hidden=True)
+            token_line_ids: [total_chunks, seq_len] (仅当 return_token_hidden=True)
         """
-        return self._extract_features_impl(
-            input_ids, bbox, attention_mask, line_ids,
-            image, num_docs, chunks_per_doc, no_grad=False
+        if not return_token_hidden:
+            line_features, line_mask = self._extract_features_impl(
+                input_ids, bbox, attention_mask, line_ids,
+                image, num_docs, chunks_per_doc, no_grad=False
+            )
+            return line_features, line_mask, None, None
+        else:
+            return self._extract_features_with_tokens_impl(
+                input_ids, bbox, attention_mask, line_ids,
+                image, num_docs, chunks_per_doc
+            )
+
+    def _extract_features_with_tokens_impl(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        line_ids: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        提取特征并返回 token-level hidden_states（用于 token-level construct）
+
+        Returns:
+            line_features: [num_docs, max_lines, hidden_size]
+            line_mask: [num_docs, max_lines]
+            token_hidden_states: [total_chunks, seq_len, hidden_size]
+            token_line_ids: [total_chunks, seq_len]
+        """
+        # 移动到设备
+        input_ids = input_ids.to(self.device)
+        bbox = bbox.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        line_ids = line_ids.to(self.device)
+        if image is not None and isinstance(image, torch.Tensor):
+            image = image.to(self.device)
+
+        # Step 1: 获取 backbone hidden states（保留梯度）
+        hidden_states = self.model.encode_with_micro_batch(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            image=image,
+            no_grad=False,  # 保留梯度
         )
+
+        # 截取文本部分（排除视觉 tokens）
+        seq_len = input_ids.shape[1]
+        text_hidden = hidden_states[:, :seq_len, :]  # [total_chunks, seq_len, H]
+
+        # Step 2: Line Pooling 聚合
+        is_page_level = (num_docs is None or chunks_per_doc is None)
+
+        if is_page_level:
+            line_features, line_mask = self._aggregate_page_level(text_hidden, line_ids)
+        else:
+            line_features, line_mask = self._aggregate_document_level(
+                text_hidden, line_ids, num_docs, chunks_per_doc
+            )
+
+        # 返回 line-level 和 token-level 特征
+        return line_features, line_mask, text_hidden, line_ids
+
+    def _extract_features_with_tokens_impl_no_grad(
+        self,
+        input_ids: torch.Tensor,
+        bbox: torch.Tensor,
+        attention_mask: torch.Tensor,
+        line_ids: torch.Tensor,
+        image: Optional[torch.Tensor] = None,
+        num_docs: Optional[int] = None,
+        chunks_per_doc: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        提取特征并返回 token-level hidden_states（无梯度版本，用于评估）
+
+        Returns:
+            line_features: [num_docs, max_lines, hidden_size]
+            line_mask: [num_docs, max_lines]
+            token_hidden_states: [total_chunks, seq_len, hidden_size]
+            token_line_ids: [total_chunks, seq_len]
+        """
+        # 移动到设备
+        input_ids = input_ids.to(self.device)
+        bbox = bbox.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+        line_ids = line_ids.to(self.device)
+        if image is not None and isinstance(image, torch.Tensor):
+            image = image.to(self.device)
+
+        # Step 1: 获取 backbone hidden states（无梯度）
+        hidden_states = self.model.encode_with_micro_batch(
+            input_ids=input_ids,
+            bbox=bbox,
+            attention_mask=attention_mask,
+            image=image,
+            no_grad=True,  # 无梯度
+        )
+
+        # 截取文本部分（排除视觉 tokens）
+        seq_len = input_ids.shape[1]
+        text_hidden = hidden_states[:, :seq_len, :]  # [total_chunks, seq_len, H]
+
+        # Step 2: Line Pooling 聚合
+        is_page_level = (num_docs is None or chunks_per_doc is None)
+
+        if is_page_level:
+            line_features, line_mask = self._aggregate_page_level(text_hidden, line_ids)
+        else:
+            line_features, line_mask = self._aggregate_document_level(
+                text_hidden, line_ids, num_docs, chunks_per_doc
+            )
+
+        # 返回 line-level 和 token-level 特征
+        return line_features, line_mask, text_hidden, line_ids
 
     def set_train_mode(self, freeze_visual: bool = True):
         """
