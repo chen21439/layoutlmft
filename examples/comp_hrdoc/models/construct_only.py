@@ -458,6 +458,8 @@ def save_construct_model(
         'num_categories': getattr(model, 'type_embedding', None) and model.type_embedding.embedding.num_embeddings or 5,
         'freeze_order': getattr(model, 'freeze_order', True),
         'model_type': model.__class__.__name__,
+        # AttentionPooling 配置
+        'attention_pool_construct': getattr(model, 'attention_pool_construct', False),
     }
     config_path = os.path.join(save_path, "config.json")
     with open(config_path, 'w') as f:

@@ -1506,6 +1506,20 @@ def main():
             tok.save_pretrained(save_path)
             logger.info(f"Saved tokenizer to: {save_path}")
 
+            # 保存 config（包含 attention_pool_construct 等配置）
+            import json
+            config = {
+                'hidden_size': construct_model.hidden_size,
+                'num_layers': construct_model.construct_module.transformer.layers.__len__(),
+                'num_categories': construct_model.type_embedding.embedding.num_embeddings,
+                'model_type': construct_model.__class__.__name__,
+                'attention_pool_construct': getattr(construct_model, 'attention_pool_construct', False),
+            }
+            config_path = os.path.join(save_path, "config.json")
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            logger.info(f"Saved config to: {config_path}")
+
         save_fn = save_stage1_model
 
     # ==================== Standard Mode ====================
@@ -1586,8 +1600,23 @@ def main():
             build_construct_from_features,
             save_construct_model,
         )
+
+        # 从 checkpoint config.json 读取 attention_pool_construct 设置（如果有）
+        use_attention_pool = args.attention_pool_construct
+        if args.model_name_or_path:
+            config_path = Path(args.model_name_or_path) / "config.json"
+            if config_path.exists():
+                import json
+                with open(config_path, 'r') as f:
+                    ckpt_config = json.load(f)
+                ckpt_attention_pool = ckpt_config.get('attention_pool_construct', False)
+                if ckpt_attention_pool != args.attention_pool_construct:
+                    logger.warning(f"Checkpoint config attention_pool_construct={ckpt_attention_pool}, "
+                                   f"but CLI arg is {args.attention_pool_construct}. Using checkpoint config.")
+                    use_attention_pool = ckpt_attention_pool
+
         logger.info("Building ConstructFromFeatures model (using stage features)...")
-        if args.attention_pool_construct:
+        if use_attention_pool:
             logger.info("  Section pooling: AttentionPooling (learnable weights)")
             logger.info(f"  Max tokens per section: {args.max_tokens_per_section}")
         else:
@@ -1598,8 +1627,10 @@ def main():
             num_heads=args.num_heads,
             num_layers=args.construct_num_layers,
             dropout=args.dropout,
-            attention_pool_construct=args.attention_pool_construct,
+            attention_pool_construct=use_attention_pool,
         )
+        # 更新 args 以便后续使用
+        args.attention_pool_construct = use_attention_pool
         # save_fn for ConstructFromFeatures (不用于 train_stage1，因为已在上面定义)
         if not args.train_stage1:
             save_fn = lambda m, p: save_construct_model(m, p, save_order=False)
