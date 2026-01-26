@@ -226,7 +226,7 @@ class ConstructFromFeatures(nn.Module):
             ↓
         parent/sibling predictions
 
-    Pipeline (token-level, use_token_level_construct=True):
+    Pipeline (attention-pool, attention_pool_construct=True):
         section_tokens [B, N, max_tokens, 768]
             ↓
         AttentionPooling → [B, N, 768]
@@ -245,15 +245,15 @@ class ConstructFromFeatures(nn.Module):
         num_heads: int = 12,
         num_layers: int = 3,
         dropout: float = 0.1,
-        use_token_level_construct: bool = False,
+        attention_pool_construct: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.use_token_level_construct = use_token_level_construct
+        self.attention_pool_construct = attention_pool_construct
 
-        # Token-level: AttentionPooling 模块
-        if use_token_level_construct:
+        # Attention Pooling 模块（替代 mean pooling）
+        if attention_pool_construct:
             from .modules.attention_pooling import AttentionPooling
             self.section_token_pooling = AttentionPooling(
                 hidden_size=hidden_size,
@@ -295,25 +295,30 @@ class ConstructFromFeatures(nn.Module):
         """Forward pass.
 
         Args:
-            region_features: [B, N, hidden_size] line-level section features (用于非 token-level 模式)
+            region_features: [B, N, hidden_size] line-level section features (用于 mean pooling 模式)
             categories: [B, N] section 类别
             region_mask: [B, N] 有效 section 掩码
             reading_orders: [B, N] 阅读顺序
             parent_labels: [B, N] parent 标签
             sibling_labels: [B, N] sibling 标签
-            section_tokens: [B, N, max_tokens, hidden_size] token-level features (仅 token-level 模式)
-            section_token_mask: [B, N, max_tokens] token 掩码 (仅 token-level 模式)
+            section_tokens: [B, N, max_tokens, hidden_size] token-level features (仅 attention pooling 模式)
+            section_token_mask: [B, N, max_tokens] token 掩码 (仅 attention pooling 模式)
         """
-        # Token-level: 先用 AttentionPooling 聚合
-        if self.use_token_level_construct and section_tokens is not None:
+        attention_weights = None
+        # Attention Pooling: 用可学习权重聚合 tokens
+        if self.attention_pool_construct and section_tokens is not None:
             batch_size, num_sections, max_tokens, _ = section_tokens.shape
             # 重塑为 [B*N, max_tokens, H] 以便 batch 处理
             tokens_flat = section_tokens.view(batch_size * num_sections, max_tokens, -1)
             mask_flat = section_token_mask.view(batch_size * num_sections, max_tokens)
-            # AttentionPooling
-            pooled_flat = self.section_token_pooling(tokens_flat, mask_flat)
+            # AttentionPooling（返回权重用于诊断）
+            pooled_flat, attention_weights = self.section_token_pooling(
+                tokens_flat, mask_flat, return_weights=True
+            )
             # 重塑回 [B, N, H]
             region_features = pooled_flat.view(batch_size, num_sections, -1)
+            # attention_weights: [B*N, max_tokens] -> [B, N, max_tokens]
+            attention_weights = attention_weights.view(batch_size, num_sections, max_tokens)
 
         # Add type embedding
         type_emb = self.type_embedding(categories)
@@ -333,6 +338,10 @@ class ConstructFromFeatures(nn.Module):
             'parent_logits': construct_outputs['parent_logits'],
             'sibling_logits': construct_outputs['sibling_logits'],
         }
+
+        # 添加 attention weights 用于诊断
+        if attention_weights is not None:
+            outputs['attention_weights'] = attention_weights
 
         # Compute loss
         if parent_labels is not None:
@@ -396,12 +405,12 @@ def build_construct_from_features(
     num_heads: int = 12,
     num_layers: int = 3,
     dropout: float = 0.1,
-    use_token_level_construct: bool = False,
+    attention_pool_construct: bool = False,
 ) -> ConstructFromFeatures:
     """Build simplified Construct model.
 
     Args:
-        use_token_level_construct: 是否使用 token-level 特征构建 TOC
+        attention_pool_construct: 是否使用 AttentionPooling 替代 mean pooling
     """
     return ConstructFromFeatures(
         hidden_size=hidden_size,
@@ -409,7 +418,7 @@ def build_construct_from_features(
         num_heads=num_heads,
         num_layers=num_layers,
         dropout=dropout,
-        use_token_level_construct=use_token_level_construct,
+        attention_pool_construct=attention_pool_construct,
     )
 
 

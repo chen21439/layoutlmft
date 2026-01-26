@@ -66,7 +66,8 @@ class AttentionPooling(nn.Module):
         self,
         tokens: torch.Tensor,
         mask: torch.Tensor,
-    ) -> torch.Tensor:
+        return_weights: bool = False,
+    ):
         """
         对每个 section 的 tokens 进行 attention pooling
 
@@ -75,10 +76,13 @@ class AttentionPooling(nn.Module):
                     每个 section 的 token 特征
             mask: [num_sections, max_tokens]
                   True 表示有效 token，False 表示 padding
+            return_weights: 是否返回 attention 权重（用于诊断）
 
         Returns:
             pooled: [num_sections, hidden_size]
                     每个 section 聚合后的特征向量
+            weights: (仅当 return_weights=True) [num_sections, max_tokens]
+                     attention 权重分布
         """
         # 计算每个 token 的重要性分数
         scores = self.attention(tokens).squeeze(-1)  # [num_sections, max_tokens]
@@ -93,6 +97,9 @@ class AttentionPooling(nn.Module):
         # Softmax 得到 attention 权重
         weights = F.softmax(scores, dim=-1)  # [num_sections, max_tokens]
 
+        # 保存 dropout 前的权重用于诊断
+        weights_before_dropout = weights.clone().detach() if return_weights else None
+
         # 处理全 padding：均匀权重（虽然理论上不应该发生）
         weights = weights.masked_fill(all_masked.expand_as(weights), 1.0 / max(1, tokens.shape[1]))
 
@@ -105,6 +112,8 @@ class AttentionPooling(nn.Module):
             tokens,                # [num_sections, max_tokens, hidden]
         ).squeeze(1)  # [num_sections, hidden]
 
+        if return_weights:
+            return pooled, weights_before_dropout
         return pooled
 
 

@@ -203,10 +203,10 @@ def parse_args():
                         help="Micro-batch size for backbone forward (reduces memory)")
     parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
                         help="Enable gradient checkpointing in backbone (saves memory)")
-    parser.add_argument("--use-token-level-construct", action="store_true", default=False,
-                        help="Use token-level features for TOC construction (AttentionPooling)")
+    parser.add_argument("--attention-pool-construct", action="store_true", default=False,
+                        help="Use AttentionPooling instead of mean pooling for section features")
     parser.add_argument("--max-tokens-per-section", type=int, default=64,
-                        help="Max tokens per section (only for token-level construct)")
+                        help="Max tokens per section (only for attention-pool-construct)")
 
     # Output
     parser.add_argument("--artifact-dir", type=str, default=None,
@@ -604,7 +604,7 @@ def train_epoch_with_stage_features(
     for step, batch in enumerate(progress_bar):
         # Extract line features using stage model
         # train_backbone=True 时梯度流向 backbone，否则无梯度
-        use_token_level = getattr(args, 'use_token_level_construct', False)
+        use_attention_pool = getattr(args, 'attention_pool_construct', False)
         token_hidden_states = None
         token_line_ids = None
 
@@ -617,15 +617,15 @@ def train_epoch_with_stage_features(
                 image=batch.get("image"),
                 num_docs=batch.get("num_docs"),
                 chunks_per_doc=batch.get("chunks_per_doc"),
-                return_token_hidden=use_token_level,
+                return_token_hidden=use_attention_pool,
             )
             # 第一个 step 检查梯度是否连接到 backbone
             if step == 0:
                 has_grad = line_features.requires_grad and line_features.grad_fn is not None
                 logger.info(f"[Stage1] line_features.requires_grad={line_features.requires_grad}, "
                            f"grad_fn={line_features.grad_fn is not None} → backbone gradient: {'ON' if has_grad else 'OFF'}")
-                if use_token_level:
-                    logger.info(f"[Stage1] Token-level construct enabled, token_hidden_states: {token_hidden_states.shape if token_hidden_states is not None else 'None'}")
+                if use_attention_pool:
+                    logger.info(f"[Stage1] AttentionPooling enabled, token_hidden_states: {token_hidden_states.shape if token_hidden_states is not None else 'None'}")
         else:
             with torch.no_grad():
                 line_features, line_mask = feature_extractor.extract_features(
@@ -678,10 +678,10 @@ def train_epoch_with_stage_features(
             if line_mask.sum() == 0:
                 continue
 
-            # Token-level: 提取 section tokens
+            # AttentionPooling: 提取 section tokens
             section_tokens = None
             section_token_mask = None
-            if use_token_level and token_hidden_states is not None and token_line_ids is not None:
+            if use_attention_pool and token_hidden_states is not None and token_line_ids is not None:
                 from examples.comp_hrdoc.models.modules.attention_pooling import extract_section_tokens
                 original_indices = compressed["original_indices"]  # [B, max_sections]
                 max_tokens_per_section = getattr(args, 'max_tokens_per_section', 64)
@@ -837,6 +837,25 @@ def train_epoch_with_stage_features(
         total_cls_loss += cls_loss.item()
         num_batches += 1
 
+        # AttentionPooling 诊断日志（每 log_steps 输出一次）
+        if use_attention_pool and "attention_weights" in outputs and (step + 1) % args.log_steps == 0:
+            attn_weights = outputs["attention_weights"]  # [B, N, max_tokens]
+            # 计算 attention 权重熵（越高越均匀，越低越集中）
+            # 只对有效位置计算
+            if section_token_mask is not None:
+                valid_weights = attn_weights[section_token_mask[:, :, :attn_weights.shape[-1]]]
+                if valid_weights.numel() > 0:
+                    # 避免 log(0)
+                    eps = 1e-8
+                    entropy = -(valid_weights * torch.log(valid_weights + eps)).sum() / valid_weights.shape[0]
+                    # 计算最大权重（越高越集中）
+                    max_weight = attn_weights.max().item()
+                    # 理论上均匀分布的熵
+                    avg_tokens = section_token_mask.sum(dim=-1).float().mean().item()
+                    uniform_entropy = torch.log(torch.tensor(max(avg_tokens, 1))).item()
+                    logger.info(f"  [AttentionPool] entropy={entropy:.3f} (uniform≈{uniform_entropy:.3f}), "
+                               f"max_weight={max_weight:.3f}")
+
         # Update progress bar
         postfix = {
             "loss": f"{(outputs['loss'].item() + cls_loss.item()):.4f}",
@@ -911,13 +930,13 @@ def evaluate_with_stage_features(
     toc_only = args.toc_only if args else False
     section_label_id = args.section_label_id if args else 1
 
-    # Token-level construct 支持
-    use_token_level = getattr(args, 'use_token_level_construct', False) if args else False
+    # AttentionPooling 支持
+    use_attention_pool = getattr(args, 'attention_pool_construct', False) if args else False
     max_tokens_per_section = getattr(args, 'max_tokens_per_section', 64) if args else 64
 
     for batch in tqdm(dataloader, desc="Evaluating (stage features)"):
         # Extract line features (optionally with token hidden states)
-        if use_token_level:
+        if use_attention_pool:
             line_features, line_mask, token_hidden_states, token_line_ids = feature_extractor.extract_features(
                 input_ids=batch["input_ids"],
                 bbox=batch["bbox"],
@@ -993,10 +1012,10 @@ def evaluate_with_stage_features(
             if line_mask.sum() == 0:
                 continue
 
-            # Token-level: 提取 section tokens
+            # AttentionPooling: 提取 section tokens
             section_tokens = None
             section_token_mask = None
-            if use_token_level and token_hidden_states is not None and token_line_ids is not None:
+            if use_attention_pool and token_hidden_states is not None and token_line_ids is not None:
                 from examples.comp_hrdoc.models.modules.attention_pooling import extract_section_tokens
 
                 # 批量提取 section tokens
@@ -1568,16 +1587,18 @@ def main():
             save_construct_model,
         )
         logger.info("Building ConstructFromFeatures model (using stage features)...")
-        if args.use_token_level_construct:
-            logger.info("  Token-level construct: ENABLED (AttentionPooling)")
+        if args.attention_pool_construct:
+            logger.info("  Section pooling: AttentionPooling (learnable weights)")
             logger.info(f"  Max tokens per section: {args.max_tokens_per_section}")
+        else:
+            logger.info("  Section pooling: MeanPooling (default)")
         model = build_construct_from_features(
             hidden_size=args.hidden_size,
             num_categories=14,  # HRDoc has 14 classes
             num_heads=args.num_heads,
             num_layers=args.construct_num_layers,
             dropout=args.dropout,
-            use_token_level_construct=args.use_token_level_construct,
+            attention_pool_construct=args.attention_pool_construct,
         )
         # save_fn for ConstructFromFeatures (不用于 train_stage1，因为已在上面定义)
         if not args.train_stage1:
