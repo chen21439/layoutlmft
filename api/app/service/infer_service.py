@@ -409,6 +409,12 @@ class InferenceService:
             "line_ids": line_ids_list,
         }
 
+        # 输出 Stage1 分类预测统计
+        section_label_id = 4  # section 的 label id
+        section_line_ids = [i for i, cls_id in features["line_classes"].items() if cls_id == section_label_id]
+        logger.info(f"[Stage1] 分类预测: {num_lines} lines, {len(section_line_ids)} sections")
+        logger.info(f"[Stage1] section line_ids: {section_line_ids}")
+
         # Save features.pt
         features_path = os.path.join(task_dir, "features.pt")
         torch.save({
