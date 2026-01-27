@@ -26,8 +26,15 @@ Predict1 Router - /predict1 endpoint
 import json
 import logging
 import os
+import sys
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException
+
+# 添加 comp_hrdoc 路径
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "examples"))
+
+from comp_hrdoc.utils.tree_utils import build_doc_tree_with_nodes
 
 from ..schemas import PredictRequest, ErrorResponse
 from ..service.infer_service import get_infer_service
@@ -136,13 +143,13 @@ def build_nested_tree(
     从扁平的格式A预测结果构建嵌套树结构
 
     核心逻辑：
-    1. sections 根据 parent_id 构建父子关系 (children)
+    1. 使用 tree_utils.build_doc_tree_with_nodes 处理 relation（equality=兄弟关系）
     2. 非 section 元素按阅读顺序挂载到"前面最近的 section"的 elements 中
     3. section 标题自身也作为 elements[0]
 
     Args:
         predictions: 格式A的预测结果列表
-            每个: {"line_id": int, "parent_id": int, "text": str, "class": str, "is_section": bool, ...}
+            每个: {"line_id": int, "parent_id": int, "relation": str, "text": str, "class": str, "is_section": bool, ...}
         id_key: 节点ID字段名
         parent_key: 父节点ID字段名
         base_level: 顶层 section 的 level 值（默认 1）
@@ -157,46 +164,74 @@ def build_nested_tree(
     sections = [p for p in predictions if p.get("is_section", False)]
 
     if not sections:
-        # 没有 section，返回空
         return []
 
-    # ========== 1. 构建 section 节点和父子关系 ==========
-    section_nodes = {}
+    # ========== 1. 使用 tree_utils 构建正确的树结构（处理 relation）==========
+    # 构建 line_id -> section_index 映射
+    section_line_ids = [sec[id_key] for sec in sections]
+    line_id_to_sec_idx = {lid: idx for idx, lid in enumerate(section_line_ids)}
+
+    # 提取 parent_ids 和 relations（转换为 section_index 空间）
+    parent_ids = []
+    relations = []
     for sec in sections:
+        parent_line_id = sec.get(parent_key, -1)
+        relation = sec.get("relation", "contain")
+
+        # 将 line_id 转换为 section_index
+        if parent_line_id == -1 or parent_line_id not in line_id_to_sec_idx:
+            parent_ids.append(-1)
+        else:
+            parent_ids.append(line_id_to_sec_idx[parent_line_id])
+        relations.append(relation)
+
+    # 使用 tree_utils 构建树（正确处理 equality 关系）
+    root_node, nodes = build_doc_tree_with_nodes(parent_ids, relations)
+
+    # ========== 2. 从 Node 树构建 section_nodes 字典 ==========
+    section_nodes = {}
+    for sec_idx, sec in enumerate(sections):
         node_id = sec[id_key]
+        node = nodes[sec_idx]
+
+        # 从 Node.parent 获取真正的层级父节点
+        if node.parent is None or node.parent.name == 'ROOT':
+            hierarchical_parent_id = -1
+        else:
+            parent_sec_idx = node.parent.info['index']
+            hierarchical_parent_id = section_line_ids[parent_sec_idx]
+
         section_nodes[node_id] = {
             "title": sec.get("text", ""),
-            "level": 0,  # 后面计算
-            "start_index": 0,  # TODO: 待用户确认
-            "end_index": 0,    # TODO: 待用户确认
+            "level": node.depth,  # 使用 Node.depth
+            "start_index": 0,
+            "end_index": 0,
             "element_count": 0,
             "elements": [],
             "children": [],
             # 内部字段
             "_line_id": node_id,
-            "_parent_id": sec.get(parent_key, -1),
+            "_hierarchical_parent_id": hierarchical_parent_id,
+            "_node": node,
         }
 
-    # 构建父子关系
+    # 构建父子关系（使用 hierarchical_parent）
     roots = []
-    for sec in sections:
-        node_id = sec[id_key]
-        parent_id = sec.get(parent_key, -1)
-        node = section_nodes[node_id]
-
+    for node_id, sec_node in section_nodes.items():
+        parent_id = sec_node["_hierarchical_parent_id"]
         if parent_id == -1 or parent_id not in section_nodes:
-            roots.append(node)
+            roots.append(sec_node)
         else:
-            section_nodes[parent_id]["children"].append(node)
+            section_nodes[parent_id]["children"].append(sec_node)
 
-    # ========== 2. 计算 level（树深度，从 1 开始）==========
-    def calc_level(node: Dict, level: int):
+    # ========== 3. 调整 level（从 base_level 开始）==========
+    def adjust_level(node: Dict, level: int):
         node["level"] = level
         for child in node["children"]:
-            calc_level(child, level + 1)
+            adjust_level(child, level + 1)
 
     for root in roots:
-        calc_level(root, base_level)
+        adjust_level(root, base_level)
 
     # ========== 3. 按阅读顺序分配 elements ==========
     # 按 line_id 排序所有项
@@ -262,7 +297,8 @@ def build_nested_tree(
     # ========== 5. 清理内部字段 ==========
     def clean_internal_fields(node: Dict):
         node.pop("_line_id", None)
-        node.pop("_parent_id", None)
+        node.pop("_hierarchical_parent_id", None)
+        node.pop("_node", None)
         for child in node["children"]:
             clean_internal_fields(child)
 
