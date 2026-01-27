@@ -188,9 +188,15 @@ def process_task(task_id: str, steps: set = None) -> dict:
             if max_num_layoutlmft >= 0:
                 result["step3_count"] = append_chapter4_images(layoutlmft_target, max_num_layoutlmft)
 
-        # ========== Step 4: 提取 {filename}_construct.json 的 prediction 字段到 train 目录 ==========
+        # ========== Step 4: 提取 _construct.json 的 prediction 字段到 train 目录 ==========
+        # 优先尝试 {filename}_construct.json，不存在则尝试 {taskId}_construct.json
+        # 输出文件名统一为 {filename}.json
         if 4 in steps:
             construct_src = SOURCE_BASE / task_id / f"{filename}_construct.json"
+            if not construct_src.exists():
+                # 尝试 taskId_construct.json
+                construct_src = SOURCE_BASE / task_id / f"{task_id}_construct.json"
+
             if construct_src.exists():
                 TRAIN_DIR.mkdir(parents=True, exist_ok=True)
                 with open(construct_src, "r", encoding="utf-8") as f:
@@ -198,10 +204,13 @@ def process_task(task_id: str, steps: set = None) -> dict:
                 predictions = construct_data.get("predictions", [])
                 # 转换 location 格式为 page + box 格式
                 converted = [convert_location_to_box(item) for item in predictions]
+                # 输出文件名使用 filename（与 images 目录名一致）
                 construct_dst = TRAIN_DIR / f"{filename}.json"
                 with open(construct_dst, "w", encoding="utf-8") as f:
                     json.dump(converted, f, ensure_ascii=False, indent=2)
                 result["step4_copied"] = True
+                result["step4_src"] = construct_src.name
+                result["step4_dst"] = construct_dst.name
 
         # ========== Step 5: 添加 filename 到 train_doc_ids.json ==========
         if 5 in steps:
@@ -301,7 +310,12 @@ def main():
             if steps is None or 3 in steps:
                 print(f"    Step3 追加到layoutlmft: {result['step3_count']} 个文件")
             if steps is None or 4 in steps:
-                print(f"    Step4 复制_construct.json: {'✓' if result['step4_copied'] else '✗ 文件不存在'}")
+                if result['step4_copied']:
+                    src_name = result.get('step4_src', '?')
+                    dst_name = result.get('step4_dst', '?')
+                    print(f"    Step4 复制_construct.json: ✓ ({src_name} → {dst_name})")
+                else:
+                    print(f"    Step4 复制_construct.json: ✗ 文件不存在")
             if steps is None or 5 in steps:
                 if result["step5_added"]:
                     print(f"    Step5 添加到train_doc_ids: {', '.join(result['step5_added'])}")

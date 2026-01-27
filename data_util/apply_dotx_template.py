@@ -6,7 +6,7 @@
 2. 只替换标题样式，保留正文/列表/表格样式不动
 3. 安全注入标题编号系统，不覆盖目标文档原有列表
 4. 可选复制主题和字体表
-5. 自动查找同目录下所有 .dotx 模板文件
+5. 自动在同目录的 dotx 子文件夹中查找所有 .dotx 模板文件
 6. 自动识别并转换 outlineLvl 大纲级别为标题样式
 7. 输出目录：原文件名去掉"标题无编号_"前缀
 8. 输出文件名：模板名.docx
@@ -21,8 +21,9 @@
 目录结构示例：
   docs/
   ├── 标题无编号_批注.docx     ← 主文件
-  ├── 标书模板.dotx            ← 自动查找
-  └── 招投标模板.dotx          ← 自动查找
+  └── dotx/                    ← 模板子目录
+      ├── 标书模板.dotx        ← 自动查找
+      └── 招投标模板.dotx      ← 自动查找
 
   输出：
   docs/批注/                   ← 去掉"标题无编号_"前缀
@@ -679,7 +680,7 @@ def main():
   python apply_dotx_template.py main.docx --no-theme
 
 说明：
-  - 自动在同目录查找所有 .dotx 文件作为模板
+  - 自动在同目录的 dotx 子文件夹中查找所有 .dotx 文件作为模板
   - 只替换 Heading1-9 / 标题1-9，不影响正文和其他样式
   - 安全注入编号系统，不会覆盖目标文档原有列表
   - 自动识别并转换 outlineLvl 大纲级别为标题样式
@@ -747,12 +748,19 @@ def main():
     print(f"工作目录: {directory}")
     print()
 
-    # 查找模板文件
+    # 查找模板文件（在同目录的 dotx 子文件夹中）
+    dotx_dir = directory / "dotx"
     print("[1/3] 扫描模板文件 (*.dotx)...")
-    template_files = find_template_files(directory)
+    print(f"  模板目录: {dotx_dir}")
+
+    if not dotx_dir.exists():
+        print(f"[错误] 模板目录不存在: {dotx_dir}")
+        sys.exit(1)
+
+    template_files = find_template_files(dotx_dir)
 
     if not template_files:
-        print("[错误] 未找到模板文件 (*.dotx)")
+        print(f"[错误] 模板目录中未找到模板文件 (*.dotx): {dotx_dir}")
         sys.exit(1)
 
     print(f"  找到 {len(template_files)} 个模板文件:")
