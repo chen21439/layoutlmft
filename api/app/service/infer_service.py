@@ -347,6 +347,182 @@ class InferenceService:
             "data": output_data,
         }
 
+    def _build_split_result(
+        self,
+        predictions: List[Dict],
+        task_id: str,
+        base_level: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        从扁平格式A构建 split_result 嵌套树格式
+
+        使用 tree_utils.build_doc_tree_with_nodes 正确处理 relation:
+        - contain: 真正的父子关系
+        - equality: 兄弟关系（parent_id 指向左兄弟）
+
+        Args:
+            predictions: 扁平格式A的预测结果
+            task_id: 任务ID
+            base_level: 顶层 section 的 level 值
+
+        Returns:
+            split_result 格式的字典
+        """
+        if not predictions:
+            return {"document": task_id, "total_elements": 0, "total_sections": 0, "sections": []}
+
+        # 分离 section 和非 section
+        sections = [p for p in predictions if p.get("is_section", False)]
+        if not sections:
+            return {"document": task_id, "total_elements": len(predictions), "total_sections": 0, "sections": []}
+
+        # 构建 line_id -> section_index 映射
+        section_line_ids = [sec["line_id"] for sec in sections]
+        line_id_to_sec_idx = {lid: idx for idx, lid in enumerate(section_line_ids)}
+
+        # 提取 parent_ids 和 relations（转换为 section_index 空间）
+        parent_ids = []
+        relations = []
+        for sec in sections:
+            parent_line_id = sec.get("parent_id", -1)
+            relation = sec.get("relation", "contain")
+
+            if parent_line_id == -1 or parent_line_id not in line_id_to_sec_idx:
+                parent_ids.append(-1)
+            else:
+                parent_ids.append(line_id_to_sec_idx[parent_line_id])
+            relations.append(relation)
+
+        # 使用 tree_utils 构建树（正确处理 equality 关系）
+        root_node, nodes = build_doc_tree_with_nodes(parent_ids, relations)
+
+        # 构建 section_nodes 字典
+        section_nodes = {}
+        for sec_idx, sec in enumerate(sections):
+            node_id = sec["line_id"]
+            node = nodes[sec_idx]
+
+            # 从 Node.parent 获取真正的层级父节点
+            if node.parent is None or node.parent.name == 'ROOT':
+                hierarchical_parent_id = -1
+            else:
+                parent_sec_idx = node.parent.info['index']
+                hierarchical_parent_id = section_line_ids[parent_sec_idx]
+
+            section_nodes[node_id] = {
+                "title": sec.get("text", ""),
+                "level": base_level + node.depth - 1,  # depth 从 1 开始
+                "start_index": 0,
+                "end_index": 0,
+                "element_count": 0,
+                "elements": [],
+                "children": [],
+                "_line_id": node_id,
+                "_hierarchical_parent_id": hierarchical_parent_id,
+            }
+
+        # 构建父子关系
+        roots = []
+        for node_id, sec_node in section_nodes.items():
+            parent_id = sec_node["_hierarchical_parent_id"]
+            if parent_id == -1 or parent_id not in section_nodes:
+                roots.append(sec_node)
+            else:
+                section_nodes[parent_id]["children"].append(sec_node)
+
+        # 按阅读顺序分配 elements
+        all_items = sorted(predictions, key=lambda x: x.get("line_id", 0))
+        current_section_id = None
+        line_to_section = {}
+        for item in all_items:
+            line_id = item.get("line_id")
+            if item.get("is_section", False):
+                current_section_id = line_id
+            line_to_section[line_id] = current_section_id
+
+        element_seq_no = {}
+        for idx, item in enumerate(all_items):
+            line_id = item.get("line_id")
+            is_section = item.get("is_section", False)
+            section_id = line_to_section.get(line_id) if not is_section else line_id
+
+            if section_id is not None and section_id in section_nodes:
+                seq = element_seq_no.get(section_id, 0)
+                element = self._build_element(item, idx, seq)
+                section_nodes[section_id]["elements"].append(element)
+                element_seq_no[section_id] = seq + 1
+
+        # 计算 element_count 和 start_index / end_index
+        global_index = [0]
+        def calc_indices(node):
+            node["element_count"] = len(node["elements"])
+            node["start_index"] = global_index[0]
+            global_index[0] += len(node["elements"])
+            for child in node["children"]:
+                calc_indices(child)
+            node["end_index"] = global_index[0]
+
+        for root in roots:
+            calc_indices(root)
+
+        # 清理内部字段
+        def clean_fields(node):
+            node.pop("_line_id", None)
+            node.pop("_hierarchical_parent_id", None)
+            for child in node["children"]:
+                clean_fields(child)
+
+        for root in roots:
+            clean_fields(root)
+
+        return {
+            "document": task_id,
+            "total_elements": len(predictions),
+            "total_sections": len(sections),
+            "sections": roots,
+        }
+
+    def _build_element(self, line: Dict, index: int, seq_no: int) -> Dict:
+        """构建单个 Element 结构"""
+        line_id = line.get("line_id", index)
+        text = line.get("text", "")
+        cls = line.get("class", "")
+
+        is_table_cell = "table_index" in line or cls in ("table", "table_cell")
+        element_type = "table_cell" if is_table_cell else "paragraph"
+        prefix = "tc" if is_table_cell else "p"
+        element_id = f"{prefix}_{line_id:03d}"
+
+        # 坐标转换
+        location = line.get("location")
+        coordinates = None
+        if location:
+            coordinates = []
+            for loc in location:
+                coordinates.append({
+                    "x0": loc.get("l", loc.get("x0", 0)),
+                    "y0": loc.get("t", loc.get("y0", 0)),
+                    "x1": loc.get("r", loc.get("x1", 0)),
+                    "y1": loc.get("b", loc.get("y1", 0)),
+                    "page": loc.get("page", 1),
+                    "originalText": text,
+                })
+
+        element = {
+            "type": element_type,
+            "text_preview": text[:100] if len(text) > 100 else text,
+            "index": index,
+            "element_id": element_id,
+            "seq_no": seq_no,
+            "coordinates": coordinates,
+        }
+
+        if is_table_cell:
+            element["table_index"] = line.get("table_index", 0)
+            element["row_index"] = line.get("row_index", 0)
+            element["cell_index"] = line.get("cell_index", 0)
+
+        return element
 
     def predict_with_construct(
         self,
@@ -607,6 +783,19 @@ class InferenceService:
             with open(construct_path, 'w', encoding='utf-8') as f:
                 json.dump(construct_result, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved construct result to: {construct_path}")
+
+            # Save {document_name}_split_result.json (嵌套树格式)
+            try:
+                split_result = self._build_split_result(
+                    predictions=construct_result["predictions"],
+                    task_id=f"task_{os.path.basename(task_dir)}",
+                )
+                split_result_path = os.path.join(task_dir, f"{document_name}_split_result.json")
+                with open(split_result_path, 'w', encoding='utf-8') as f:
+                    json.dump(split_result, f, ensure_ascii=False, indent=2)
+                logger.info(f"Saved split_result to: {split_result_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save split_result: {e}")
 
             # 打印 TOC 树结构（使用 visualize_toc，和训练一致）
             format_b = construct_result.get("format_b", {})
