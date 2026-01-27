@@ -36,30 +36,35 @@ async def predict(request: PredictRequest):
     Run inference on a single document.
 
     - **task_id**: Task ID (folder name under data_dir_base)
-    - **document_name**: Document name (without .json extension)
+    - **document_name**: Document name (optional, auto-detect if not provided)
     """
     # Return empty results if model is not loaded (e.g., still training)
     model_loader = get_model_loader()
+    service = get_infer_service()
+
+    # Auto-detect document_name if not provided
+    document_name = document_name
+    if not document_name:
+        document_name = service._find_document_name(request.task_id)
+
     if not model_loader.is_loaded:
         logger.warning("Model not loaded, returning empty results")
         return PredictResponse(
-            document_name=request.document_name,
+            document_name=document_name,
             num_lines=0,
             inference_time_ms=0.0,
             data=[],
         )
 
     try:
-        logger.info(f"[Predict] task_id={request.task_id}, document={request.document_name}")
-
-        service = get_infer_service()
+        logger.info(f"[Predict] task_id={request.task_id}, document={document_name}")
 
         if model_loader.is_joint_training_model:
             # 联合训练模型：直接使用 predict_with_construct（不需要 stage3/stage4）
             logger.info("[Predict] Using joint training model (Stage1 + Construct)")
             construct_result = service.predict_with_construct(
                 task_id=request.task_id,
-                document_name=request.document_name,
+                document_name=document_name,
                 full_tree=True,
             )
             logger.info(f"[Predict] Done: {construct_result['num_lines']} lines, {construct_result['inference_time_ms']:.2f}ms")
@@ -79,7 +84,7 @@ async def predict(request: PredictRequest):
                 })
 
             return PredictResponse(
-                document_name=request.document_name,
+                document_name=document_name,
                 num_lines=construct_result["num_lines"],
                 inference_time_ms=construct_result["inference_time_ms"],
                 data=result_data,
@@ -89,7 +94,7 @@ async def predict(request: PredictRequest):
             # 1. Stage 1/3/4 推理
             result = service.predict_single(
                 task_id=request.task_id,
-                document_name=request.document_name,
+                document_name=document_name,
                 return_original=True,
             )
             logger.info(f"[Predict] Stage done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
@@ -99,7 +104,7 @@ async def predict(request: PredictRequest):
                 try:
                     construct_result = service.predict_with_construct(
                         task_id=request.task_id,
-                        document_name=request.document_name,
+                        document_name=document_name,
                     )
                     logger.info(f"[Predict] Construct done: {construct_result['inference_time_ms']:.2f}ms")
                 except Exception as e:

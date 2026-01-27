@@ -18,9 +18,9 @@ class PredictRequest(BaseModel):
         description="Task ID (folder name under data_dir_base)",
         example="task_001"
     )
-    document_name: str = Field(
-        ...,
-        description="Document name (without .json extension)",
+    document_name: Optional[str] = Field(
+        None,
+        description="Document name (without .json extension). If not provided, auto-detect from task directory.",
         example="tender_doc_001"
     )
 

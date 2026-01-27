@@ -309,6 +309,13 @@ async def predict1(request: PredictRequest):
     }
     """
     model_loader = get_model_loader()
+    service = get_infer_service()
+
+    # Auto-detect document_name if not provided
+    document_name = document_name
+    if not document_name:
+        document_name = service._find_document_name(request.task_id)
+
     if not model_loader.is_loaded:
         logger.warning("Model not loaded, returning empty results")
         return {
@@ -319,9 +326,7 @@ async def predict1(request: PredictRequest):
         }
 
     try:
-        logger.info(f"[Predict1] task_id={request.task_id}, document={request.document_name}")
-
-        service = get_infer_service()
+        logger.info(f"[Predict1] task_id={request.task_id}, document={document_name}")
 
         # 使用与 /predict 相同的推理流程
         if model_loader.is_joint_training_model:
@@ -329,7 +334,7 @@ async def predict1(request: PredictRequest):
             logger.info("[Predict1] Using joint training model (Stage1 + Construct)")
             construct_result = service.predict_with_construct(
                 task_id=request.task_id,
-                document_name=request.document_name,
+                document_name=document_name,
                 full_tree=True,
             )
             logger.info(f"[Predict1] Done: {construct_result['num_lines']} lines, {construct_result['inference_time_ms']:.2f}ms")
@@ -341,7 +346,7 @@ async def predict1(request: PredictRequest):
             # 标准 JointModel
             result = service.predict_single(
                 task_id=request.task_id,
-                document_name=request.document_name,
+                document_name=document_name,
                 return_original=True,
             )
             logger.info(f"[Predict1] Stage done: {result['num_lines']} lines, {result['inference_time_ms']:.2f}ms")
@@ -351,7 +356,7 @@ async def predict1(request: PredictRequest):
                 try:
                     construct_result = service.predict_with_construct(
                         task_id=request.task_id,
-                        document_name=request.document_name,
+                        document_name=document_name,
                         full_tree=True,
                     )
                     predictions = construct_result.get("construct_result", {}).get("predictions", [])
@@ -379,7 +384,7 @@ async def predict1(request: PredictRequest):
         # 保存到 upload/{task_id}/{document_name}_split_result.json
         try:
             task_dir = service._get_task_dir(request.task_id)
-            split_result_path = os.path.join(task_dir, f"{request.document_name}_split_result.json")
+            split_result_path = os.path.join(task_dir, f"{document_name}_split_result.json")
             with open(split_result_path, 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             logger.info(f"[Predict1] Saved split_result to: {split_result_path}")

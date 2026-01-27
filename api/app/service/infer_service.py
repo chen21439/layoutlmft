@@ -86,6 +86,39 @@ class InferenceService:
             raise ValueError("data_dir_base must be configured")
         return os.path.join(self.data_dir_base, task_id)
 
+    def _find_document_name(self, task_id: str) -> str:
+        """
+        Auto-detect document name from task directory.
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            Document name (without .json extension)
+
+        Raises:
+            FileNotFoundError: If no json file found or multiple json files exist
+        """
+        task_dir = self._get_task_dir(task_id)
+        if not os.path.isdir(task_dir):
+            raise FileNotFoundError(f"Task directory not found: {task_dir}")
+
+        # 查找所有 .json 文件（排除 _construct.json, _split_result.json 等生成文件）
+        json_files = [
+            f for f in os.listdir(task_dir)
+            if f.endswith('.json')
+            and not f.endswith('_construct.json')
+            and not f.endswith('_split_result.json')
+        ]
+
+        if len(json_files) == 0:
+            raise FileNotFoundError(f"No JSON file found in {task_dir}")
+        if len(json_files) > 1:
+            raise FileNotFoundError(f"Multiple JSON files found in {task_dir}: {json_files}. Please specify document_name.")
+
+        # 返回不带 .json 后缀的文件名
+        return json_files[0][:-5]
+
     def predict_single(
         self,
         task_id: str,
