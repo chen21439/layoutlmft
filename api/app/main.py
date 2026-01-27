@@ -153,10 +153,11 @@ app.add_middleware(
 )
 
 # Include routers
-from .routers import predict, health
+from .routers import predict, predict1, health
 
 app.include_router(health.router)
 app.include_router(predict.router)
+app.include_router(predict1.router)
 
 
 # Admin endpoints for runtime model management
