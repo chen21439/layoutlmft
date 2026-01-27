@@ -312,7 +312,7 @@ async def predict1(request: PredictRequest):
     service = get_infer_service()
 
     # Auto-detect document_name if not provided
-    document_name = document_name
+    document_name = request.document_name
     if not document_name:
         document_name = service._find_document_name(request.task_id)
 

@@ -4,7 +4,9 @@
 Predict Router - /predict endpoint
 """
 
+import json
 import logging
+import os
 from fastapi import APIRouter, HTTPException
 
 from ..schemas import (
@@ -14,6 +16,7 @@ from ..schemas import (
 )
 from ..service.infer_service import get_infer_service
 from ..service.model_loader import get_model_loader
+from .predict1 import build_nested_tree
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +46,7 @@ async def predict(request: PredictRequest):
     service = get_infer_service()
 
     # Auto-detect document_name if not provided
-    document_name = document_name
+    document_name = request.document_name
     if not document_name:
         document_name = service._find_document_name(request.task_id)
 
@@ -82,6 +85,24 @@ async def predict(request: PredictRequest):
                     "relation": pred.get("relation", ""),
                     "location": pred.get("location"),
                 })
+
+            # 保存 split_result 格式
+            try:
+                sections = build_nested_tree(predictions)
+                total_sections = sum(1 for p in predictions if p.get("is_section", False))
+                split_result = {
+                    "document": f"task_{request.task_id}",
+                    "total_elements": len(predictions),
+                    "total_sections": total_sections,
+                    "sections": sections,
+                }
+                task_dir = service._get_task_dir(request.task_id)
+                split_result_path = os.path.join(task_dir, f"{document_name}_split_result.json")
+                with open(split_result_path, 'w', encoding='utf-8') as f:
+                    json.dump(split_result, f, ensure_ascii=False, indent=2)
+                logger.info(f"[Predict] Saved split_result to: {split_result_path}")
+            except Exception as e:
+                logger.warning(f"[Predict] Failed to save split_result: {e}")
 
             return PredictResponse(
                 document_name=document_name,
