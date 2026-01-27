@@ -39,6 +39,7 @@ from joint_data_collator import HRDocDocumentLevelCollator
 from layoutlmft.data.labels import ID2LABEL
 from comp_hrdoc.utils.tree_utils import (
     build_tree_from_parents,
+    build_doc_tree_with_nodes,
     format_toc_tree,
     format_tree_from_parents,
     flatten_full_tree_to_format_a,
