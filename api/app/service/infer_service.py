@@ -467,6 +467,76 @@ class InferenceService:
 
         return cells
 
+    def _merge_connected_lines(self, items: List[Dict]) -> List[Dict]:
+        """
+        合并 fstline 和其后续 connect 关系的 paraline
+
+        规则: fstline -connect-> paraline -connect-> paraline -> 合并为一个元素
+        停止条件: 遇到非 paraline 或非 connect 关系
+
+        合并方式:
+        - text: 拼接（空格分隔）
+        - location: 列表合并（多个 bbox）
+
+        Args:
+            items: 按阅读顺序排列的元素列表
+
+        Returns:
+            合并后的元素列表
+        """
+        if not items:
+            return items
+
+        merged = []
+        i = 0
+
+        while i < len(items):
+            item = items[i]
+            item_class = (item.get("class", "") or "").lower()
+
+            # 检查是否是 fstline
+            if item_class == "fstline":
+                # 开始收集后续 connect 的 paraline
+                merged_item = dict(item)
+                texts = [item.get("text", "") or ""]
+                locations = list(item.get("location", []) or [])
+
+                j = i + 1
+                while j < len(items):
+                    next_item = items[j]
+                    next_class = (next_item.get("class", "") or "").lower()
+                    next_relation = (next_item.get("relation", "") or "").lower()
+
+                    # 检查是否是 paraline 且 relation=connect
+                    if next_class == "paraline" and next_relation == "connect":
+                        texts.append(next_item.get("text", "") or "")
+                        next_loc = next_item.get("location", []) or []
+                        locations.extend(next_loc)
+                        j += 1
+                    else:
+                        # 遇到非 paraline 或非 connect，停止合并
+                        break
+
+                # 如果有合并发生
+                if j > i + 1:
+                    merged_item["text"] = " ".join(t for t in texts if t)
+                    merged_item["location"] = locations
+                    merged_item["_merged_count"] = j - i
+                    logger.debug(f"[MergeLines] Merged {j - i} lines starting from line_id={item.get('line_id')}")
+
+                merged.append(merged_item)
+                i = j
+            else:
+                merged.append(item)
+                i += 1
+
+        original_count = len(items)
+        merged_count = len(merged)
+        if original_count != merged_count:
+            logger.info(f"[MergeLines] Merged {original_count} -> {merged_count} items")
+
+        return merged
+
     def _build_split_result(
         self,
         predictions: List[Dict],
@@ -550,8 +620,10 @@ class InferenceService:
             else:
                 section_nodes[parent_id]["children"].append(sec_node)
 
-        # 按阅读顺序分配 elements（处理 table 展开）
+        # 按阅读顺序分配 elements
         all_items = sorted(predictions, key=lambda x: x.get("line_id", 0))
+
+        # 先建立 line_to_section 映射（在合并之前）
         current_section_id = None
         line_to_section = {}
         for item in all_items:
@@ -559,6 +631,9 @@ class InferenceService:
             if item.get("is_section", False):
                 current_section_id = line_id
             line_to_section[line_id] = current_section_id
+
+        # 合并 fstline + connect paraline（处理段落合并）
+        all_items = self._merge_connected_lines(all_items)
 
         element_seq_no = {}
         table_index_counter = 0  # 全局 table 计数器
