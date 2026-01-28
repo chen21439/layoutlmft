@@ -350,36 +350,54 @@ class InferenceService:
             "data": output_data,
         }
 
-    def _parse_bbox(self, bbox_str: str, page: int = 1) -> Optional[List[Dict]]:
+    def _parse_bbox(self, bbox_str: str, page_str: str = "1") -> Optional[List[Dict]]:
         """
         解析 bbox 字符串为 coordinates 格式
 
+        支持多页表格，bbox 和 page 都可以用 | 分隔：
+        - 单页: bbox="158.00,438.87,477.50,704.28" page="1"
+        - 多页: bbox="90.88,256.88,...|90.88,42.83,..." page="16|17|18"
+
         Args:
-            bbox_str: bbox 字符串，格式如 "158.00,438.87,477.50,704.28"
-            page: 页码，默认为 1
+            bbox_str: bbox 字符串，单页或 | 分隔的多页格式
+            page_str: 页码字符串，单页或 | 分隔的多页格式
 
         Returns:
-            coordinates 列表: [{"page": 1, "x0": 158.0, "y0": 438.87, "x1": 477.5, "y1": 704.28, "coord_origin": "TOPLEFT"}]
+            coordinates 列表，每页一个坐标对象
         """
         if not bbox_str:
             return None
 
         try:
-            parts = bbox_str.replace(' ', ',').split(',')
-            coords = [float(x.strip()) for x in parts if x.strip()]
+            # 处理多页格式
+            bbox_parts = bbox_str.split('|')
+            page_parts = str(page_str).split('|')
 
-            if len(coords) < 4:
-                logger.warning(f"Invalid bbox format: {bbox_str}")
-                return None
+            # 确保 page 数量与 bbox 数量匹配
+            # 如果 page 数量少于 bbox，用最后一个 page 补齐
+            while len(page_parts) < len(bbox_parts):
+                page_parts.append(page_parts[-1])
 
-            return [{
-                "page": page,
-                "x0": coords[0],
-                "y0": coords[1],
-                "x1": coords[2],
-                "y1": coords[3],
-                "coord_origin": "TOPLEFT",
-            }]
+            coordinates = []
+            for i, bbox_part in enumerate(bbox_parts):
+                parts = bbox_part.replace(' ', ',').split(',')
+                coords = [float(x.strip()) for x in parts if x.strip()]
+
+                if len(coords) < 4:
+                    logger.warning(f"Invalid bbox format in part {i}: {bbox_part}")
+                    continue
+
+                page = int(page_parts[i].strip()) if i < len(page_parts) else 1
+                coordinates.append({
+                    "page": page,
+                    "x0": coords[0],
+                    "y0": coords[1],
+                    "x1": coords[2],
+                    "y1": coords[3],
+                    "coord_origin": "TOPLEFT",
+                })
+
+            return coordinates if coordinates else None
         except (ValueError, IndexError) as e:
             logger.warning(f"Failed to parse bbox '{bbox_str}': {e}")
             return None
@@ -418,10 +436,10 @@ class InferenceService:
             # 解析 XML
             root = etree.fromstring(xml_text.encode('utf-8'))
 
-            # 从 <table> 标签获取 bbox 和 page
+            # 从 <table> 标签获取 bbox 和 page（支持多页格式）
             table_bbox = root.get('bbox')
-            table_page = int(root.get('page', '1'))
-            table_coords = self._parse_bbox(table_bbox, table_page) if table_bbox else None
+            table_page_str = root.get('page', '1')
+            table_coords = self._parse_bbox(table_bbox, table_page_str) if table_bbox else None
 
             # 追踪被合并单元格占用的位置: (row, col) -> True
             occupied = {}
