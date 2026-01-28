@@ -388,6 +388,10 @@ class InferenceService:
         """
         解析 table 的 XML text 字段，拆分为多个 td/th 元素
 
+        支持 rowspan/colspan 属性，计算每个单元格的绝对位置:
+        - row_start/row_end: 行范围 (0-based)
+        - col_start/col_end: 列范围 (0-based)
+
         Args:
             xml_text: table 的 XML 内容
             table_index: 当前 table 的序号（全局计数，0-based）
@@ -400,8 +404,12 @@ class InferenceService:
                 "table_index": 0,
                 "row_index": 0,
                 "cell_index": 0,
-                "is_header": True,  # th=True, td=False
-                "coordinates": [{"page": 2, "x0": ..., "y0": ..., ...}],
+                "row_start": 0,
+                "row_end": 0,
+                "col_start": 0,
+                "col_end": 1,  # colspan=2 时
+                "is_header": True,
+                "coordinates": [...],
             }
         """
         cells = []
@@ -415,14 +423,40 @@ class InferenceService:
             table_page = int(root.get('page', '1'))
             table_coords = self._parse_bbox(table_bbox, table_page) if table_bbox else None
 
+            # 追踪被合并单元格占用的位置: (row, col) -> True
+            occupied = {}
+
             # 遍历 <tr> 行
-            for row_idx, tr in enumerate(root.findall('.//tr')):
-                # 直接遍历 tr 的子元素，保持 DOM 顺序
+            rows = root.findall('.//tr')
+            for row_idx, tr in enumerate(rows):
+                # 当前逻辑列索引
+                logical_col = 0
+                # 当前行内的 cell 计数（用于 cell_index）
                 cell_idx = 0
+
                 for cell_elem in tr:
                     # 只处理 th 和 td 标签
                     if cell_elem.tag not in ('th', 'td'):
                         continue
+
+                    # 跳过被上方单元格占用的列
+                    while (row_idx, logical_col) in occupied:
+                        logical_col += 1
+
+                    # 获取 rowspan 和 colspan
+                    rowspan = int(cell_elem.get('rowspan', '1'))
+                    colspan = int(cell_elem.get('colspan', '1'))
+
+                    # 计算绝对位置
+                    row_start = row_idx
+                    row_end = row_idx + rowspan - 1
+                    col_start = logical_col
+                    col_end = logical_col + colspan - 1
+
+                    # 标记占用区域（为后续行预留位置）
+                    for r in range(row_start, row_end + 1):
+                        for c in range(col_start, col_end + 1):
+                            occupied[(r, c)] = True
 
                     is_header = (cell_elem.tag == 'th')
 
@@ -444,7 +478,7 @@ class InferenceService:
 
                     # 如果没有 element_id，生成一个默认的
                     if element_id is None:
-                        element_id = f"t{table_index:03d}-r{row_idx:03d}-c{cell_idx:03d}"
+                        element_id = f"t{table_index:03d}-r{row_idx:03d}-c{logical_col:03d}"
 
                     # 构建 cell 结构
                     cell = {
@@ -453,12 +487,17 @@ class InferenceService:
                         "table_index": table_index,
                         "row_index": row_idx,
                         "cell_index": cell_idx,
+                        "row_start": row_start,
+                        "row_end": row_end,
+                        "col_start": col_start,
+                        "col_end": col_end,
                         "is_header": is_header,
                         "coordinates": table_coords,  # 使用 table 的坐标
                     }
 
                     cells.append(cell)
                     cell_idx += 1
+                    logical_col += colspan  # 移动到下一个逻辑列
 
         except etree.XMLSyntaxError as e:
             logger.error(f"Failed to parse table XML: {e}")
@@ -597,6 +636,10 @@ class InferenceService:
                                 "table_index": cell["table_index"],
                                 "row_index": cell["row_index"],
                                 "cell_index": cell["cell_index"],
+                                "row_start": cell["row_start"],
+                                "row_end": cell["row_end"],
+                                "col_start": cell["col_start"],
+                                "col_end": cell["col_end"],
                                 "is_header": cell["is_header"],
                             }
                             section_nodes[section_id]["elements"].append(element)
