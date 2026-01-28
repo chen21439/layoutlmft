@@ -416,43 +416,48 @@ class InferenceService:
 
             # 遍历 <tr> 行
             for row_idx, tr in enumerate(root.findall('.//tr')):
-                # 遍历 <th> 和 <td> 单元格
+                # 直接遍历 tr 的子元素，保持 DOM 顺序
                 cell_idx = 0
-                for cell_tag in ['th', 'td']:
-                    for cell_elem in tr.findall(f'.//{cell_tag}'):
-                        # 提取所有 <p> 文本
-                        texts = []
-                        p_elements = cell_elem.findall('.//p')
-                        element_id = None
+                for cell_elem in tr:
+                    # 只处理 th 和 td 标签
+                    if cell_elem.tag not in ('th', 'td'):
+                        continue
 
-                        for p in p_elements:
-                            p_id = p.get('id')
-                            if p_id and element_id is None:
-                                element_id = p_id
-                            text = ''.join(p.itertext()).strip()
-                            if text:
-                                texts.append(text)
+                    is_header = (cell_elem.tag == 'th')
 
-                        # 合并文本
-                        full_text = ' '.join(texts)
+                    # 提取所有 <p> 文本
+                    texts = []
+                    p_elements = cell_elem.findall('.//p')
+                    element_id = None
 
-                        # 如果没有 element_id，生成一个默认的
-                        if element_id is None:
-                            element_id = f"t{table_index:03d}-r{row_idx:03d}-c{cell_idx:03d}"
+                    for p in p_elements:
+                        p_id = p.get('id')
+                        if p_id and element_id is None:
+                            element_id = p_id
+                        text = ''.join(p.itertext()).strip()
+                        if text:
+                            texts.append(text)
 
-                        # 构建 cell 结构
-                        cell = {
-                            "element_id": element_id,
-                            "text_preview": full_text[:100] if len(full_text) > 100 else full_text,
-                            "table_index": table_index,
-                            "row_index": row_idx,
-                            "cell_index": cell_idx,
-                            "is_header": (cell_tag == 'th'),
-                            "coordinates": table_coords,  # 使用 table 的坐标
-                        }
+                    # 合并文本
+                    full_text = ' '.join(texts)
 
-                        cells.append(cell)
-                        cell_idx += 1
+                    # 如果没有 element_id，生成一个默认的
+                    if element_id is None:
+                        element_id = f"t{table_index:03d}-r{row_idx:03d}-c{cell_idx:03d}"
+
+                    # 构建 cell 结构
+                    cell = {
+                        "element_id": element_id,
+                        "text_preview": full_text[:100] if len(full_text) > 100 else full_text,
+                        "table_index": table_index,
+                        "row_index": row_idx,
+                        "cell_index": cell_idx,
+                        "is_header": is_header,
+                        "coordinates": table_coords,  # 使用 table 的坐标
+                    }
+
+                    cells.append(cell)
+                    cell_idx += 1
 
         except etree.XMLSyntaxError as e:
             logger.error(f"Failed to parse table XML: {e}")
