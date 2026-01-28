@@ -23,6 +23,7 @@ import logging
 from typing import Dict, List, Optional, Any, Tuple
 
 import torch
+from lxml import etree
 
 # Add project paths
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -348,6 +349,119 @@ class InferenceService:
             "data": output_data,
         }
 
+    def _parse_bbox(self, bbox_str: str, page: int = 1) -> Optional[List[Dict]]:
+        """
+        解析 bbox 字符串为 coordinates 格式
+
+        Args:
+            bbox_str: bbox 字符串，格式如 "158.00,438.87,477.50,704.28"
+            page: 页码，默认为 1
+
+        Returns:
+            coordinates 列表: [{"page": 1, "x0": 158.0, "y0": 438.87, "x1": 477.5, "y1": 704.28, "coord_origin": "TOPLEFT"}]
+        """
+        if not bbox_str:
+            return None
+
+        try:
+            parts = bbox_str.replace(' ', ',').split(',')
+            coords = [float(x.strip()) for x in parts if x.strip()]
+
+            if len(coords) < 4:
+                logger.warning(f"Invalid bbox format: {bbox_str}")
+                return None
+
+            return [{
+                "page": page,
+                "x0": coords[0],
+                "y0": coords[1],
+                "x1": coords[2],
+                "y1": coords[3],
+                "coord_origin": "TOPLEFT",
+            }]
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Failed to parse bbox '{bbox_str}': {e}")
+            return None
+
+    def _parse_table_xml(self, xml_text: str, table_index: int) -> List[Dict]:
+        """
+        解析 table 的 XML text 字段，拆分为多个 td/th 元素
+
+        Args:
+            xml_text: table 的 XML 内容
+            table_index: 当前 table 的序号（全局计数，0-based）
+
+        Returns:
+            拆分后的 cell 列表，每个 cell 包含:
+            {
+                "element_id": "t002-r001-c001-p001",
+                "text_preview": "项目编号：",
+                "table_index": 0,
+                "row_index": 0,
+                "cell_index": 0,
+                "is_header": True,  # th=True, td=False
+                "coordinates": [{"page": 2, "x0": ..., "y0": ..., ...}],
+            }
+        """
+        cells = []
+
+        try:
+            # 解析 XML
+            root = etree.fromstring(xml_text.encode('utf-8'))
+
+            # 从 <table> 标签获取 bbox 和 page
+            table_bbox = root.get('bbox')
+            table_page = int(root.get('page', '1'))
+            table_coords = self._parse_bbox(table_bbox, table_page) if table_bbox else None
+
+            # 遍历 <tr> 行
+            for row_idx, tr in enumerate(root.findall('.//tr')):
+                # 遍历 <th> 和 <td> 单元格
+                cell_idx = 0
+                for cell_tag in ['th', 'td']:
+                    for cell_elem in tr.findall(f'.//{cell_tag}'):
+                        # 提取所有 <p> 文本
+                        texts = []
+                        p_elements = cell_elem.findall('.//p')
+                        element_id = None
+
+                        for p in p_elements:
+                            p_id = p.get('id')
+                            if p_id and element_id is None:
+                                element_id = p_id
+                            text = ''.join(p.itertext()).strip()
+                            if text:
+                                texts.append(text)
+
+                        # 合并文本
+                        full_text = ' '.join(texts)
+
+                        # 如果没有 element_id，生成一个默认的
+                        if element_id is None:
+                            element_id = f"t{table_index:03d}-r{row_idx:03d}-c{cell_idx:03d}"
+
+                        # 构建 cell 结构
+                        cell = {
+                            "element_id": element_id,
+                            "text_preview": full_text[:100] if len(full_text) > 100 else full_text,
+                            "table_index": table_index,
+                            "row_index": row_idx,
+                            "cell_index": cell_idx,
+                            "is_header": (cell_tag == 'th'),
+                            "coordinates": table_coords,  # 使用 table 的坐标
+                        }
+
+                        cells.append(cell)
+                        cell_idx += 1
+
+        except etree.XMLSyntaxError as e:
+            logger.error(f"Failed to parse table XML: {e}")
+            logger.error(f"XML content: {xml_text[:200]}...")
+        except Exception as e:
+            logger.error(f"Unexpected error parsing table XML: {e}")
+
+        return cells
+
     def _build_split_result(
         self,
         predictions: List[Dict],
@@ -431,7 +545,7 @@ class InferenceService:
             else:
                 section_nodes[parent_id]["children"].append(sec_node)
 
-        # 按阅读顺序分配 elements
+        # 按阅读顺序分配 elements（处理 table 展开）
         all_items = sorted(predictions, key=lambda x: x.get("line_id", 0))
         current_section_id = None
         line_to_section = {}
@@ -442,6 +556,9 @@ class InferenceService:
             line_to_section[line_id] = current_section_id
 
         element_seq_no = {}
+        table_index_counter = 0  # 全局 table 计数器
+        global_element_idx = 0
+
         for idx, item in enumerate(all_items):
             line_id = item.get("line_id")
             is_section = item.get("is_section", False)
@@ -449,9 +566,46 @@ class InferenceService:
 
             if section_id is not None and section_id in section_nodes:
                 seq = element_seq_no.get(section_id, 0)
-                element = self._build_element(item, idx, seq)
-                section_nodes[section_id]["elements"].append(element)
-                element_seq_no[section_id] = seq + 1
+
+                # 检查是否是 table 元素
+                item_class = item.get("class", "").lower()
+                if item_class == "table":
+                    # 展开 table 为多个 cell
+                    xml_text = item.get("text", "")
+                    if xml_text.strip().startswith("<table"):
+                        cells = self._parse_table_xml(xml_text, table_index_counter)
+                        for cell in cells:
+                            # 将 cell 转换为 element
+                            element = {
+                                "type": "table_cell",
+                                "text_preview": cell["text_preview"],
+                                "index": global_element_idx,
+                                "element_id": cell["element_id"],
+                                "seq_no": seq,
+                                "coordinates": cell["coordinates"],
+                                "table_index": cell["table_index"],
+                                "row_index": cell["row_index"],
+                                "cell_index": cell["cell_index"],
+                                "is_header": cell["is_header"],
+                            }
+                            section_nodes[section_id]["elements"].append(element)
+                            seq += 1
+                            global_element_idx += 1
+                        table_index_counter += 1
+                    else:
+                        # text 不是 XML，当作普通元素处理
+                        element = self._build_element(item, global_element_idx, seq)
+                        section_nodes[section_id]["elements"].append(element)
+                        seq += 1
+                        global_element_idx += 1
+                else:
+                    # 非 table 元素，正常处理
+                    element = self._build_element(item, global_element_idx, seq)
+                    section_nodes[section_id]["elements"].append(element)
+                    seq += 1
+                    global_element_idx += 1
+
+                element_seq_no[section_id] = seq
 
         # 计算 element_count 和 start_index / end_index
         global_index = [0]
@@ -484,15 +638,25 @@ class InferenceService:
         }
 
     def _build_element(self, line: Dict, index: int, seq_no: int) -> Dict:
-        """构建单个 Element 结构"""
+        """
+        构建单个 Element 结构
+
+        注意：此方法处理非 table 元素，table 元素在 _build_split_result 中直接处理
+        """
         line_id = line.get("line_id", index)
         text = line.get("text", "")
         cls = line.get("class", "")
 
-        is_table_cell = "table_index" in line or cls in ("table", "table_cell")
+        # 判断是否是 table_cell（预处理的 table_index 字段）
+        is_table_cell = "table_index" in line
         element_type = "table_cell" if is_table_cell else "paragraph"
         prefix = "tc" if is_table_cell else "p"
-        element_id = f"{prefix}_{line_id:03d}"
+
+        # element_id：如果是 table_cell 且有预设 element_id，使用它；否则生成
+        if "element_id" in line:
+            element_id = line["element_id"]
+        else:
+            element_id = f"{prefix}_{line_id:03d}"
 
         # 坐标转换
         location = line.get("location")
@@ -518,10 +682,12 @@ class InferenceService:
             "coordinates": coordinates,
         }
 
+        # 添加 table_cell 特有字段
         if is_table_cell:
             element["table_index"] = line.get("table_index", 0)
             element["row_index"] = line.get("row_index", 0)
             element["cell_index"] = line.get("cell_index", 0)
+            element["is_header"] = line.get("is_header", False)
 
         return element
 
