@@ -478,13 +478,10 @@ class InferenceService:
 
                     is_header = (cell_elem.tag == 'th')
 
-                    # 获取单元格自己的 page 和 bbox（优先使用）
+                    # 获取单元格自己的 page 和 bbox
                     cell_bbox = cell_elem.get('bbox')
                     cell_page = cell_elem.get('page', '1')
-                    if cell_bbox:
-                        cell_coords = self._parse_bbox(cell_bbox, cell_page)
-                    else:
-                        cell_coords = table_coords  # fallback 到表格坐标
+                    cell_coords = self._parse_bbox(cell_bbox, cell_page) if cell_bbox else ""
 
                     # 提取所有 <p> 文本
                     texts = []
